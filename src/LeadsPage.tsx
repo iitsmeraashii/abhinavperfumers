@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { supabase } from './supabaseClient';
 import { useAuth } from './AuthContext';
 import {
@@ -197,8 +197,11 @@ interface LeadsPageProps {
 export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageProps) {
   const { user } = useAuth();
 
-  // Initialise all state from URL on first render
-  const init = readParams();
+  // Initialise all state from URL on first render (stable — not recomputed on re-renders)
+  const init = useMemo(readParams, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Track user identity so the reset effect only fires on actual user switches, not remounts
+  const prevUserIdRef = useRef<string | undefined>(undefined);
 
   // Data
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -339,6 +342,14 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
   }, [user]);
 
   useEffect(() => {
+    const userId = user?.rep_code ?? user?.role;
+    // Only reset if the user identity actually changed (not on initial mount or remounts)
+    if (prevUserIdRef.current === undefined) {
+      prevUserIdRef.current = userId;
+      return;
+    }
+    if (prevUserIdRef.current === userId) return;
+    prevUserIdRef.current = userId;
     setPage(0);
     setSearchInput('');
     setSearchTerm('');
