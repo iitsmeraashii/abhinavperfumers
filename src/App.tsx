@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './AuthContext';
 import LoginPage from './LoginPage';
 import LeadsPage from './LeadsPage';
@@ -25,9 +25,21 @@ function Layout() {
   const [leadsEventFilter, setLeadsEventFilter] = useState<string | undefined>(undefined);
   const [followUpModalId, setFollowUpModalId] = useState<string | null>(initialFollowUpId);
 
+  // Sync React state when the browser Back/Forward buttons fire
+  useEffect(() => {
+    function onPopState() {
+      const p = new URLSearchParams(window.location.search);
+      setSelectedLeadId(p.get('lead'));
+      setFollowUpModalId(p.get('followup'));
+    }
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
   function handleSelectLead(id: string) {
     setSelectedLeadId(id);
     setTab('leads');
+    // Preserve all current list params (page, filters, etc.) and add lead=id
     const url = new URL(window.location.href);
     url.searchParams.set('lead', id);
     window.history.pushState({}, '', url.toString());
@@ -35,6 +47,7 @@ function Layout() {
 
   function handleBack() {
     setSelectedLeadId(null);
+    // Remove only the lead param — all list state params remain intact
     const url = new URL(window.location.href);
     url.searchParams.delete('lead');
     window.history.pushState({}, '', url.toString());
@@ -43,8 +56,9 @@ function Layout() {
   function handleTabChange(t: Tab) {
     setTab(t);
     setSelectedLeadId(null);
+    // Clear all params when switching tabs so each tab starts fresh
     const url = new URL(window.location.href);
-    url.searchParams.delete('lead');
+    url.search = '';
     window.history.pushState({}, '', url.toString());
     setLeadsEventFilter(undefined);
   }

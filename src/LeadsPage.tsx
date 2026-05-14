@@ -118,6 +118,77 @@ function SelectField({ label, value, onChange, options, placeholder = 'Any' }: S
   );
 }
 
+// ── URL helpers ──────────────────────────────────────────────────────────────
+
+function readParams(): {
+  page: number;
+  search: string;
+  dateFilter: DateFilter;
+  eventFilter: string;
+  repFilter: string;
+  adv: AdvancedFilters;
+} {
+  const p = new URLSearchParams(window.location.search);
+  const rawPage = parseInt(p.get('page') ?? '1', 10);
+  const page = Number.isFinite(rawPage) && rawPage >= 1 ? rawPage - 1 : 0;
+  const dateRaw = p.get('date');
+  const dateFilter: DateFilter =
+    dateRaw === 'today' || dateRaw === '7days' || dateRaw === '30days' ? dateRaw : null;
+  return {
+    page,
+    search: p.get('search') ?? '',
+    dateFilter,
+    eventFilter: p.get('event') ?? '',
+    repFilter: p.get('rep') ?? '',
+    adv: {
+      leadType: p.get('leadType') ?? '',
+      temperature: p.get('temperature') ?? '',
+      state: p.get('state') ?? '',
+      application: p.get('application') ?? '',
+      leadStatus: p.get('leadStatus') ?? '',
+      dateFrom: p.get('dateFrom') ?? '',
+      dateTo: p.get('dateTo') ?? '',
+    },
+  };
+}
+
+function buildParams(
+  page: number,
+  search: string,
+  dateFilter: DateFilter,
+  eventFilter: string,
+  repFilter: string,
+  adv: AdvancedFilters,
+): URLSearchParams {
+  const p = new URLSearchParams(window.location.search);
+
+  // preserve unrelated params (lead, followup, etc.)
+  const set = (k: string, v: string) => { if (v) p.set(k, v); else p.delete(k); };
+
+  set('page', page > 0 ? String(page + 1) : '');
+  set('search', search);
+  set('date', dateFilter ?? '');
+  set('event', eventFilter);
+  set('rep', repFilter);
+  set('leadType', adv.leadType);
+  set('temperature', adv.temperature);
+  set('state', adv.state);
+  set('application', adv.application);
+  set('leadStatus', adv.leadStatus);
+  set('dateFrom', adv.dateFrom);
+  set('dateTo', adv.dateTo);
+
+  return p;
+}
+
+function pushParams(params: URLSearchParams) {
+  const url = new URL(window.location.href);
+  url.search = params.toString();
+  window.history.replaceState({}, '', url.toString());
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
+
 interface LeadsPageProps {
   onSelectLead: (id: string) => void;
   initialEventCode?: string;
@@ -126,23 +197,27 @@ interface LeadsPageProps {
 export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageProps) {
   const { user } = useAuth();
 
+  // Initialise all state from URL on first render
+  const init = readParams();
+
   // Data
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
-  const [page, setPage] = useState(0);
+  const [page, setPage] = useState(init.page);
   const [total, setTotal] = useState(0);
 
   // Quick filters
-  const [searchInput, setSearchInput] = useState('');
-  const [searchTerm, setSearchTerm] = useState('');
-  const [dateFilter, setDateFilter] = useState<DateFilter>(null);
-  const [eventFilter, setEventFilter] = useState(initialEventCode ?? '');
-  const [repFilter, setRepFilter] = useState('');
+  const [searchInput, setSearchInput] = useState(init.search);
+  const [searchTerm, setSearchTerm] = useState(init.search);
+  const [dateFilter, setDateFilter] = useState<DateFilter>(init.dateFilter);
+  // initialEventCode (from parent Dashboard click) wins over URL param only on first load
+  const [eventFilter, setEventFilter] = useState(initialEventCode ?? init.eventFilter);
+  const [repFilter, setRepFilter] = useState(init.repFilter);
 
   // Advanced filters (draft = what's in the panel, applied = active)
   const [panelOpen, setPanelOpen] = useState(false);
-  const [draft, setDraft] = useState<AdvancedFilters>(EMPTY_ADVANCED);
-  const [applied, setApplied] = useState<AdvancedFilters>(EMPTY_ADVANCED);
+  const [draft, setDraft] = useState<AdvancedFilters>(init.adv);
+  const [applied, setApplied] = useState<AdvancedFilters>(init.adv);
 
   // Dynamic options
   const [events, setEvents] = useState<Event[]>([]);
@@ -160,6 +235,11 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const advancedCount = countActiveAdvanced(applied);
+
+  // Sync state → URL whenever anything changes
+  useEffect(() => {
+    pushParams(buildParams(page, searchTerm, dateFilter, eventFilter, repFilter, applied));
+  }, [page, searchTerm, dateFilter, eventFilter, repFilter, applied]);
 
   // Fetch static option lists
   useEffect(() => {
@@ -228,13 +308,11 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
       query = query.ilike('search_text', `%${term.trim()}%`);
     }
 
-    // Quick date filter
     const quickDateStart = getDateFilterStart(dateFilt);
     if (quickDateStart) query = query.gte('created_at', quickDateStart);
 
     if (eventFilt) query = query.eq('event_code', eventFilt);
 
-    // Advanced filters
     if (adv.leadType) query = query.eq('lead_type', adv.leadType);
     if (adv.temperature) query = query.eq('lead_temperature', adv.temperature);
     if (adv.state) query = query.eq('state', adv.state);
@@ -306,7 +384,6 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
 
     if (error || !data || data.length === 0) return;
 
-    // Build filter summary for CSV comment header
     const filterLines: string[] = [];
     if (searchTerm.trim()) filterLines.push(`Search: ${searchTerm.trim()}`);
     if (dateFilter) filterLines.push(`Date Filter: ${dateFilter}`);
@@ -419,7 +496,6 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     setDraft(prev => ({ ...prev, [key]: value }));
   }
 
-  // Active filter chips for advanced
   const advancedChips: { label: string; key: keyof AdvancedFilters }[] = [
     applied.leadType ? { label: `Type: ${applied.leadType}`, key: 'leadType' } : null,
     applied.temperature ? { label: `Temp: ${applied.temperature}`, key: 'temperature' } : null,
@@ -440,6 +516,15 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
   function formatDate(iso: string) {
     if (!iso) return '—';
     return new Date(iso).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+  }
+
+  // Build the URL for a lead detail link (preserves all current list params)
+  function leadHref(id: string): string {
+    const p = buildParams(page, searchTerm, dateFilter, eventFilter, repFilter, applied);
+    p.set('lead', id);
+    // remove page from the lead detail URL — not needed there
+    // but we keep all filter params so opening in new tab shows the list in context
+    return `?${p.toString()}`;
   }
 
   const rangeStart = total === 0 ? 0 : page * PAGE_SIZE + 1;
@@ -699,17 +784,26 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
                   return (
                     <tr
                       key={lead.id}
-                      onClick={() => onSelectLead(lead.id)}
-                      className={`border-b border-stone-100 last:border-0 cursor-pointer transition-colors ${rowBg}`}
+                      className={`border-b border-stone-100 last:border-0 transition-colors ${rowBg}`}
                     >
-                      <td className="px-4 py-3 font-medium text-stone-800">{lead.client_name || '—'}</td>
-                      <td className="px-4 py-3 text-stone-600">{lead.company || '—'}</td>
-                      <td className="px-4 py-3 text-stone-600">{lead.phone || '—'}</td>
-                      <td className="px-4 py-3 text-stone-600">{lead.event_code || '—'}</td>
-                      <td className="px-4 py-3 text-stone-600">{lead.sales_rep_code || '—'}</td>
-                      <td className="px-4 py-3">{badge(lead.lead_type)}</td>
-                      <td className="px-4 py-3">{badge(lead.lead_temperature, TEMP_COLORS)}</td>
-                      <td className="px-4 py-3 text-stone-500">{formatDate(lead.created_at)}</td>
+                      {/* Entire row is wrapped in an anchor for right-click / cmd-click support.
+                          We intercept left-click to use the SPA callback instead of navigation. */}
+                      <td className="px-4 py-3 font-medium text-stone-800">
+                        <a
+                          href={leadHref(lead.id)}
+                          className="block -mx-4 -my-3 px-4 py-3 cursor-pointer"
+                          onClick={e => { e.preventDefault(); onSelectLead(lead.id); }}
+                        >
+                          {lead.client_name || '—'}
+                        </a>
+                      </td>
+                      <td className="px-4 py-3 text-stone-600 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{lead.company || '—'}</td>
+                      <td className="px-4 py-3 text-stone-600 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{lead.phone || '—'}</td>
+                      <td className="px-4 py-3 text-stone-600 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{lead.event_code || '—'}</td>
+                      <td className="px-4 py-3 text-stone-600 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{lead.sales_rep_code || '—'}</td>
+                      <td className="px-4 py-3 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{badge(lead.lead_type)}</td>
+                      <td className="px-4 py-3 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{badge(lead.lead_temperature, TEMP_COLORS)}</td>
+                      <td className="px-4 py-3 text-stone-500 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{formatDate(lead.created_at)}</td>
                     </tr>
                   );
                 })
@@ -760,18 +854,15 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
         )}
       </div>
 
-      {/* Advanced Filters Panel (slide-in drawer) */}
+      {/* Advanced Filters Panel */}
       {panelOpen && (
         <>
-          {/* Backdrop */}
           <div
             className="fixed inset-0 bg-black/20 z-30 backdrop-blur-[1px]"
             onClick={() => setPanelOpen(false)}
           />
 
-          {/* Drawer */}
           <div className="fixed right-0 top-0 h-full w-80 bg-white shadow-2xl z-40 flex flex-col">
-            {/* Drawer header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100">
               <div className="flex items-center gap-2">
                 <SlidersHorizontal className="w-4 h-4 text-stone-600" />
@@ -785,7 +876,6 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
               </button>
             </div>
 
-            {/* Drawer body */}
             <div className="flex-1 overflow-y-auto px-5 py-5 flex flex-col gap-5">
               <SelectField
                 label="Lead Type"
@@ -835,7 +925,6 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
                 ]}
               />
 
-              {/* Custom date range */}
               <div className="flex flex-col gap-3">
                 <span className="text-xs font-medium text-stone-500 uppercase tracking-wide">Custom Date Range</span>
                 <div className="flex flex-col gap-1">
@@ -859,7 +948,6 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
               </div>
             </div>
 
-            {/* Drawer footer */}
             <div className="px-5 py-4 border-t border-stone-100 flex gap-3">
               <button
                 onClick={clearAdvanced}
