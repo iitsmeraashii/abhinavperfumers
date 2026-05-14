@@ -177,8 +177,11 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     });
 
     supabase.from('leads_list_view').select('application').then(({ data }) => {
-      const unique = [...new Set((data ?? []).map((r: { application: string }) => r.application).filter(Boolean))].sort();
-      setApplicationOptions(unique as string[]);
+      const all = (data ?? []).flatMap((r: { application: string }) =>
+        (r.application ?? '').split(',').map((s: string) => s.trim()).filter(Boolean)
+      );
+      const deduped = [...new Map(all.map((s: string) => [s.toLowerCase(), s])).values()].sort((a, b) => a.localeCompare(b));
+      setApplicationOptions(deduped);
     });
   }, []);
 
@@ -235,7 +238,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     if (adv.leadType) query = query.eq('lead_type', adv.leadType);
     if (adv.temperature) query = query.eq('lead_temperature', adv.temperature);
     if (adv.state) query = query.eq('state', adv.state);
-    if (adv.application) query = query.eq('application', adv.application);
+    if (adv.application) query = query.ilike('application', `%${adv.application}%`);
     if (adv.leadStatus) query = query.eq('lead_status', adv.leadStatus);
     if (adv.dateFrom) query = query.gte('created_at', new Date(adv.dateFrom).toISOString());
     if (adv.dateTo) {
@@ -290,7 +293,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     if (applied.leadType) query = query.eq('lead_type', applied.leadType);
     if (applied.temperature) query = query.eq('lead_temperature', applied.temperature);
     if (applied.state) query = query.eq('state', applied.state);
-    if (applied.application) query = query.eq('application', applied.application);
+    if (applied.application) query = query.ilike('application', `%${applied.application}%`);
     if (applied.dateFrom) query = query.gte('created_at', new Date(applied.dateFrom).toISOString());
     if (applied.dateTo) {
       const end = new Date(applied.dateTo);
