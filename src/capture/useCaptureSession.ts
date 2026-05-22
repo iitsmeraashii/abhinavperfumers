@@ -12,6 +12,7 @@ const IDLE_SESSION: CaptureSession = {
 
 export interface CaptureSessionActions {
   startCapture: (method: CaptureMethod) => void;
+  restoreSession: (saved: CaptureSession) => void;
   setStatus: (status: SessionStatus) => void;
   patchDraft: (patch: Partial<DraftData>) => void;
   resetSession: () => void;
@@ -30,6 +31,11 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
       draftData: {},
       hasUnsavedChanges: false,
     });
+  }, []);
+
+  // Hydrate session from a persisted snapshot — preserves all saved fields
+  const restoreSession = useCallback((saved: CaptureSession) => {
+    setSession(saved);
   }, []);
 
   const setStatus = useCallback((status: SessionStatus) => {
@@ -53,6 +59,13 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
     setSession(IDLE_SESSION);
   }, []);
 
-  const actions: CaptureSessionActions = { startCapture, setStatus, patchDraft, resetSession };
+  const actions: CaptureSessionActions = {
+    startCapture,
+    restoreSession,
+    setStatus,
+    patchDraft,
+    resetSession,
+  };
+
   return [session, actions];
 }

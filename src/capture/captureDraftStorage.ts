@@ -1,0 +1,74 @@
+// Domain-aware draft storage service.
+// Sits between the raw db layer and the React hooks.
+// Swap the db import to migrate to Capacitor SQLite or any other backend.
+
+import { dbGet, dbPut, dbDelete } from './db';
+import type { CaptureSession } from './types';
+
+const STORE = 'drafts';
+const DRAFT_KEY = 'active_capture_draft';
+
+// What we actually persist — a serialisable snapshot of CaptureSession.
+export interface PersistedDraft {
+  id: string;
+  captureMethod: CaptureSession['captureMethod'];
+  sessionStatus: CaptureSession['sessionStatus'];
+  draftData: CaptureSession['draftData'];
+  hasUnsavedChanges: boolean;
+  createdAt: string | null; // ISO string
+  updatedAt: string | null;
+}
+
+function toRecord(session: CaptureSession): PersistedDraft {
+  return {
+    id: DRAFT_KEY,
+    captureMethod: session.captureMethod,
+    sessionStatus: session.sessionStatus,
+    draftData: session.draftData,
+    hasUnsavedChanges: session.hasUnsavedChanges,
+    createdAt: session.createdAt?.toISOString() ?? null,
+    updatedAt: session.updatedAt?.toISOString() ?? null,
+  };
+}
+
+function fromRecord(record: PersistedDraft): CaptureSession {
+  return {
+    captureMethod: record.captureMethod,
+    sessionStatus: record.sessionStatus,
+    draftData: record.draftData ?? {},
+    hasUnsavedChanges: record.hasUnsavedChanges ?? false,
+    createdAt: record.createdAt ? new Date(record.createdAt) : null,
+    updatedAt: record.updatedAt ? new Date(record.updatedAt) : null,
+  };
+}
+
+function isValidDraft(record: unknown): record is PersistedDraft {
+  if (!record || typeof record !== 'object') return false;
+  const r = record as Partial<PersistedDraft>;
+  return (
+    r.id === DRAFT_KEY &&
+    r.captureMethod != null &&
+    r.sessionStatus != null &&
+    typeof r.draftData === 'object'
+  );
+}
+
+export async function saveDraft(session: CaptureSession): Promise<void> {
+  // Only persist sessions that have actual data
+  if (session.sessionStatus === 'IDLE') return;
+  await dbPut(STORE, toRecord(session));
+}
+
+export async function loadDraft(): Promise<CaptureSession | null> {
+  const raw = await dbGet<PersistedDraft>(STORE, DRAFT_KEY);
+  if (!isValidDraft(raw)) return null;
+  try {
+    return fromRecord(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function clearDraft(): Promise<void> {
+  await dbDelete(STORE, DRAFT_KEY);
+}

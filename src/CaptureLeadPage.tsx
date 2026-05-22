@@ -1,19 +1,55 @@
+import { useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
+import { useAutosave } from './capture/useAutosave';
+import { loadDraft, clearDraft } from './capture/captureDraftStorage';
 import { OfflineBanner } from './capture/OfflineBanner';
 import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
 import { CapturePlaceholder } from './capture/CapturePlaceholder';
 import { ManualEntryForm } from './capture/ManualEntryForm';
-import type { CaptureMethod } from './capture/types';
+import type { CaptureMethod, ManualEntryFields } from './capture/types';
 
 export default function CaptureLeadPage() {
   const isOnline = useOnlineStatus();
   const [session, actions] = useCaptureSession();
   const form = useManualEntryForm(actions);
+  const [recoveryToast, setRecoveryToast] = useState<string | null>(null);
+  const recoveryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Autosave fires 700ms after any session change
+  useAutosave(session);
+
+  // On mount: attempt to restore a persisted draft
+  useEffect(() => {
+    loadDraft().then((saved) => {
+      if (!saved || saved.sessionStatus === 'IDLE') return;
+      actions.restoreSession(saved);
+
+      // Hydrate form fields from draftData so inputs aren't blank
+      const d = saved.draftData;
+      const hydratedFields: Partial<ManualEntryFields> = {
+        clientName:  typeof d.clientName  === 'string' ? d.clientName  : '',
+        company:     typeof d.company     === 'string' ? d.company     : '',
+        phone:       typeof d.phone       === 'string' ? d.phone       : '',
+        email:       typeof d.email       === 'string' ? d.email       : '',
+        designation: typeof d.designation === 'string' ? d.designation : '',
+        notes:       typeof d.notes       === 'string' ? d.notes       : '',
+      };
+      form.hydrateFields(hydratedFields);
+
+      setRecoveryToast('Recovered unfinished draft');
+      recoveryTimer.current = setTimeout(() => setRecoveryToast(null), 3000);
+    });
+
+    return () => {
+      if (recoveryTimer.current) clearTimeout(recoveryTimer.current);
+    };
+    // Only run on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleMethodSelect(method: CaptureMethod) {
-    // Reset form state when switching capture methods
     form.handleReset();
     actions.startCapture(method);
   }
@@ -23,11 +59,25 @@ export default function CaptureLeadPage() {
     actions.resetSession();
   }
 
+  async function handleDiscardDraft() {
+    await clearDraft();
+    form.handleReset();
+    actions.resetSession();
+  }
+
   const isCapturing = session.sessionStatus !== 'IDLE';
 
   return (
     <div className="min-h-[calc(100vh-57px)] bg-stone-50 flex flex-col">
       <OfflineBanner visible={!isOnline} />
+
+      {/* Recovery toast */}
+      {recoveryToast && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-4 py-3 rounded-2xl bg-stone-800 text-white text-sm font-medium shadow-lg whitespace-nowrap animate-in">
+          <span className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" />
+          {recoveryToast}
+        </div>
+      )}
 
       <div className="flex-1 w-full max-w-lg mx-auto px-5 pt-10 pb-10 flex flex-col">
 
@@ -47,13 +97,14 @@ export default function CaptureLeadPage() {
           activeMethod={session.captureMethod}
         />
 
-        {/* Active capture view — slides in below picker */}
+        {/* Active capture view */}
         {isCapturing && session.captureMethod === 'MANUAL' && (
           <ManualEntryForm
             session={session}
             isOnline={isOnline}
             form={form}
             onBack={handleBackToOptions}
+            onDiscard={handleDiscardDraft}
           />
         )}
 
