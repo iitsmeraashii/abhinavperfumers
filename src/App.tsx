@@ -8,9 +8,10 @@ import TemplatesPage from './TemplatesPage';
 import EventsPage from './EventsPage';
 import SystemNotificationsPage from './SystemNotificationsPage';
 import FollowUpCompleteModal from './FollowUpCompleteModal';
-import { LogOut, Loader2, LayoutDashboard, List, FileText, CalendarDays, Bell } from 'lucide-react';
+import CaptureLeadPage from './CaptureLeadPage';
+import { LogOut, Loader2, LayoutDashboard, List, FileText, CalendarDays, Bell, PlusCircle } from 'lucide-react';
 
-type Tab = 'dashboard' | 'leads' | 'templates' | 'events' | 'notifications';
+type Tab = 'dashboard' | 'leads' | 'capture' | 'templates' | 'events' | 'notifications';
 
 function Layout() {
   const { user, logout } = useAuth();
@@ -20,7 +21,7 @@ function Layout() {
   const initialLeadId = params.get('lead');
   const initialFollowUpId = params.get('followup');
 
-  const [tab, setTab] = useState<Tab>(isAdmin ? 'dashboard' : 'leads');
+  const [tab, setTab] = useState<Tab>(isAdmin ? 'dashboard' : 'capture');
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(initialLeadId);
   const [leadsEventFilter, setLeadsEventFilter] = useState<string | undefined>(undefined);
   const [followUpModalId, setFollowUpModalId] = useState<string | null>(initialFollowUpId);
@@ -113,6 +114,16 @@ function Layout() {
               <List className="w-4 h-4" />
               Leads
             </button>
+            <button
+              onClick={() => handleTabChange('capture')}
+              className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                ${tab === 'capture'
+                  ? 'border-stone-800 text-stone-900'
+                  : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+            >
+              <PlusCircle className="w-4 h-4" />
+              Capture Lead
+            </button>
             {isAdmin && (
               <button
                 onClick={() => handleTabChange('events')}
@@ -173,7 +184,8 @@ function Layout() {
         {tab === 'events' && isAdmin && !selectedLeadId && <EventsPage onViewLeads={handleViewLeads} />}
         {tab === 'templates' && isAdmin && !selectedLeadId && <TemplatesPage />}
         {tab === 'notifications' && isAdmin && !selectedLeadId && <SystemNotificationsPage />}
-        {(tab === 'leads' || (!isAdmin && tab !== 'leads')) && !selectedLeadId && (
+        {tab === 'capture' && !selectedLeadId && <CaptureLeadPage />}
+        {(tab === 'leads') && !selectedLeadId && (
           <LeadsPage
             key={leadsEventFilter ?? '__all__'}
             onSelectLead={handleSelectLead}
