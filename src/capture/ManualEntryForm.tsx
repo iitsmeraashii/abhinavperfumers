@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import {
   ArrowLeft, User, Building2, Phone, Mail, Briefcase, FileText,
-  CheckCircle2, Wifi, WifiOff, AlertCircle, Trash2, X,
+  CheckCircle2, Wifi, WifiOff, AlertCircle, Trash2,
 } from 'lucide-react';
 import type { CaptureSession } from './types';
 import type { UseManualEntryFormReturn } from './useManualEntryForm';
+import { Toast, DiscardDialog } from './CaptureUI';
 
 const STATUS_LABELS: Record<string, string> = {
   IDLE:             'Idle',
@@ -12,52 +13,6 @@ const STATUS_LABELS: Record<string, string> = {
   DRAFT:            'Draft saved',
   READY_FOR_REVIEW: 'Ready for Review',
 };
-
-// ─── Discard confirmation dialog ──────────────────────────────────────────────
-
-interface DiscardDialogProps {
-  onConfirm: () => void;
-  onCancel: () => void;
-}
-
-function DiscardDialog({ onConfirm, onCancel }: DiscardDialogProps) {
-  return (
-    <>
-      <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4" onClick={onCancel}>
-        <div
-          className="w-full max-w-sm bg-white rounded-2xl shadow-2xl p-6 animate-in fade-in slide-in-from-bottom-4 duration-200"
-          onClick={e => e.stopPropagation()}
-        >
-          <div className="flex items-start gap-3 mb-5">
-            <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center flex-shrink-0">
-              <Trash2 className="w-5 h-5 text-red-600" />
-            </div>
-            <div>
-              <h3 className="text-base font-semibold text-stone-900">Discard Draft?</h3>
-              <p className="mt-1 text-sm text-stone-500 leading-relaxed">
-                This will permanently delete the saved draft and clear all entered data.
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <button
-              onClick={onCancel}
-              className="flex-1 py-3 rounded-xl border border-stone-200 text-sm font-medium text-stone-700 hover:bg-stone-50 transition-colors"
-            >
-              Keep Draft
-            </button>
-            <button
-              onClick={onConfirm}
-              className="flex-1 py-3 rounded-xl bg-red-600 hover:bg-red-700 active:bg-red-800 text-white text-sm font-semibold transition-colors"
-            >
-              Discard
-            </button>
-          </div>
-        </div>
-      </div>
-    </>
-  );
-}
 
 // ─── Reusable field wrapper ───────────────────────────────────────────────────
 
@@ -134,30 +89,6 @@ function SessionStatusBar({ session, isOnline }: StatusBarProps) {
         {isOnline ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
         {isOnline ? 'Online' : 'Offline'}
       </span>
-    </div>
-  );
-}
-
-// ─── Toast ────────────────────────────────────────────────────────────────────
-
-interface ToastProps {
-  message: string | null;
-  isError: boolean;
-}
-
-function Toast({ message, isError }: ToastProps) {
-  if (!message) return null;
-  return (
-    <div
-      className={`fixed bottom-24 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-4 py-3 rounded-2xl shadow-lg text-sm font-medium whitespace-nowrap animate-in
-        ${isError ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-stone-900 text-white'}`}
-      style={{ marginBottom: 'env(safe-area-inset-bottom)' }}
-    >
-      {isError
-        ? <AlertCircle className="w-4 h-4 flex-shrink-0" />
-        : <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
-      }
-      {message}
     </div>
   );
 }
@@ -342,10 +273,10 @@ export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard }: 
         <SessionStatusBar session={session} isOnline={isOnline} />
       </div>
 
-      {/* Toast */}
-      <Toast message={toastMessage} isError={toastIsError} />
+      {/* Portal-rendered toast — viewport-level, never clipped */}
+      <Toast message={toastMessage} isError={toastIsError} position="bottom" />
 
-      {/* Discard confirmation */}
+      {/* Portal-rendered dialog — always viewport-centred */}
       {showDiscardDialog && (
         <DiscardDialog
           onConfirm={handleDiscardConfirm}

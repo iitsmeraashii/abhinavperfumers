@@ -8,6 +8,7 @@ import { OfflineBanner } from './capture/OfflineBanner';
 import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
 import { CapturePlaceholder } from './capture/CapturePlaceholder';
 import { ManualEntryForm } from './capture/ManualEntryForm';
+import { Toast } from './capture/CaptureUI';
 import type { CaptureMethod, ManualEntryFields } from './capture/types';
 
 export default function CaptureLeadPage() {
@@ -26,7 +27,6 @@ export default function CaptureLeadPage() {
       if (!saved || saved.sessionStatus === 'IDLE') return;
       actions.restoreSession(saved);
 
-      // Hydrate form fields from draftData so inputs aren't blank
       const d = saved.draftData;
       const hydratedFields: Partial<ManualEntryFields> = {
         clientName:  typeof d.clientName  === 'string' ? d.clientName  : '',
@@ -39,13 +39,12 @@ export default function CaptureLeadPage() {
       form.hydrateFields(hydratedFields);
 
       setRecoveryToast('Recovered unfinished draft');
-      recoveryTimer.current = setTimeout(() => setRecoveryToast(null), 3000);
+      recoveryTimer.current = setTimeout(() => setRecoveryToast(null), 3200);
     });
 
     return () => {
       if (recoveryTimer.current) clearTimeout(recoveryTimer.current);
     };
-    // Only run on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -71,14 +70,6 @@ export default function CaptureLeadPage() {
     <div className="min-h-[calc(100vh-57px)] bg-stone-50 flex flex-col">
       <OfflineBanner visible={!isOnline} />
 
-      {/* Recovery toast */}
-      {recoveryToast && (
-        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-4 py-3 rounded-2xl bg-stone-800 text-white text-sm font-medium shadow-lg whitespace-nowrap animate-in">
-          <span className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" />
-          {recoveryToast}
-        </div>
-      )}
-
       <div className="flex-1 w-full max-w-lg mx-auto px-5 pt-10 pb-10 flex flex-col">
 
         {/* Header */}
@@ -91,13 +82,11 @@ export default function CaptureLeadPage() {
           </p>
         </div>
 
-        {/* Method picker — always visible so user can switch modes */}
         <CaptureMethodPicker
           onSelect={handleMethodSelect}
           activeMethod={session.captureMethod}
         />
 
-        {/* Active capture view */}
         {isCapturing && session.captureMethod === 'MANUAL' && (
           <ManualEntryForm
             session={session}
@@ -122,6 +111,9 @@ export default function CaptureLeadPage() {
           </p>
         )}
       </div>
+
+      {/* Recovery toast — portal-rendered at top of viewport, safe-area aware */}
+      <Toast message={recoveryToast} position="top" />
     </div>
   );
 }
