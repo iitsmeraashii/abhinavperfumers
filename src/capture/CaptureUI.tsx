@@ -33,10 +33,12 @@ export function Toast({ message, isError = false, position = 'bottom' }: ToastPr
       role="status"
       aria-live="polite"
       className={`
-        fixed left-1/2 -translate-x-1/2 z-[9999]
+        fixed z-[9999]
+        left-4 right-4
+        mx-auto
+        max-w-sm
         ${positionCls}
         flex items-center gap-2
-        max-w-[calc(100vw-32px)] w-max
         px-4 py-3 rounded-2xl shadow-xl
         text-sm font-medium
         animate-in fade-in slide-in-from-bottom-2 duration-200
