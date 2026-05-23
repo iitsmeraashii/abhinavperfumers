@@ -1,49 +1,39 @@
+// Form interaction logic for ManualEntryForm.
+// There is NO local fields state — session.draftData is the single source of truth.
+// Writes go through actions.patchDraft; reads come from session.draftData passed
+// into ManualEntryForm as a prop. This eliminates all hydration race conditions.
+
 import { useState, useCallback, useRef } from 'react';
-import type { ManualEntryFields, ManualEntryErrors } from './types';
+import type { ManualEntryErrors, DraftData, CaptureSession } from './types';
 import type { CaptureSessionActions } from './useCaptureSession';
 import { saveDraft, clearDraft } from './captureDraftStorage';
-import type { CaptureSession } from './types';
 
-const EMPTY: ManualEntryFields = {
-  clientName: '',
-  company: '',
-  phone: '',
-  email: '',
-  designation: '',
-  notes: '',
-};
+export type FormField = 'clientName' | 'company' | 'phone' | 'email' | 'designation' | 'notes';
 
-function validate(fields: ManualEntryFields): ManualEntryErrors {
+function validate(data: DraftData): ManualEntryErrors {
   const errors: ManualEntryErrors = {};
-  if (!fields.clientName.trim()) errors.clientName = 'Name is required';
-  if (!fields.company.trim())    errors.company    = 'Company is required';
-  if (!fields.phone.trim())      errors.phone      = 'Phone is required';
+  if (!String(data.clientName ?? '').trim()) errors.clientName = 'Name is required';
+  if (!String(data.company    ?? '').trim()) errors.company    = 'Company is required';
+  if (!String(data.phone      ?? '').trim()) errors.phone      = 'Phone is required';
   return errors;
 }
 
 export interface UseManualEntryFormReturn {
-  fields: ManualEntryFields;
-  errors: ManualEntryErrors;
-  touched: Partial<Record<keyof ManualEntryFields, boolean>>;
+  touched: Partial<Record<FormField, boolean>>;
   toastMessage: string | null;
   toastIsError: boolean;
-  handleChange: (field: keyof ManualEntryFields, value: string) => void;
-  handleBlur: (field: keyof ManualEntryFields) => void;
+  handleChange: (field: FormField, value: string) => void;
+  handleBlur: (field: FormField) => void;
   handleSaveDraft: (session: CaptureSession) => Promise<void>;
   handleReset: () => void;
-  hydrateFields: (values: Partial<ManualEntryFields>) => void;
-  isValid: boolean;
+  errorsFor: (data: DraftData) => ManualEntryErrors;
 }
 
 export function useManualEntryForm(actions: CaptureSessionActions): UseManualEntryFormReturn {
-  const [fields, setFields] = useState<ManualEntryFields>(EMPTY);
-  const [touched, setTouched] = useState<Partial<Record<keyof ManualEntryFields, boolean>>>({});
+  const [touched, setTouched] = useState<Partial<Record<FormField, boolean>>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastIsError, setToastIsError] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const errors = validate(fields);
-  const isValid = Object.keys(errors).length === 0;
 
   const showToast = useCallback((msg: string, isError = false) => {
     setToastMessage(msg);
@@ -52,34 +42,22 @@ export function useManualEntryForm(actions: CaptureSessionActions): UseManualEnt
     toastTimer.current = setTimeout(() => setToastMessage(null), 2800);
   }, []);
 
-  const handleChange = useCallback((field: keyof ManualEntryFields, value: string) => {
-    setFields(prev => {
-      const next = { ...prev, [field]: value };
-      actions.patchDraft({
-        clientName:  next.clientName,
-        company:     next.company,
-        phone:       next.phone,
-        email:       next.email,
-        designation: next.designation,
-        notes:       next.notes,
-      });
-      return next;
-    });
+  const handleChange = useCallback((field: FormField, value: string) => {
+    actions.patchDraft({ [field]: value });
   }, [actions]);
 
-  const handleBlur = useCallback((field: keyof ManualEntryFields) => {
+  const handleBlur = useCallback((field: FormField) => {
     setTouched(prev => ({ ...prev, [field]: true }));
   }, []);
 
-  // Save Draft: validate → set DRAFT status → persist to IDB
   const handleSaveDraft = useCallback(async (session: CaptureSession) => {
     setTouched({ clientName: true, company: true, phone: true });
-    if (!isValid) {
+    const errors = validate(session.draftData);
+    if (Object.keys(errors).length > 0) {
       showToast('Please fill in the required fields', true);
       return;
     }
     actions.setStatus('DRAFT');
-    // Build the snapshot with DRAFT status for immediate persistence
     const snapshot: CaptureSession = {
       ...session,
       sessionStatus: 'DRAFT',
@@ -88,23 +66,15 @@ export function useManualEntryForm(actions: CaptureSessionActions): UseManualEnt
     };
     await saveDraft(snapshot);
     showToast('Draft saved offline');
-  }, [isValid, actions, showToast]);
+  }, [actions, showToast]);
 
   const handleReset = useCallback(() => {
-    setFields(EMPTY);
     setTouched({});
     setToastMessage(null);
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
 
-  // Hydrate form fields from a restored draft (without triggering patchDraft)
-  const hydrateFields = useCallback((values: Partial<ManualEntryFields>) => {
-    setFields(prev => ({ ...prev, ...values }));
-  }, []);
-
   return {
-    fields,
-    errors,
     touched,
     toastMessage,
     toastIsError,
@@ -112,10 +82,8 @@ export function useManualEntryForm(actions: CaptureSessionActions): UseManualEnt
     handleBlur,
     handleSaveDraft,
     handleReset,
-    hydrateFields,
-    isValid,
+    errorsFor: validate,
   };
 }
 
-// Re-export clearDraft so callers don't need to import captureDraftStorage directly
 export { clearDraft };

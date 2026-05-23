@@ -9,10 +9,9 @@ import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
 import { CapturePlaceholder } from './capture/CapturePlaceholder';
 import { ManualEntryForm } from './capture/ManualEntryForm';
 import { Toast } from './capture/CaptureUI';
-import type { CaptureMethod, ManualEntryFields } from './capture/types';
+import type { CaptureMethod } from './capture/types';
 import type { ParsedContact } from './capture/parseQrPayload';
 
-// Lazy-loaded — the html5-qrcode chunk is only fetched when user taps "Scan QR Code"
 const QrScannerView = lazy(() =>
   import('./capture/QrScannerView').then(m => ({ default: m.QrScannerView })),
 );
@@ -23,39 +22,23 @@ export default function CaptureLeadPage() {
   const form = useManualEntryForm(actions);
   const [recoveryToast, setRecoveryToast] = useState<string | null>(null);
   const recoveryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Tracks whether the QR scanner UI is active. When false with captureMethod===QR
-  // it means the scan completed and we fall through to the manual form.
   const [qrScanning, setQrScanning] = useState(false);
 
   useAutosave(session);
 
-  // Restore a persisted draft on mount. A previously-QR-scanned draft has
-  // captureMethod===MANUAL (we switch it after scan). If somehow a QR draft
-  // persisted with captureMethod===QR, treat it as a manual draft so the
-  // user always lands on the editable form rather than a re-opened scanner.
+  // Restore a persisted draft on mount.
+  // A QR-method session means the scan already completed — treat as MANUAL
+  // so the user lands on the editable form, not the scanner.
   useEffect(() => {
     loadDraft().then((saved) => {
       if (!saved || saved.sessionStatus === 'IDLE') return;
 
-      // Normalise: a persisted QR-method session means we already have the
-      // extracted data; show the form, not the scanner.
       const normalised = saved.captureMethod === 'QR'
         ? { ...saved, captureMethod: 'MANUAL' as CaptureMethod }
         : saved;
 
       actions.restoreSession(normalised);
-
-      const d = normalised.draftData;
-      const hydrated: Partial<ManualEntryFields> = {
-        clientName:  typeof d.clientName  === 'string' ? d.clientName  : '',
-        company:     typeof d.company     === 'string' ? d.company     : '',
-        phone:       typeof d.phone       === 'string' ? d.phone       : '',
-        email:       typeof d.email       === 'string' ? d.email       : '',
-        designation: typeof d.designation === 'string' ? d.designation : '',
-        notes:       typeof d.notes       === 'string' ? d.notes       : '',
-      };
-      form.hydrateFields(hydrated);
+      // No form hydration needed — ManualEntryForm reads directly from session.draftData
 
       setRecoveryToast('Recovered unfinished draft');
       recoveryTimer.current = setTimeout(() => setRecoveryToast(null), 3200);
@@ -68,7 +51,7 @@ export default function CaptureLeadPage() {
   }, []);
 
   function handleMethodSelect(method: CaptureMethod) {
-    form.handleReset();
+    form.handleReset(); // reset touched + toast only
     if (method === 'QR') {
       actions.startCapture('QR');
       setQrScanning(true);
@@ -91,30 +74,22 @@ export default function CaptureLeadPage() {
     setQrScanning(false);
   }
 
-  // Called by QrScannerView when a QR has been decoded.
-  // We use startCaptureWithDraft to atomically set captureMethod=MANUAL and
-  // seed draftData in a single setState — no race between startCapture + patchDraft.
+  // After a successful QR scan: seed the session with extracted data atomically,
+  // then switch to the manual form view. ManualEntryForm reads from session.draftData,
+  // so the fields are immediately populated — no separate hydration step needed.
   function handleQrScanned(parsed: ParsedContact) {
     const draft = parsed.hasData
       ? { ...parsed.fields, rawQr: parsed.raw }
       : { rawQr: parsed.raw };
 
-    // Seed the session with extracted data in one atomic update
     actions.startCaptureWithDraft('MANUAL', draft);
-
-    // Mirror into the form's local field state
-    if (parsed.hasData) {
-      form.hydrateFields(parsed.fields as Partial<ManualEntryFields>);
-    }
-
-    // Switch view: hide scanner, show manual form
+    form.handleReset(); // clear touched/toast state for the new form view
     setQrScanning(false);
   }
 
-  const isCapturing = session.sessionStatus !== 'IDLE';
+  const isCapturing    = session.sessionStatus !== 'IDLE';
   const showQrScanner  = isCapturing && session.captureMethod === 'QR' && qrScanning;
   const showManualForm = isCapturing && session.captureMethod === 'MANUAL';
-  // Placeholder only for genuinely unimplemented methods (BUSINESS_CARD)
   const showPlaceholder = isCapturing && session.captureMethod === 'BUSINESS_CARD';
 
   return (
@@ -123,7 +98,6 @@ export default function CaptureLeadPage() {
 
       <div className="flex-1 w-full max-w-lg mx-auto px-5 pt-10 pb-10 flex flex-col">
 
-        {/* Header — dimmed once a session is active */}
         <div className={`mb-10 transition-opacity duration-200 ${isCapturing ? 'opacity-50' : ''}`}>
           <h1 className="text-2xl font-bold text-stone-900 tracking-tight">Capture New Lead</h1>
           <p className="mt-1.5 text-base text-stone-500 leading-relaxed">

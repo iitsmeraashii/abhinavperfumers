@@ -14,8 +14,6 @@ const STATUS_LABELS: Record<string, string> = {
   READY_FOR_REVIEW: 'Ready for Review',
 };
 
-// ─── Reusable field wrapper ───────────────────────────────────────────────────
-
 interface FieldProps {
   label: string;
   required?: boolean;
@@ -43,8 +41,6 @@ function Field({ label, required, error, touched, children }: FieldProps) {
   );
 }
 
-// ─── Input shared styles ──────────────────────────────────────────────────────
-
 function inputCls(hasError: boolean) {
   return [
     'w-full rounded-xl border px-4 py-3.5 text-base text-stone-900',
@@ -56,8 +52,6 @@ function inputCls(hasError: boolean) {
       : 'border-stone-200 focus:border-stone-400 focus:ring-stone-100 hover:border-stone-300',
   ].join(' ');
 }
-
-// ─── Session status bar ───────────────────────────────────────────────────────
 
 interface StatusBarProps {
   session: CaptureSession;
@@ -93,8 +87,6 @@ function SessionStatusBar({ session, isOnline }: StatusBarProps) {
   );
 }
 
-// ─── Main form ────────────────────────────────────────────────────────────────
-
 interface Props {
   session: CaptureSession;
   isOnline: boolean;
@@ -104,15 +96,25 @@ interface Props {
 }
 
 export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard }: Props) {
-  const { fields, errors, touched, toastMessage, toastIsError, handleChange, handleBlur, handleSaveDraft } = form;
+  const { touched, toastMessage, toastIsError, handleChange, handleBlur, handleSaveDraft, errorsFor } = form;
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
+
+  // Read field values directly from session.draftData — single source of truth
+  const d = session.draftData;
+  const clientName  = String(d.clientName  ?? '');
+  const company     = String(d.company     ?? '');
+  const phone       = String(d.phone       ?? '');
+  const email       = String(d.email       ?? '');
+  const designation = String(d.designation ?? '');
+  const notes       = String(d.notes       ?? '');
+
+  const errors = errorsFor(d);
+  const hasDraftData = !!(clientName || company || phone);
 
   async function handleDiscardConfirm() {
     setShowDiscardDialog(false);
     await onDiscard();
   }
-
-  const hasDraftData = !!(fields.clientName || fields.company || fields.phone);
 
   return (
     <div className="mt-6 animate-in fade-in slide-in-from-bottom-3 duration-300">
@@ -168,7 +170,7 @@ export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard }: 
                 type="text"
                 placeholder="e.g. Rahul Sharma"
                 autoComplete="name"
-                value={fields.clientName}
+                value={clientName}
                 onChange={e => handleChange('clientName', e.target.value)}
                 onBlur={() => handleBlur('clientName')}
                 className={`${inputCls(!!(touched.clientName && errors.clientName))} pl-10`}
@@ -183,7 +185,7 @@ export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard }: 
                 type="text"
                 placeholder="e.g. Acme Retail Pvt Ltd"
                 autoComplete="organization"
-                value={fields.company}
+                value={company}
                 onChange={e => handleChange('company', e.target.value)}
                 onBlur={() => handleBlur('company')}
                 className={`${inputCls(!!(touched.company && errors.company))} pl-10`}
@@ -199,7 +201,7 @@ export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard }: 
                 inputMode="tel"
                 placeholder="+91 98765 43210"
                 autoComplete="tel"
-                value={fields.phone}
+                value={phone}
                 onChange={e => handleChange('phone', e.target.value)}
                 onBlur={() => handleBlur('phone')}
                 className={`${inputCls(!!(touched.phone && errors.phone))} pl-10`}
@@ -221,7 +223,7 @@ export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard }: 
                 inputMode="email"
                 placeholder="e.g. rahul@acme.com"
                 autoComplete="email"
-                value={fields.email}
+                value={email}
                 onChange={e => handleChange('email', e.target.value)}
                 className={`${inputCls(false)} pl-10`}
               />
@@ -235,7 +237,7 @@ export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard }: 
                 type="text"
                 placeholder="e.g. Purchase Manager"
                 autoComplete="organization-title"
-                value={fields.designation}
+                value={designation}
                 onChange={e => handleChange('designation', e.target.value)}
                 className={`${inputCls(false)} pl-10`}
               />
@@ -246,7 +248,7 @@ export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard }: 
             <textarea
               placeholder="e.g. Met at booth 12, interested in oud range..."
               rows={3}
-              value={fields.notes}
+              value={notes}
               onChange={e => handleChange('notes', e.target.value)}
               className={`${inputCls(false)} resize-none leading-relaxed`}
             />
@@ -273,10 +275,8 @@ export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard }: 
         <SessionStatusBar session={session} isOnline={isOnline} />
       </div>
 
-      {/* Portal-rendered toast — viewport-level, never clipped */}
       <Toast message={toastMessage} isError={toastIsError} position="bottom" />
 
-      {/* Portal-rendered dialog — always viewport-centred */}
       {showDiscardDialog && (
         <DiscardDialog
           onConfirm={handleDiscardConfirm}
