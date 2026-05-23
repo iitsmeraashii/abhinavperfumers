@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
@@ -10,6 +10,13 @@ import { CapturePlaceholder } from './capture/CapturePlaceholder';
 import { ManualEntryForm } from './capture/ManualEntryForm';
 import { Toast } from './capture/CaptureUI';
 import type { CaptureMethod, ManualEntryFields } from './capture/types';
+import type { ParsedContact } from './capture/parseQrPayload';
+
+// Lazy-loaded so the html5-qrcode bundle is only fetched when the user
+// actually initiates a QR scan.
+const QrScannerView = lazy(() =>
+  import('./capture/QrScannerView').then(m => ({ default: m.QrScannerView })),
+);
 
 export default function CaptureLeadPage() {
   const isOnline = useOnlineStatus();
@@ -18,7 +25,10 @@ export default function CaptureLeadPage() {
   const [recoveryToast, setRecoveryToast] = useState<string | null>(null);
   const recoveryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Autosave fires 700ms after any session change
+  // QR flow: after a successful scan we switch captureMethod to MANUAL and
+  // pre-fill the form, so the user reviews and edits before saving.
+  const [qrScanning, setQrScanning] = useState(false);
+
   useAutosave(session);
 
   // On mount: attempt to restore a persisted draft
@@ -50,21 +60,54 @@ export default function CaptureLeadPage() {
 
   function handleMethodSelect(method: CaptureMethod) {
     form.handleReset();
-    actions.startCapture(method);
+    if (method === 'QR') {
+      // Start a QR session but show the scanner, not the manual form yet
+      actions.startCapture('QR');
+      setQrScanning(true);
+    } else {
+      actions.startCapture(method);
+      setQrScanning(false);
+    }
   }
 
   function handleBackToOptions() {
     form.handleReset();
     actions.resetSession();
+    setQrScanning(false);
   }
 
   async function handleDiscardDraft() {
     await clearDraft();
     form.handleReset();
     actions.resetSession();
+    setQrScanning(false);
+  }
+
+  // Called by QrScannerView when a QR has been decoded
+  function handleQrScanned(parsed: ParsedContact) {
+    setQrScanning(false);
+
+    // Switch to MANUAL method so ManualEntryForm renders
+    actions.startCapture('MANUAL');
+
+    // Hydrate form with whatever was extracted
+    if (parsed.hasData) {
+      form.hydrateFields(parsed.fields);
+      // Also patch the session draftData so autosave picks it up
+      actions.patchDraft({
+        ...parsed.fields,
+        rawQr: parsed.raw,
+      });
+    } else {
+      // QR decoded but no contact fields — patch raw only
+      actions.patchDraft({ rawQr: parsed.raw });
+    }
   }
 
   const isCapturing = session.sessionStatus !== 'IDLE';
+  const showQrScanner = isCapturing && session.captureMethod === 'QR' && qrScanning;
+  const showManualForm = isCapturing && session.captureMethod === 'MANUAL';
+  const showPlaceholder = isCapturing && !showQrScanner && !showManualForm;
 
   return (
     <div className="min-h-[calc(100vh-57px)] bg-stone-50 flex flex-col">
@@ -87,7 +130,20 @@ export default function CaptureLeadPage() {
           activeMethod={session.captureMethod}
         />
 
-        {isCapturing && session.captureMethod === 'MANUAL' && (
+        {showQrScanner && (
+          <Suspense fallback={
+            <div className="mt-6 flex items-center justify-center py-16 text-stone-400 text-sm">
+              Loading scanner…
+            </div>
+          }>
+            <QrScannerView
+              onScanned={handleQrScanned}
+              onCancel={handleBackToOptions}
+            />
+          </Suspense>
+        )}
+
+        {showManualForm && (
           <ManualEntryForm
             session={session}
             isOnline={isOnline}
@@ -97,7 +153,7 @@ export default function CaptureLeadPage() {
           />
         )}
 
-        {isCapturing && session.captureMethod !== 'MANUAL' && (
+        {showPlaceholder && (
           <CapturePlaceholder
             session={session}
             isOnline={isOnline}
