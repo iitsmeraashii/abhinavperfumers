@@ -2,6 +2,28 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Strip all html5-qrcode default chrome when mounted inside .qr-clean-mount.
+ * We render our own scan guides, so every library-injected UI element is hidden.
+ */
+.qr-clean-mount > div { width: 100% !important; height: 100% !important; }
+.qr-clean-mount video { width: 100% !important; height: 100% !important; object-fit: cover; }
+/* Library scan region border + shaded overlay */
+#qr-shaded-region,
+.qr-clean-mount [id^="qr-shaded-region"] { display: none !important; }
+/* Dashboard / controls injected below the video */
+.qr-clean-mount #html5-qrcode-anchor-scan-type-change,
+.qr-clean-mount #html5-qrcode-button-camera-start,
+.qr-clean-mount #html5-qrcode-button-camera-stop,
+.qr-clean-mount #html5-qrcode-button-file-selection,
+.qr-clean-mount span[id^="html5-qrcode"],
+.qr-clean-mount img[id^="html5-qrcode"],
+.qr-clean-mount select[id^="html5-qrcode"],
+.qr-clean-mount div[id^="html5-qrcode-section"] { display: none !important; }
+/* Any remaining text nodes / info divs */
+.qr-clean-mount #html5-qrcode-header-message,
+.qr-clean-mount #html5-qrcode-status { display: none !important; }
+
 /* Safe-area aware bottom nav spacing */
 .pb-mobile-nav {
   padding-bottom: calc(3.75rem + env(safe-area-inset-bottom));
