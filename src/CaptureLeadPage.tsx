@@ -9,6 +9,7 @@ import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
 import { CapturePlaceholder } from './capture/CapturePlaceholder';
 import { ManualEntryForm } from './capture/ManualEntryForm';
 import { Toast } from './capture/CaptureUI';
+import { CaptureDebugPanel } from './capture/CaptureDebugPanel';
 import type { CaptureMethod } from './capture/types';
 import type { ParsedContact } from './capture/parseQrPayload';
 
@@ -23,6 +24,7 @@ export default function CaptureLeadPage() {
   const [recoveryToast, setRecoveryToast] = useState<string | null>(null);
   const recoveryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [qrScanning, setQrScanning] = useState(false);
+  const [lastScan, setLastScan] = useState<ParsedContact | null>(null);
 
   useAutosave(session);
 
@@ -82,6 +84,16 @@ export default function CaptureLeadPage() {
       ? { ...parsed.fields, rawQr: parsed.raw }
       : { rawQr: parsed.raw };
 
+    if (import.meta.env.DEV) {
+      console.group('[QR Scan Result]');
+      console.log('raw:', parsed.raw);
+      console.log('hasData:', parsed.hasData);
+      console.log('parsed.fields:', parsed.fields);
+      console.log('draft to seed:', draft);
+      console.groupEnd();
+    }
+
+    setLastScan(parsed);
     actions.startCaptureWithDraft('MANUAL', draft);
     form.handleReset(); // clear touched/toast state for the new form view
     setQrScanning(false);
@@ -151,6 +163,19 @@ export default function CaptureLeadPage() {
       </div>
 
       <Toast message={recoveryToast} position="top" />
+
+      {import.meta.env.DEV && (
+        <div className="w-full max-w-lg mx-auto px-5 pb-10">
+          <CaptureDebugPanel
+            session={session}
+            lastScan={lastScan}
+            qrScanning={qrScanning}
+          />
+        </div>
+      )}
     </div>
   );
 }
+
+
+export default CaptureLeadPage
