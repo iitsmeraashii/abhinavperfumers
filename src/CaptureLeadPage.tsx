@@ -78,36 +78,48 @@ export default function CaptureLeadPage() {
     setQrScanning(false);
   }
 
-  // After a successful QR scan: seed the session with extracted data atomically,
-  // then switch to the manual form view. ManualEntryForm reads from session.draftData,
-  // so the fields are immediately populated — no separate hydration step needed.
+  // After a successful QR scan: normalize parsed fields into the exact DraftData
+  // key shape, then seed the session atomically. ManualEntryForm reads from
+  // session.draftData directly so fields appear immediately without a hydration step.
   function handleQrScanned(parsed: ParsedContact) {
     addEntry('QR scanned — raw text received', parsed.raw);
-    addEntry('Parsing started');
     addEntry('Parsing completed', { hasData: parsed.hasData, fields: parsed.fields });
 
-    const draft = parsed.hasData
-      ? { ...parsed.fields, rawQr: parsed.raw }
-      : { rawQr: parsed.raw };
+    // Explicit normalization: never assume parser key names match DraftData keys.
+    const f = parsed.fields;
+    const mappedDraft = {
+      clientName:  String(f.clientName  ?? '').trim() || undefined,
+      company:     String(f.company     ?? '').trim() || undefined,
+      phone:       String(f.phone       ?? '').trim() || undefined,
+      email:       String(f.email       ?? '').trim() || undefined,
+      designation: String(f.designation ?? '').trim() || undefined,
+      notes:       String(f.notes       ?? '').trim() || undefined,
+      rawQr:       parsed.raw,
+    };
 
-    addEntry('draft object built', draft);
+    // Strip undefined keys so draftData stays clean
+    const draft = Object.fromEntries(
+      Object.entries(mappedDraft).filter(([, v]) => v !== undefined),
+    );
 
-    if (import.meta.env.DEV) {
-      console.group('[QR Scan Result]');
-      console.log('raw:', parsed.raw);
-      console.log('hasData:', parsed.hasData);
-      console.log('parsed.fields:', parsed.fields);
-      console.log('draft to seed:', draft);
-      console.groupEnd();
-    }
+    addEntry('draft object built (explicit mapping)', draft);
+
+    console.group('[QR Scan] handleQrScanned');
+    console.log('raw QR text:', parsed.raw);
+    console.log('parsed object:', parsed);
+    console.log('parsed.fields:', parsed.fields);
+    console.log('mapped draft:', draft);
+    console.groupEnd();
 
     setLastScan(parsed);
     addEntry('startCaptureWithDraft called', { method: 'MANUAL', draftKeys: Object.keys(draft) });
     actions.startCaptureWithDraft('MANUAL', draft);
 
+    console.log('[QR Scan] session.draftData should now be:', draft);
+    addEntry('Form view triggered — captureMethod MANUAL, qrScanning false');
+
     form.handleReset();
     setQrScanning(false);
-    addEntry('Form view triggered — captureMethod set to MANUAL');
   }
 
   const isCapturing    = session.sessionStatus !== 'IDLE';
