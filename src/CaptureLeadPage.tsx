@@ -176,6 +176,3 @@ export default function CaptureLeadPage() {
     </div>
   );
 }
-
-
-export default CaptureLeadPage
