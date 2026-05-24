@@ -24,6 +24,10 @@ function getSuccessLabel(result: ParsedContact): string {
 }
 
 function getSuccessSubtext(result: ParsedContact): string | null {
+  // Heuristic extraction — prompt user to review inferred values
+  if (result.extractionStrategy === 'heuristic' && result.hasData) {
+    return 'Some details were inferred from QR text. Please review.';
+  }
   if (result.hasData) return null;
   switch (result.qrType as QrContentType) {
     case 'url':       return 'This QR contains a website link.';

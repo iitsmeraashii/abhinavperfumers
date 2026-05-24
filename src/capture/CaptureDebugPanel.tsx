@@ -262,14 +262,58 @@ function DebugOverlay({ session, lastScan, qrScanning, log, onClose, onClearLog 
               <JsonBlock value={d} />
             </Section>
 
-            {/* Parsed field mapping */}
+            {/* Extraction strategy + parsed field mapping */}
             {lastScan && (
-              <Section title="Parsed field mapping" defaultOpen>
+              <Section title="Extraction result" defaultOpen>
+
+                {/* Strategy / confidence banner */}
+                <div className="flex flex-wrap gap-2 mb-3">
+                  <span style={{ fontSize: 10, fontFamily: 'monospace' }} className={[
+                    'rounded-full px-2 py-0.5 font-bold uppercase',
+                    lastScan.extractionStrategy === 'vcard' || lastScan.extractionStrategy === 'mecard'
+                      ? 'bg-teal-900 text-teal-300'
+                      : lastScan.extractionStrategy === 'heuristic'
+                      ? 'bg-amber-900 text-amber-300'
+                      : lastScan.extractionStrategy === 'url'
+                      ? 'bg-sky-900 text-sky-300'
+                      : 'bg-stone-700 text-stone-400',
+                  ].join(' ')}>
+                    {lastScan.extractionStrategy}
+                  </span>
+                  <span style={{ fontSize: 10, fontFamily: 'monospace' }} className={[
+                    'rounded-full px-2 py-0.5 font-bold uppercase',
+                    lastScan.confidence === 'high'   ? 'bg-green-900 text-green-300' :
+                    lastScan.confidence === 'medium' ? 'bg-yellow-900 text-yellow-300' :
+                                                       'bg-red-900 text-red-300',
+                  ].join(' ')}>
+                    {lastScan.confidence} confidence
+                  </span>
+                  <span style={{ fontSize: 10, fontFamily: 'monospace' }} className="rounded-full px-2 py-0.5 bg-stone-700 text-stone-300">
+                    {lastScan.qrType}
+                  </span>
+                </div>
+
+                {/* Field mapping rows */}
                 <MappingRow from="parsed.fields.clientName"  to="draftData.clientName"  value={lastScan.fields.clientName} />
                 <MappingRow from="parsed.fields.company"     to="draftData.company"     value={lastScan.fields.company} />
                 <MappingRow from="parsed.fields.phone"       to="draftData.phone"       value={lastScan.fields.phone} />
                 <MappingRow from="parsed.fields.email"       to="draftData.email"       value={lastScan.fields.email} />
                 <MappingRow from="parsed.fields.designation" to="draftData.designation" value={lastScan.fields.designation} />
+
+                {/* Ignored / noise lines */}
+                {lastScan.ignoredLines.length > 0 && (
+                  <div className="mt-3 pt-2 border-t border-stone-800">
+                    <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 mb-1 uppercase tracking-wider">
+                      Noise lines ({lastScan.ignoredLines.length})
+                    </div>
+                    {lastScan.ignoredLines.map((line, i) => (
+                      <div key={i} style={{ fontSize: 11, fontFamily: 'monospace' }} className="text-red-400 break-all py-0.5">
+                        — {line}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div className="mt-2 pt-2 border-t border-stone-800">
                   <div style={{ fontSize: 11 }} className="text-stone-500">
                     hasData: <span className={lastScan.hasData ? 'text-green-400' : 'text-red-400'}>{String(lastScan.hasData)}</span>
