@@ -11,7 +11,7 @@ import { ManualEntryForm } from './capture/ManualEntryForm';
 import { BusinessCardCapture } from './capture/BusinessCardCapture';
 import { Toast } from './capture/CaptureUI';
 import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
-import type { CaptureMethod, BusinessCardAsset, OcrResult } from './capture/types';
+import type { CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus } from './capture/types';
 import type { ParsedContact } from './capture/parseQrPayload';
 
 const QrScannerView = lazy(() =>
@@ -31,6 +31,14 @@ export default function CaptureLeadPage() {
   const [cardSessionId, setCardSessionId] = useState<string>('');
   const [cardAssets, setCardAssets] = useState<{ front: BusinessCardAsset | null; back: BusinessCardAsset | null }>({ front: null, back: null });
   const [lastOcrResult, setLastOcrResult] = useState<OcrResult | null>(null);
+
+  // Live OCR state surfaced from BusinessCardCapture for the debug panel
+  const [ocrDebug, setOcrDebug] = useState<{
+    status: 'idle' | 'processing' | 'done' | 'error';
+    progress: number;
+    progressLabel: string;
+    error: string | null;
+  }>({ status: 'idle', progress: 0, progressLabel: '', error: null });
 
   // Keep a stable ref to addEntry so useCallback deps stay minimal
   const addEntryRef = useRef(addEntry);
@@ -76,6 +84,9 @@ export default function CaptureLeadPage() {
       const sid = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       setCardSessionId(sid);
       setCardAssets({ front: null, back: null });
+      setOcrDebug({ status: 'idle', progress: 0, progressLabel: '', error: null });
+      setLastOcrResult(null);
+      addEntryRef.current('Business card capture session started', { cardSessionId: sid });
       actions.startCaptureWithDraft('BUSINESS_CARD', { cardSessionId: sid });
       setQrScanning(false);
     } else {
@@ -161,22 +172,56 @@ export default function CaptureLeadPage() {
 
   const handleOcrResult = useCallback((result: OcrResult) => {
     setLastOcrResult(result);
+    setOcrDebug({ status: 'done', progress: 1, progressLabel: 'Done', error: null });
+
     addEntryRef.current('OCR completed', {
       assetId: result.assetId,
       confidence: result.confidence,
       inferredFields: result.inferredFields,
-      rawText: result.rawText.slice(0, 200),
+      rawTextLength: result.rawText.length,
+      rawTextPreview: result.rawText.slice(0, 300),
     });
+
+    addEntryRef.current('OCR parsed fields', {
+      clientName:  result.fields.clientName  ?? '(empty)',
+      company:     result.fields.company     ?? '(empty)',
+      phone:       result.fields.phone       ?? '(empty)',
+      email:       result.fields.email       ?? '(empty)',
+      designation: result.fields.designation ?? '(empty)',
+    });
+
+    if (result.inferredFields.length === 0) {
+      addEntryRef.current('OCR warning — no fields inferred from raw text', {
+        rawText: result.rawText,
+        ignoredLines: result.ignoredLines,
+      }, 'warn');
+    }
+
+    if (!result.rawText || result.rawText.trim().length === 0) {
+      addEntryRef.current('OCR error — empty raw text returned by Tesseract', undefined, 'error');
+    }
+
     // Store raw text in draft for debugging/future enrichment
     actions.patchDraft({ ocrRawText: result.rawText });
+    addEntryRef.current('draftData patched with ocrRawText', { length: result.rawText.length });
   }, [actions]);
 
   const handleCardComplete = useCallback((frontAssetId: string, backAssetId: string | null, ocrResult: OcrResult | null) => {
-    addEntryRef.current('Business card capture complete', { frontAssetId, backAssetId, hasOcr: !!ocrResult });
+    addEntryRef.current('Business card capture complete — Continue pressed', {
+      frontAssetId,
+      backAssetId,
+      hasOcrResult: !!ocrResult,
+      hasLastOcrResult: !!lastOcrResult,
+    });
 
     // Build draft by merging OCR fields — only populate fields that are empty
     // so manually typed values are never overwritten by OCR.
     const ocr = ocrResult ?? lastOcrResult;
+
+    if (!ocr) {
+      addEntryRef.current('OCR warning — no OCR result available at Continue time', undefined, 'warn');
+    }
+
     const ocrFields = ocr ? {
       clientName:  ocr.fields.clientName  || undefined,
       company:     ocr.fields.company     || undefined,
@@ -191,6 +236,14 @@ export default function CaptureLeadPage() {
       Object.entries(ocrFields).filter(([, v]) => v !== undefined),
     );
 
+    addEntryRef.current('OCR field mapping — cleanOcr object', cleanOcr);
+
+    const existingDraftKeys = Object.keys(session.draftData).filter(k => {
+      const v = session.draftData[k];
+      return v !== undefined && v !== null && v !== '';
+    });
+    addEntryRef.current('Existing draftData keys (will override OCR)', existingDraftKeys);
+
     const newDraft = {
       ...cleanOcr,                      // OCR fields as base
       ...session.draftData,             // existing draft overrides (preserves manual edits)
@@ -200,10 +253,19 @@ export default function CaptureLeadPage() {
       ocrRawText:       ocr?.rawText,
     };
 
-    addEntryRef.current('Transitioning to form with OCR-seeded draft', { draftKeys: Object.keys(newDraft) });
+    addEntryRef.current('draftData updated — transitioning to manual form', {
+      draftKeys: Object.keys(newDraft),
+      clientName:  newDraft.clientName  ?? '(empty)',
+      company:     newDraft.company     ?? '(empty)',
+      phone:       newDraft.phone       ?? '(empty)',
+      email:       newDraft.email       ?? '(empty)',
+      designation: newDraft.designation ?? '(empty)',
+    });
 
     // Transition to MANUAL form so user can review/edit
     actions.startCaptureWithDraft('MANUAL', newDraft);
+
+    addEntryRef.current('Manual entry form rendered — captureMethod: MANUAL');
   }, [actions, session.draftData, cardSessionId, lastOcrResult]);
 
   const isCapturing      = session.sessionStatus !== 'IDLE';
@@ -262,6 +324,8 @@ export default function CaptureLeadPage() {
             onBack={handleBackToOptions}
             onAssetsChanged={handleCardAssetsChanged}
             onOcrResult={handleOcrResult}
+            onOcrStateChange={(s) => setOcrDebug(s as typeof ocrDebug)}
+            onDebugLog={(step, detail, level) => addEntry(step, detail, level)}
           />
         )}
 
@@ -281,6 +345,10 @@ export default function CaptureLeadPage() {
         cardAssets={cardAssets}
         cardSessionId={cardSessionId}
         lastOcrResult={lastOcrResult}
+        ocrStatus={ocrDebug.status as OcrStatus}
+        ocrProgress={ocrDebug.progress}
+        ocrProgressLabel={ocrDebug.progressLabel}
+        ocrError={ocrDebug.error}
         log={log}
         onClearLog={clearLog}
       />

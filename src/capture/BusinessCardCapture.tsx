@@ -29,6 +29,8 @@ interface Props {
   onBack: () => void;
   onAssetsChanged?: (front: BusinessCardAsset | null, back: BusinessCardAsset | null) => void;
   onOcrResult?: (result: OcrResult) => void;
+  onOcrStateChange?: (state: { status: string; progress: number; progressLabel: string; error: string | null }) => void;
+  onDebugLog?: (step: string, detail?: unknown, level?: 'info' | 'warn' | 'error') => void;
 }
 
 // ─── Full-screen camera sheet ─────────────────────────────────────────────────
@@ -351,7 +353,7 @@ function PreviewCard({
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function BusinessCardCapture({
-  session, sessionId, onComplete, onBack, onAssetsChanged, onOcrResult,
+  session, sessionId, onComplete, onBack, onAssetsChanged, onOcrResult, onOcrStateChange, onDebugLog,
 }: Props) {
   const [front, setFront] = useState<CardState>({ asset: null, status: 'empty' });
   const [back,  setBack]  = useState<CardState>({ asset: null, status: 'empty' });
@@ -360,6 +362,16 @@ export function BusinessCardCapture({
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { ocrState, runOcr, cancelOcr, resetOcr } = useOcr();
+
+  // Propagate live OCR state to parent for debug panel
+  useEffect(() => {
+    onOcrStateChange?.({
+      status: ocrState.status,
+      progress: ocrState.progress,
+      progressLabel: ocrState.progressLabel,
+      error: ocrState.error,
+    });
+  }, [ocrState.status, ocrState.progress, ocrState.progressLabel, ocrState.error, onOcrStateChange]);
 
   function showToast(msg: string, isError = false) {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -424,16 +436,52 @@ export function BusinessCardCapture({
 
       // Auto-run OCR on the front side image
       if (side === 'front') {
+        onDebugLog?.('image captured — front side saved to IndexedDB', {
+          assetId: asset.id,
+          sizeBytes: asset.sizeBytes,
+          dims: `${asset.storedWidth}×${asset.storedHeight}`,
+          originalDims: `${asset.originalWidth}×${asset.originalHeight}`,
+        });
+        onDebugLog?.('OCR started — loading Tesseract engine');
+
         const result = await runOcr(asset.id, asset.dataUrl);
+
         if (result) {
+          onDebugLog?.('OCR completed — raw text received', {
+            rawTextLength: result.rawText.length,
+            rawTextPreview: result.rawText.slice(0, 200),
+          });
+          onDebugLog?.('heuristic parsing completed', {
+            confidence: result.confidence,
+            inferredFields: result.inferredFields,
+            fields: result.fields,
+            ignoredLinesCount: result.ignoredLines.length,
+          });
+          if (result.inferredFields.length === 0) {
+            onDebugLog?.('OCR warning — parser inferred 0 fields', {
+              rawText: result.rawText,
+              ignoredLines: result.ignoredLines,
+            }, 'warn');
+          }
+          if (!result.rawText.trim()) {
+            onDebugLog?.('OCR error — Tesseract returned empty text', undefined, 'error');
+          }
           onOcrResult?.(result);
+        } else {
+          onDebugLog?.('OCR failed or was cancelled — result is null', undefined, 'error');
         }
+      } else {
+        onDebugLog?.('image captured — back side saved to IndexedDB', {
+          assetId: asset.id,
+          sizeBytes: asset.sizeBytes,
+        });
       }
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save image';
       setState({ asset: null, status: 'error', errorMsg: msg });
       showToast(msg, true);
+      onDebugLog?.(`OCR error — ${msg}`, { side }, 'error');
     }
   }
 
