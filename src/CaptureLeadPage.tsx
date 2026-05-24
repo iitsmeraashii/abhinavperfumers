@@ -9,7 +9,7 @@ import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
 import { CapturePlaceholder } from './capture/CapturePlaceholder';
 import { ManualEntryForm } from './capture/ManualEntryForm';
 import { Toast } from './capture/CaptureUI';
-import { CaptureDebugPanel } from './capture/CaptureDebugPanel';
+import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
 import type { CaptureMethod } from './capture/types';
 import type { ParsedContact } from './capture/parseQrPayload';
 
@@ -26,6 +26,8 @@ export default function CaptureLeadPage() {
   const [qrScanning, setQrScanning] = useState(false);
   const [lastScan, setLastScan] = useState<ParsedContact | null>(null);
 
+  const { log, addEntry, clearLog } = useDebugLog();
+
   useAutosave(session);
 
   // Restore a persisted draft on mount.
@@ -40,7 +42,6 @@ export default function CaptureLeadPage() {
         : saved;
 
       actions.restoreSession(normalised);
-      // No form hydration needed — ManualEntryForm reads directly from session.draftData
 
       setRecoveryToast('Recovered unfinished draft');
       recoveryTimer.current = setTimeout(() => setRecoveryToast(null), 3200);
@@ -53,8 +54,9 @@ export default function CaptureLeadPage() {
   }, []);
 
   function handleMethodSelect(method: CaptureMethod) {
-    form.handleReset(); // reset touched + toast only
+    form.handleReset();
     if (method === 'QR') {
+      addEntry('QR scanner opened');
       actions.startCapture('QR');
       setQrScanning(true);
     } else {
@@ -80,9 +82,15 @@ export default function CaptureLeadPage() {
   // then switch to the manual form view. ManualEntryForm reads from session.draftData,
   // so the fields are immediately populated — no separate hydration step needed.
   function handleQrScanned(parsed: ParsedContact) {
+    addEntry('QR scanned — raw text received', parsed.raw);
+    addEntry('Parsing started');
+    addEntry('Parsing completed', { hasData: parsed.hasData, fields: parsed.fields });
+
     const draft = parsed.hasData
       ? { ...parsed.fields, rawQr: parsed.raw }
       : { rawQr: parsed.raw };
+
+    addEntry('draft object built', draft);
 
     if (import.meta.env.DEV) {
       console.group('[QR Scan Result]');
@@ -94,9 +102,12 @@ export default function CaptureLeadPage() {
     }
 
     setLastScan(parsed);
+    addEntry('startCaptureWithDraft called', { method: 'MANUAL', draftKeys: Object.keys(draft) });
     actions.startCaptureWithDraft('MANUAL', draft);
-    form.handleReset(); // clear touched/toast state for the new form view
+
+    form.handleReset();
     setQrScanning(false);
+    addEntry('Form view triggered — captureMethod set to MANUAL');
   }
 
   const isCapturing    = session.sessionStatus !== 'IDLE';
@@ -165,13 +176,13 @@ export default function CaptureLeadPage() {
       <Toast message={recoveryToast} position="top" />
 
       {import.meta.env.DEV && (
-        <div className="w-full max-w-lg mx-auto px-5 pb-10">
-          <CaptureDebugPanel
-            session={session}
-            lastScan={lastScan}
-            qrScanning={qrScanning}
-          />
-        </div>
+        <CaptureDebugPanel
+          session={session}
+          lastScan={lastScan}
+          qrScanning={qrScanning}
+          log={log}
+          onClearLog={clearLog}
+        />
       )}
     </div>
   );
