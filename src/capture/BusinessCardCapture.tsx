@@ -139,9 +139,10 @@ interface OcrBannerProps {
   result: OcrResult | null;
   error: string | null;
   onDismiss: () => void;
+  onRetry?: () => void;
 }
 
-function OcrBanner({ status, progress, progressLabel, result, error, onDismiss }: OcrBannerProps) {
+function OcrBanner({ status, progress, progressLabel, result, error, onDismiss, onRetry }: OcrBannerProps) {
   if (status === 'processing') {
     return (
       <div className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3.5 flex items-center gap-3">
@@ -164,13 +165,31 @@ function OcrBanner({ status, progress, progressLabel, result, error, onDismiss }
 
   if (status === 'error') {
     return (
-      <div className="rounded-2xl bg-red-50 border border-red-200 px-4 py-3.5 flex items-start gap-3">
-        <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-red-800">OCR extraction failed</p>
-          <p className="text-xs text-red-600 mt-0.5 leading-relaxed">{error ?? 'Could not read card text. You can still fill in details manually.'}</p>
+      <div className="rounded-2xl bg-red-50 border border-red-200 px-4 py-3.5">
+        <div className="flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-red-800">OCR extraction failed</p>
+            <p className="text-xs text-red-600 mt-0.5 leading-relaxed">
+              {error ?? 'Could not read card text. You can still fill in details manually.'}
+            </p>
+          </div>
+          <button onClick={onDismiss} className="text-red-400 hover:text-red-600 flex-shrink-0 text-xs font-medium ml-1">
+            Dismiss
+          </button>
         </div>
-        <button onClick={onDismiss} className="text-red-400 hover:text-red-600 flex-shrink-0 text-xs font-medium">Dismiss</button>
+        {onRetry && (
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={onRetry}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-100 hover:bg-red-200 active:bg-red-300 text-red-800 text-xs font-semibold transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Retry OCR
+            </button>
+            <p className="text-[11px] text-red-500 self-center">or continue and fill in manually</p>
+          </div>
+        )}
       </div>
     );
   }
@@ -408,6 +427,24 @@ export function BusinessCardCapture({
     onAssetsChanged?.(f.asset, b.asset);
   }, [onAssetsChanged]);
 
+  // Retry OCR on the existing front asset without re-capturing
+  const handleRetryOcr = useCallback(async () => {
+    const asset = front.asset;
+    if (!asset) return;
+    resetOcr();
+    onDebugLog?.('OCR retry initiated by user', { assetId: asset.id });
+    const result = await runOcr(asset.id, asset.dataUrl);
+    if (result) {
+      onDebugLog?.('OCR retry completed', {
+        confidence: result.confidence,
+        inferredFields: result.inferredFields,
+      });
+      onOcrResult?.(result);
+    } else {
+      onDebugLog?.('OCR retry failed or cancelled', undefined, 'error');
+    }
+  }, [front.asset, resetOcr, runOcr, onOcrResult, onDebugLog]);
+
   async function handleCapture(side: CardSide, rawDataUrl: string) {
     const setState = side === 'front' ? setFront : setBack;
     const otherState = side === 'front' ? back : front;
@@ -559,6 +596,7 @@ export function BusinessCardCapture({
             result={ocrState.result}
             error={ocrState.error}
             onDismiss={resetOcr}
+            onRetry={ocrState.status === 'error' && front.asset ? handleRetryOcr : undefined}
           />
         </div>
       )}
