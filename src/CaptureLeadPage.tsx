@@ -175,15 +175,13 @@ export default function CaptureLeadPage() {
 
       <Toast message={recoveryToast} position="top" />
 
-      {import.meta.env.DEV && (
-        <CaptureDebugPanel
-          session={session}
-          lastScan={lastScan}
-          qrScanning={qrScanning}
-          log={log}
-          onClearLog={clearLog}
-        />
-      )}
+      <CaptureDebugPanel
+        session={session}
+        lastScan={lastScan}
+        qrScanning={qrScanning}
+        log={log}
+        onClearLog={clearLog}
+      />
     </div>
   );
 }
