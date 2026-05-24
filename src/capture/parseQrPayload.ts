@@ -222,7 +222,7 @@ function parseUrl(text: string): Partial<ManualEntryFields> | null {
 // ─── Plain-text heuristics (original simple path) ─────────────────────────────
 
 function parsePlainText(text: string): Partial<ManualEntryFields> | null {
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const lines = text.split(/\t|\r?\n/).map(l => l.trim()).filter(Boolean);
   if (lines.length === 0) return null;
 
   const fields: Partial<ManualEntryFields> = {};
@@ -271,7 +271,8 @@ export interface HeuristicResult {
 }
 
 export function parseExhibitionText(text: string): HeuristicResult | null {
-  const rawLines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  // Split on newlines OR tabs — many real-world QR codes use tabs as field separators
+  const rawLines = text.split(/\t|\r?\n/).map(l => l.trim()).filter(Boolean);
   if (rawLines.length === 0) return null;
 
   const fields: Partial<ManualEntryFields> = {};
@@ -398,8 +399,8 @@ export function parseQrPayload(raw: string): ParsedContact {
     extractionStrategy = 'url';
     confidence = 'high';
   } else {
-    // Try exhibition/semi-structured heuristic pipeline first for multi-line text
-    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    // Try exhibition/semi-structured heuristic pipeline first for multi-line/tab-delimited text
+    const lines = text.split(/\t|\r?\n/).filter(l => l.trim().length > 0);
     if (lines.length >= 2) {
       const heuristic = parseExhibitionText(text);
       if (heuristic) {
@@ -443,3 +444,6 @@ export function parseQrPayload(raw: string): ParsedContact {
     ignoredLines,
   };
 }
+
+
+export { parseQrPayload }
