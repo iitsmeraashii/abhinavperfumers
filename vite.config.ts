@@ -6,12 +6,14 @@ export default defineConfig({
   plugins: [react()],
   optimizeDeps: {
     exclude: ['lucide-react'],
+    include: ['tesseract.js'],
   },
   build: {
     rollupOptions: {
       output: {
         manualChunks: {
           'qr-scanner': ['html5-qrcode'],
+          'tesseract': ['tesseract.js'],
         },
       },
     },
