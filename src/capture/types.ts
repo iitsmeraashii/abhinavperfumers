@@ -18,6 +18,18 @@ export interface BusinessCardAsset {
   createdAt: string;      // ISO string
 }
 
+export type OcrStatus = 'idle' | 'processing' | 'done' | 'error';
+
+export interface OcrResult {
+  assetId: string;
+  rawText: string;
+  fields: Partial<ManualEntryFields>;
+  confidence: 'high' | 'medium' | 'low';
+  inferredFields: string[];
+  ignoredLines: string[];
+  completedAt: string;
+}
+
 export interface DraftData {
   // Manual entry fields
   clientName?: string;
@@ -30,6 +42,8 @@ export interface DraftData {
   cardSessionId?: string;
   cardFrontAssetId?: string;
   cardBackAssetId?: string;
+  // OCR results
+  ocrRawText?: string;
   // QR scanner fields
   rawQr?: string;
   [key: string]: unknown;

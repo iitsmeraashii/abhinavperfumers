@@ -11,7 +11,7 @@ import { ManualEntryForm } from './capture/ManualEntryForm';
 import { BusinessCardCapture } from './capture/BusinessCardCapture';
 import { Toast } from './capture/CaptureUI';
 import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
-import type { CaptureMethod, BusinessCardAsset } from './capture/types';
+import type { CaptureMethod, BusinessCardAsset, OcrResult } from './capture/types';
 import type { ParsedContact } from './capture/parseQrPayload';
 
 const QrScannerView = lazy(() =>
@@ -30,6 +30,7 @@ export default function CaptureLeadPage() {
   const { log, addEntry, clearLog } = useDebugLog();
   const [cardSessionId, setCardSessionId] = useState<string>('');
   const [cardAssets, setCardAssets] = useState<{ front: BusinessCardAsset | null; back: BusinessCardAsset | null }>({ front: null, back: null });
+  const [lastOcrResult, setLastOcrResult] = useState<OcrResult | null>(null);
 
   // Keep a stable ref to addEntry so useCallback deps stay minimal
   const addEntryRef = useRef(addEntry);
@@ -158,20 +159,52 @@ export default function CaptureLeadPage() {
     addEntryRef.current('Business card assets updated', { frontId: front?.id, backId: back?.id });
   }, [actions]);
 
-  const handleCardComplete = useCallback((frontAssetId: string, backAssetId: string | null) => {
-    addEntryRef.current('Business card capture complete', { frontAssetId, backAssetId });
-    actions.patchDraft({
-      cardFrontAssetId: frontAssetId,
-      cardBackAssetId:  backAssetId ?? undefined,
+  const handleOcrResult = useCallback((result: OcrResult) => {
+    setLastOcrResult(result);
+    addEntryRef.current('OCR completed', {
+      assetId: result.assetId,
+      confidence: result.confidence,
+      inferredFields: result.inferredFields,
+      rawText: result.rawText.slice(0, 200),
     });
-    // Transition to MANUAL form so user can add contact details
-    actions.startCaptureWithDraft('MANUAL', {
-      ...session.draftData,
+    // Store raw text in draft for debugging/future enrichment
+    actions.patchDraft({ ocrRawText: result.rawText });
+  }, [actions]);
+
+  const handleCardComplete = useCallback((frontAssetId: string, backAssetId: string | null, ocrResult: OcrResult | null) => {
+    addEntryRef.current('Business card capture complete', { frontAssetId, backAssetId, hasOcr: !!ocrResult });
+
+    // Build draft by merging OCR fields — only populate fields that are empty
+    // so manually typed values are never overwritten by OCR.
+    const ocr = ocrResult ?? lastOcrResult;
+    const ocrFields = ocr ? {
+      clientName:  ocr.fields.clientName  || undefined,
+      company:     ocr.fields.company     || undefined,
+      phone:       ocr.fields.phone       || undefined,
+      email:       ocr.fields.email       || undefined,
+      designation: ocr.fields.designation || undefined,
+      notes:       ocr.fields.notes       || undefined,
+    } : {};
+
+    // Strip undefined
+    const cleanOcr = Object.fromEntries(
+      Object.entries(ocrFields).filter(([, v]) => v !== undefined),
+    );
+
+    const newDraft = {
+      ...cleanOcr,                      // OCR fields as base
+      ...session.draftData,             // existing draft overrides (preserves manual edits)
       cardSessionId:    cardSessionId,
       cardFrontAssetId: frontAssetId,
       cardBackAssetId:  backAssetId ?? undefined,
-    });
-  }, [actions, session.draftData, cardSessionId]);
+      ocrRawText:       ocr?.rawText,
+    };
+
+    addEntryRef.current('Transitioning to form with OCR-seeded draft', { draftKeys: Object.keys(newDraft) });
+
+    // Transition to MANUAL form so user can review/edit
+    actions.startCaptureWithDraft('MANUAL', newDraft);
+  }, [actions, session.draftData, cardSessionId, lastOcrResult]);
 
   const isCapturing      = session.sessionStatus !== 'IDLE';
   const showQrScanner    = isCapturing && session.captureMethod === 'QR' && qrScanning;
@@ -228,6 +261,7 @@ export default function CaptureLeadPage() {
             onComplete={handleCardComplete}
             onBack={handleBackToOptions}
             onAssetsChanged={handleCardAssetsChanged}
+            onOcrResult={handleOcrResult}
           />
         )}
 
@@ -246,6 +280,7 @@ export default function CaptureLeadPage() {
         qrScanning={qrScanning}
         cardAssets={cardAssets}
         cardSessionId={cardSessionId}
+        lastOcrResult={lastOcrResult}
         log={log}
         onClearLog={clearLog}
       />

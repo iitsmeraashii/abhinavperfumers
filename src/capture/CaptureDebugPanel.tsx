@@ -4,7 +4,7 @@
 import { useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Bug, X, ChevronDown, ChevronRight, Clipboard, Check } from 'lucide-react';
-import type { BusinessCardAsset, CaptureSession } from './types';
+import type { BusinessCardAsset, CaptureSession, OcrResult } from './types';
 import type { ParsedContact } from './parseQrPayload';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -139,12 +139,13 @@ interface OverlayProps {
   qrScanning: boolean;
   cardAssets: { front: BusinessCardAsset | null; back: BusinessCardAsset | null };
   cardSessionId: string;
+  lastOcrResult: OcrResult | null;
   log: DebugLogEntry[];
   onClose: () => void;
   onClearLog: () => void;
 }
 
-function DebugOverlay({ session, lastScan, qrScanning, cardAssets, cardSessionId, log, onClose, onClearLog }: OverlayProps) {
+function DebugOverlay({ session, lastScan, qrScanning, cardAssets, cardSessionId, lastOcrResult, log, onClose, onClearLog }: OverlayProps) {
   const d = session.draftData;
 
   const sessionDisplay = {
@@ -363,6 +364,66 @@ function DebugOverlay({ session, lastScan, qrScanning, cardAssets, cardSessionId
               </Section>
             )}
 
+            {/* OCR Result */}
+            {lastOcrResult && (
+              <Section title="OCR Extraction" defaultOpen>
+                {/* Confidence badge */}
+                <div className="flex flex-wrap gap-2 mb-3">
+                  <span style={{ fontSize: 10, fontFamily: 'monospace' }} className={[
+                    'rounded-full px-2 py-0.5 font-bold uppercase',
+                    lastOcrResult.confidence === 'high'   ? 'bg-green-900 text-green-300' :
+                    lastOcrResult.confidence === 'medium' ? 'bg-yellow-900 text-yellow-300' :
+                                                            'bg-red-900 text-red-300',
+                  ].join(' ')}>
+                    {lastOcrResult.confidence} confidence
+                  </span>
+                  <span style={{ fontSize: 10, fontFamily: 'monospace' }} className="rounded-full px-2 py-0.5 bg-stone-700 text-stone-300">
+                    {lastOcrResult.inferredFields.length} fields
+                  </span>
+                  <span style={{ fontSize: 10, fontFamily: 'monospace' }} className="rounded-full px-2 py-0.5 bg-stone-700 text-stone-300">
+                    asset: {lastOcrResult.assetId.slice(-8)}
+                  </span>
+                </div>
+
+                {/* Extracted fields */}
+                {(Object.keys(lastOcrResult.fields) as Array<keyof typeof lastOcrResult.fields>).map(key => (
+                  <MappingRow
+                    key={key}
+                    from={`ocr.fields.${key}`}
+                    to={`draftData.${key}`}
+                    value={lastOcrResult.fields[key]}
+                  />
+                ))}
+
+                {/* Ignored lines */}
+                {lastOcrResult.ignoredLines.length > 0 && (
+                  <div className="mt-3 pt-2 border-t border-stone-800">
+                    <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 mb-1 uppercase tracking-wider">
+                      Ignored lines ({lastOcrResult.ignoredLines.length})
+                    </div>
+                    {lastOcrResult.ignoredLines.map((line, i) => (
+                      <div key={i} style={{ fontSize: 11, fontFamily: 'monospace' }} className="text-red-400 break-all py-0.5">
+                        — {line}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Raw OCR text */}
+                <div className="mt-3 pt-2 border-t border-stone-800">
+                  <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 mb-1 uppercase tracking-wider">
+                    Raw OCR text ({lastOcrResult.rawText.length} chars)
+                  </div>
+                  <pre
+                    style={{ fontFamily: 'monospace', fontSize: 10, lineHeight: 1.6, maxHeight: 160 }}
+                    className="text-stone-300 whitespace-pre-wrap break-all overflow-y-auto"
+                  >
+                    {lastOcrResult.rawText || '(empty)'}
+                  </pre>
+                </div>
+              </Section>
+            )}
+
             {/* UI flags */}
             <Section title="UI Render Flags">
               <JsonBlock value={uiFlags} />
@@ -394,11 +455,12 @@ interface Props {
   qrScanning: boolean;
   cardAssets?: { front: BusinessCardAsset | null; back: BusinessCardAsset | null };
   cardSessionId?: string;
+  lastOcrResult?: OcrResult | null;
   log: DebugLogEntry[];
   onClearLog: () => void;
 }
 
-export function CaptureDebugPanel({ session, lastScan, qrScanning, cardAssets, cardSessionId, log, onClearLog }: Props) {
+export function CaptureDebugPanel({ session, lastScan, qrScanning, cardAssets, cardSessionId, lastOcrResult, log, onClearLog }: Props) {
   const [open, setOpen] = useState(false);
   const hasActivity = log.length > 0 || lastScan !== null;
 
@@ -436,6 +498,7 @@ export function CaptureDebugPanel({ session, lastScan, qrScanning, cardAssets, c
           qrScanning={qrScanning}
           cardAssets={cardAssets ?? { front: null, back: null }}
           cardSessionId={cardSessionId ?? ''}
+          lastOcrResult={lastOcrResult ?? null}
           log={log}
           onClose={() => setOpen(false)}
           onClearLog={onClearLog}

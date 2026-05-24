@@ -1,20 +1,17 @@
-// Business card capture flow — camera, preview, retake/delete.
-// Fully offline: images stored in IndexedDB via captureAssetStorage.
-// No OCR, no cloud, no AI.
+// Business card capture flow — camera, preview, retake/delete, OCR.
+// Fully offline: images stored in IndexedDB, OCR via Tesseract.js.
+// No cloud APIs, no AI.
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   ArrowLeft, Camera, FlipHorizontal, Trash2, CheckCircle2,
   RotateCcw, ChevronRight, ImageOff, AlertCircle, Loader2,
-  CreditCard, Check,
+  CreditCard, Check, Sparkles, Info,
 } from 'lucide-react';
 import { createPortal } from 'react-dom';
-import {
-  saveAsset,
-  deleteAsset,
-  getSessionAssets,
-} from './captureAssetStorage';
-import type { BusinessCardAsset, CardSide, CaptureSession } from './types';
+import { saveAsset, deleteAsset, getSessionAssets } from './captureAssetStorage';
+import { useOcr } from './useOcr';
+import type { BusinessCardAsset, CardSide, CaptureSession, OcrResult } from './types';
 import { Toast } from './CaptureUI';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -28,10 +25,10 @@ interface CardState {
 interface Props {
   session: CaptureSession;
   sessionId: string;
-  /** Called after both sides captured (or user skips back). Provides asset IDs. */
-  onComplete: (frontAssetId: string, backAssetId: string | null) => void;
+  onComplete: (frontAssetId: string, backAssetId: string | null, ocrResult: OcrResult | null) => void;
   onBack: () => void;
   onAssetsChanged?: (front: BusinessCardAsset | null, back: BusinessCardAsset | null) => void;
+  onOcrResult?: (result: OcrResult) => void;
 }
 
 // ─── Full-screen camera sheet ─────────────────────────────────────────────────
@@ -47,7 +44,6 @@ function CameraSheet({ side, onCapture, onCancel }: CameraSheetProps) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Trigger the native file picker (camera) immediately on mount
   useEffect(() => {
     const t = setTimeout(() => {
       if (inputRef.current) inputRef.current.click();
@@ -59,20 +55,15 @@ function CameraSheet({ side, onCapture, onCancel }: CameraSheetProps) {
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) { onCancel(); return; }
-
     if (!file.type.startsWith('image/')) {
       setError('Selected file is not an image. Please try again.');
       return;
     }
-
     const reader = new FileReader();
     reader.onload = (ev) => {
       const result = ev.target?.result;
-      if (typeof result === 'string') {
-        onCapture(result);
-      } else {
-        setError('Could not read image. Please try again.');
-      }
+      if (typeof result === 'string') onCapture(result);
+      else setError('Could not read image. Please try again.');
     };
     reader.onerror = () => setError('Failed to read image file.');
     reader.readAsDataURL(file);
@@ -80,7 +71,6 @@ function CameraSheet({ side, onCapture, onCancel }: CameraSheetProps) {
 
   return createPortal(
     <div className="fixed inset-0 z-[9990] flex flex-col items-center justify-center bg-black">
-      {/* Hidden native camera/file input */}
       <input
         ref={inputRef}
         type="file"
@@ -88,14 +78,8 @@ function CameraSheet({ side, onCapture, onCancel }: CameraSheetProps) {
         capture="environment"
         className="sr-only"
         onChange={handleFileChange}
-        // When user cancels the picker without selecting, fire onCancel
-        onClick={(e) => {
-          // reset value so same file can be re-selected after retake
-          (e.target as HTMLInputElement).value = '';
-        }}
+        onClick={(e) => { (e.target as HTMLInputElement).value = ''; }}
       />
-
-      {/* Overlay UI — shown while picker isn't open or after dismissal */}
       <div className="flex flex-col items-center gap-6 px-8 text-center">
         {loading ? (
           <Loader2 className="w-10 h-10 text-white/60 animate-spin" />
@@ -124,7 +108,7 @@ function CameraSheet({ side, onCapture, onCancel }: CameraSheetProps) {
               </p>
               <p className="text-white/50 text-sm">
                 {side === 'front'
-                  ? 'Position the front of the business card'
+                  ? 'Position the front of the business card in good lighting'
                   : 'Position the back of the business card'}
               </p>
             </div>
@@ -144,6 +128,99 @@ function CameraSheet({ side, onCapture, onCancel }: CameraSheetProps) {
   );
 }
 
+// ─── OCR progress banner ──────────────────────────────────────────────────────
+
+interface OcrBannerProps {
+  status: 'processing' | 'done' | 'error';
+  progress: number;
+  progressLabel: string;
+  result: OcrResult | null;
+  error: string | null;
+  onDismiss: () => void;
+}
+
+function OcrBanner({ status, progress, progressLabel, result, error, onDismiss }: OcrBannerProps) {
+  if (status === 'processing') {
+    return (
+      <div className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3.5 flex items-center gap-3">
+        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center">
+          <Loader2 className="w-4 h-4 text-amber-600 animate-spin" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-amber-900">Extracting card details…</p>
+          <div className="mt-1.5 h-1.5 bg-amber-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-amber-500 rounded-full transition-all duration-300 ease-out"
+              style={{ width: `${Math.round(progress * 100)}%` }}
+            />
+          </div>
+          <p className="mt-1 text-[11px] text-amber-700">{progressLabel}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'error') {
+    return (
+      <div className="rounded-2xl bg-red-50 border border-red-200 px-4 py-3.5 flex items-start gap-3">
+        <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-red-800">OCR extraction failed</p>
+          <p className="text-xs text-red-600 mt-0.5 leading-relaxed">{error ?? 'Could not read card text. You can still fill in details manually.'}</p>
+        </div>
+        <button onClick={onDismiss} className="text-red-400 hover:text-red-600 flex-shrink-0 text-xs font-medium">Dismiss</button>
+      </div>
+    );
+  }
+
+  if (status === 'done' && result) {
+    const fieldCount = result.inferredFields.length;
+    const isLow = result.confidence === 'low';
+
+    return (
+      <div className={[
+        'rounded-2xl border px-4 py-3.5',
+        isLow ? 'bg-stone-50 border-stone-200' : 'bg-green-50 border-green-200',
+      ].join(' ')}>
+        <div className="flex items-start gap-3">
+          <div className={[
+            'flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center',
+            isLow ? 'bg-stone-100' : 'bg-green-100',
+          ].join(' ')}>
+            <Sparkles className={`w-4 h-4 ${isLow ? 'text-stone-500' : 'text-green-600'}`} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className={`text-sm font-semibold ${isLow ? 'text-stone-700' : 'text-green-800'}`}>
+              {fieldCount > 0
+                ? `${fieldCount} field${fieldCount > 1 ? 's' : ''} extracted`
+                : 'Text extracted — no fields inferred'}
+            </p>
+            {fieldCount > 0 && (
+              <p className={`text-xs mt-0.5 ${isLow ? 'text-stone-500' : 'text-green-700'}`}>
+                {result.inferredFields.map(f =>
+                  f === 'clientName' ? 'Name' :
+                  f === 'company'    ? 'Company' :
+                  f === 'phone'      ? 'Phone' :
+                  f === 'email'      ? 'Email' :
+                  f === 'designation'? 'Designation' : f
+                ).join(' · ')}
+              </p>
+            )}
+            {isLow && (
+              <p className="flex items-center gap-1 mt-1.5 text-[11px] text-stone-500">
+                <Info className="w-3 h-3 flex-shrink-0" />
+                Please review extracted details before saving.
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 // ─── Image preview card ───────────────────────────────────────────────────────
 
 interface PreviewCardProps {
@@ -151,6 +228,7 @@ interface PreviewCardProps {
   asset: BusinessCardAsset | null;
   status: CardState['status'];
   errorMsg?: string;
+  isOcrRunning?: boolean;
   onCapture: () => void;
   onRetake: () => void;
   onDelete: () => void;
@@ -158,7 +236,7 @@ interface PreviewCardProps {
 }
 
 function PreviewCard({
-  side, asset, status, errorMsg,
+  side, asset, status, errorMsg, isOcrRunning,
   onCapture, onRetake, onDelete, disabled,
 }: PreviewCardProps) {
   const label = side === 'front' ? 'Front Side' : 'Back Side';
@@ -171,8 +249,6 @@ function PreviewCard({
       'rounded-2xl border overflow-hidden transition-all duration-200',
       hasImage ? 'border-stone-200 shadow-sm' : 'border-dashed border-stone-300 bg-stone-50/50',
     ].join(' ')}>
-
-      {/* Side label */}
       <div className="flex items-center gap-2 px-4 pt-3.5 pb-2">
         <div className={[
           'w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0',
@@ -191,7 +267,6 @@ function PreviewCard({
         )}
       </div>
 
-      {/* Image area */}
       {hasImage ? (
         <div className="relative mx-4 mb-3">
           <img
@@ -200,7 +275,14 @@ function PreviewCard({
             className="w-full rounded-xl object-cover"
             style={{ aspectRatio: '1.75 / 1', objectFit: 'cover' }}
           />
-          {/* Size badge */}
+          {isOcrRunning && (
+            <div className="absolute inset-0 rounded-xl bg-amber-500/15 flex items-center justify-center">
+              <div className="flex items-center gap-2 bg-white/90 rounded-full px-3 py-1.5 shadow-sm">
+                <Loader2 className="w-3.5 h-3.5 text-amber-600 animate-spin" />
+                <span className="text-xs font-semibold text-amber-700">Reading…</span>
+              </div>
+            </div>
+          )}
           <span className="absolute bottom-2 right-2 text-[10px] bg-black/50 text-white px-1.5 py-0.5 rounded-md font-mono">
             {Math.round(asset.sizeBytes / 1024)}KB · {asset.storedWidth}×{asset.storedHeight}
           </span>
@@ -224,13 +306,12 @@ function PreviewCard({
         </div>
       )}
 
-      {/* Action buttons */}
       <div className="px-4 pb-4 flex gap-2">
         {hasImage ? (
           <>
             <button
               onClick={onRetake}
-              disabled={disabled}
+              disabled={disabled || isOcrRunning}
               className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl border border-stone-200 text-sm font-medium text-stone-600 hover:bg-stone-50 active:bg-stone-100 transition-colors disabled:opacity-40"
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -238,7 +319,7 @@ function PreviewCard({
             </button>
             <button
               onClick={onDelete}
-              disabled={disabled}
+              disabled={disabled || isOcrRunning}
               className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-red-100 text-red-500 hover:bg-red-50 active:bg-red-100 transition-colors disabled:opacity-40"
             >
               <Trash2 className="w-3.5 h-3.5" />
@@ -256,11 +337,10 @@ function PreviewCard({
               'disabled:opacity-40',
             ].join(' ')}
           >
-            {isSaving ? (
-              <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</>
-            ) : (
-              <><Camera className="w-4 h-4" /> {side === 'front' ? 'Capture Front' : 'Capture Back'}</>
-            )}
+            {isSaving
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</>
+              : <><Camera className="w-4 h-4" /> {side === 'front' ? 'Capture Front' : 'Capture Back'}</>
+            }
           </button>
         )}
       </div>
@@ -270,12 +350,16 @@ function PreviewCard({
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function BusinessCardCapture({ session, sessionId, onComplete, onBack, onAssetsChanged }: Props) {
+export function BusinessCardCapture({
+  session, sessionId, onComplete, onBack, onAssetsChanged, onOcrResult,
+}: Props) {
   const [front, setFront] = useState<CardState>({ asset: null, status: 'empty' });
   const [back,  setBack]  = useState<CardState>({ asset: null, status: 'empty' });
   const [activeCapture, setActiveCapture] = useState<CardSide | null>(null);
   const [toast, setToast] = useState<{ msg: string; isError?: boolean } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const { ocrState, runOcr, cancelOcr, resetOcr } = useOcr();
 
   function showToast(msg: string, isError = false) {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -283,7 +367,7 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
     toastTimer.current = setTimeout(() => setToast(null), 3000);
   }
 
-  // On mount: restore assets if session already has IDs (draft recovery)
+  // Restore assets on mount (draft recovery)
   useEffect(() => {
     async function restore() {
       const d = session.draftData;
@@ -305,6 +389,9 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Cleanup on unmount — cancel any in-flight OCR
+  useEffect(() => () => { cancelOcr(); }, [cancelOcr]);
+
   const notifyChange = useCallback((f: CardState, b: CardState) => {
     onAssetsChanged?.(f.asset, b.asset);
   }, [onAssetsChanged]);
@@ -313,11 +400,14 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
     const setState = side === 'front' ? setFront : setBack;
     const otherState = side === 'front' ? back : front;
 
-    // Delete existing asset for this side if retaking
-    const existing = side === 'front' ? front.asset : back.asset;
-    if (existing) {
-      await deleteAsset(existing.id);
+    // Cancel any running OCR before replacing the front image
+    if (side === 'front') {
+      cancelOcr();
+      resetOcr();
     }
+
+    const existing = side === 'front' ? front.asset : back.asset;
+    if (existing) await deleteAsset(existing.id);
 
     setState({ asset: null, status: 'saving' });
     setActiveCapture(null);
@@ -331,6 +421,15 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
         side === 'front' ? newState : front,
         side === 'back'  ? newState : otherState,
       );
+
+      // Auto-run OCR on the front side image
+      if (side === 'front') {
+        const result = await runOcr(asset.id, asset.dataUrl);
+        if (result) {
+          onOcrResult?.(result);
+        }
+      }
+
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save image';
       setState({ asset: null, status: 'error', errorMsg: msg });
@@ -341,6 +440,7 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
   async function handleDelete(side: CardSide) {
     const target = side === 'front' ? front : back;
     if (!target.asset) return;
+    if (side === 'front') { cancelOcr(); resetOcr(); }
     await deleteAsset(target.asset.id);
     const newState: CardState = { asset: null, status: 'empty' };
     if (side === 'front') {
@@ -353,18 +453,20 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
     showToast(`${side === 'front' ? 'Front' : 'Back'} image deleted`);
   }
 
-  const isBusy = front.status === 'saving' || back.status === 'saving';
+  const isBusy    = front.status === 'saving' || back.status === 'saving';
+  const isOcrRun  = ocrState.status === 'processing';
   const canContinue = !!front.asset;
 
   function handleContinue() {
     if (!front.asset) return;
-    onComplete(front.asset.id, back.asset?.id ?? null);
+    onComplete(front.asset.id, back.asset?.id ?? null, ocrState.result);
   }
+
+  const showOcrBanner = ocrState.status !== 'idle';
 
   return (
     <div className="mt-6 animate-in fade-in slide-in-from-bottom-3 duration-300">
 
-      {/* Back row */}
       <div className="flex items-center justify-between mb-6">
         <button
           onClick={onBack}
@@ -384,20 +486,34 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
             </div>
             <div>
               <h2 className="text-base font-semibold text-stone-900 leading-tight">Scan Business Card</h2>
-              <p className="text-xs text-stone-500 mt-0.5">Capture front, optionally capture back</p>
+              <p className="text-xs text-stone-500 mt-0.5">Capture front — details auto-extracted via OCR</p>
             </div>
           </div>
         </div>
-
-        {/* Progress indicator */}
         <div className="px-5 py-3.5 flex items-center gap-3">
           <StepDot done={!!front.asset} active={!front.asset} label="Front" />
           <div className="flex-1 h-px bg-stone-100" />
-          <StepDot done={!!back.asset} active={!!front.asset && !back.asset} label="Back (Optional)" />
+          <StepDot done={ocrState.status === 'done'} active={isOcrRun} label="Extract" isOcr />
           <div className="flex-1 h-px bg-stone-100" />
-          <StepDot done={false} active={canContinue} label="Continue" isFinish />
+          <StepDot done={!!back.asset} active={!!front.asset && !back.asset && !isOcrRun} label="Back (Opt.)" />
+          <div className="flex-1 h-px bg-stone-100" />
+          <StepDot done={false} active={canContinue && !isOcrRun} label="Continue" isFinish />
         </div>
       </div>
+
+      {/* OCR status banner */}
+      {showOcrBanner && (
+        <div className="mb-4 animate-in fade-in duration-200">
+          <OcrBanner
+            status={ocrState.status as 'processing' | 'done' | 'error'}
+            progress={ocrState.progress}
+            progressLabel={ocrState.progressLabel}
+            result={ocrState.result}
+            error={ocrState.error}
+            onDismiss={resetOcr}
+          />
+        </div>
+      )}
 
       {/* Capture cards */}
       <div className="flex flex-col gap-4">
@@ -406,13 +522,13 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
           asset={front.asset}
           status={front.status}
           errorMsg={front.errorMsg}
+          isOcrRunning={isOcrRun}
           onCapture={() => setActiveCapture('front')}
           onRetake={() => setActiveCapture('front')}
           onDelete={() => handleDelete('front')}
           disabled={isBusy}
         />
 
-        {/* Back card only shown once front is captured */}
         {(front.asset || back.asset) && (
           <PreviewCard
             side="back"
@@ -427,7 +543,7 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
         )}
       </div>
 
-      {/* Continue / skip */}
+      {/* Continue */}
       {canContinue && (
         <div className="mt-6 flex flex-col gap-3 animate-in fade-in duration-200">
           <button
@@ -436,10 +552,10 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
             className="w-full flex items-center justify-center gap-2 bg-stone-900 hover:bg-stone-800 active:bg-stone-950 active:scale-[0.98] text-white font-semibold rounded-xl py-4 text-base transition-all duration-150 shadow-sm disabled:opacity-40"
           >
             <CheckCircle2 className="w-5 h-5" />
-            {back.asset ? 'Continue with Both Sides' : 'Continue with Front Only'}
+            {isOcrRun ? 'Extracting… Continue Anyway' : (back.asset ? 'Continue with Both Sides' : 'Continue with Front Only')}
             <ChevronRight className="w-4 h-4 opacity-60" />
           </button>
-          {!back.asset && (
+          {!back.asset && !isOcrRun && (
             <p className="text-center text-xs text-stone-400">
               Back side is optional — you can skip it
             </p>
@@ -447,7 +563,6 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
         </div>
       )}
 
-      {/* Camera sheet portal */}
       {activeCapture && (
         <CameraSheet
           side={activeCapture}
@@ -464,25 +579,32 @@ export function BusinessCardCapture({ session, sessionId, onComplete, onBack, on
 // ─── Step indicator dot ───────────────────────────────────────────────────────
 
 function StepDot({
-  done, active, label, isFinish,
+  done, active, label, isFinish, isOcr,
 }: {
   done: boolean;
   active: boolean;
   label: string;
   isFinish?: boolean;
+  isOcr?: boolean;
 }) {
   return (
     <div className="flex flex-col items-center gap-1 min-w-0">
       <div className={[
         'w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 transition-all',
         done    ? 'bg-green-100 text-green-600' :
-        active  ? (isFinish ? 'bg-amber-100 text-amber-600 ring-2 ring-amber-300' : 'bg-amber-100 text-amber-600') :
-                  'bg-stone-100 text-stone-400',
+        active  ? (isFinish
+                    ? 'bg-amber-100 text-amber-600 ring-2 ring-amber-300'
+                    : isOcr
+                    ? 'bg-amber-100 text-amber-600'
+                    : 'bg-amber-100 text-amber-600')
+                : 'bg-stone-100 text-stone-400',
       ].join(' ')}>
         {done
           ? <Check className="w-3.5 h-3.5" />
           : isFinish
           ? <ChevronRight className="w-3.5 h-3.5" />
+          : isOcr
+          ? <Sparkles className="w-3.5 h-3.5" />
           : <Camera className="w-3.5 h-3.5" />}
       </div>
       <span className={[
