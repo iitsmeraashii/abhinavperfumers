@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
@@ -28,6 +28,10 @@ export default function CaptureLeadPage() {
 
   const { log, addEntry, clearLog } = useDebugLog();
 
+  // Keep a stable ref to addEntry so useCallback deps stay minimal
+  const addEntryRef = useRef(addEntry);
+  addEntryRef.current = addEntry;
+
   useAutosave(session);
 
   // Restore a persisted draft on mount.
@@ -53,39 +57,43 @@ export default function CaptureLeadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function handleMethodSelect(method: CaptureMethod) {
+  const handleMethodSelect = useCallback((method: CaptureMethod) => {
     form.handleReset();
     if (method === 'QR') {
-      addEntry('QR scanner opened');
+      addEntryRef.current('QR scanner opened');
       actions.startCapture('QR');
       setQrScanning(true);
     } else {
       actions.startCapture(method);
       setQrScanning(false);
     }
-  }
+  }, [actions, form]);
 
-  function handleBackToOptions() {
+  const handleBackToOptions = useCallback(() => {
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
-  }
+  }, [actions, form]);
 
-  async function handleDiscardDraft() {
+  const handleDiscardDraft = useCallback(async () => {
     await clearDraft();
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
-  }
+  }, [actions, form]);
 
   // After a successful QR scan: normalize parsed fields into the exact DraftData
   // key shape, then seed the session atomically. ManualEntryForm reads from
   // session.draftData directly so fields appear immediately without a hydration step.
-  function handleQrScanned(parsed: ParsedContact) {
-    addEntry('QR scanned — raw text received', parsed.raw);
-    addEntry('Parsing completed', { hasData: parsed.hasData, fields: parsed.fields });
+  //
+  // Wrapped in useCallback so QrScannerView's effect dep array stays stable —
+  // prevents the success effect from re-firing on unrelated parent re-renders.
+  const handleQrScanned = useCallback((parsed: ParsedContact) => {
+    addEntryRef.current('QR scanned — raw text received', parsed.raw);
+    addEntryRef.current('Parsing completed', { hasData: parsed.hasData, qrType: parsed.qrType, fields: parsed.fields });
 
-    // Explicit normalization: never assume parser key names match DraftData keys.
+    // Explicit field-by-field normalization — never assume parser key names
+    // match DraftData keys automatically.
     const f = parsed.fields;
     const mappedDraft = {
       clientName:  String(f.clientName  ?? '').trim() || undefined,
@@ -97,34 +105,32 @@ export default function CaptureLeadPage() {
       rawQr:       parsed.raw,
     };
 
-    // Strip undefined keys so draftData stays clean
+    // Strip undefined so draftData stays clean
     const draft = Object.fromEntries(
       Object.entries(mappedDraft).filter(([, v]) => v !== undefined),
     );
 
-    addEntry('draft object built (explicit mapping)', draft);
+    addEntryRef.current('draft object built (explicit mapping)', draft);
 
     console.group('[QR Scan] handleQrScanned');
     console.log('raw QR text:', parsed.raw);
-    console.log('parsed object:', parsed);
+    console.log('qrType:', parsed.qrType);
     console.log('parsed.fields:', parsed.fields);
     console.log('mapped draft:', draft);
     console.groupEnd();
 
     setLastScan(parsed);
-    addEntry('startCaptureWithDraft called', { method: 'MANUAL', draftKeys: Object.keys(draft) });
+    addEntryRef.current('startCaptureWithDraft called', { method: 'MANUAL', draftKeys: Object.keys(draft) });
     actions.startCaptureWithDraft('MANUAL', draft);
 
-    console.log('[QR Scan] session.draftData should now be:', draft);
-    addEntry('Form view triggered — captureMethod MANUAL, qrScanning false');
-
+    addEntryRef.current('Form view triggered — captureMethod MANUAL, qrScanning false');
     form.handleReset();
     setQrScanning(false);
-  }
+  }, [actions, form]);
 
-  const isCapturing    = session.sessionStatus !== 'IDLE';
-  const showQrScanner  = isCapturing && session.captureMethod === 'QR' && qrScanning;
-  const showManualForm = isCapturing && session.captureMethod === 'MANUAL';
+  const isCapturing     = session.sessionStatus !== 'IDLE';
+  const showQrScanner   = isCapturing && session.captureMethod === 'QR' && qrScanning;
+  const showManualForm  = isCapturing && session.captureMethod === 'MANUAL';
   const showPlaceholder = isCapturing && session.captureMethod === 'BUSINESS_CARD';
 
   return (

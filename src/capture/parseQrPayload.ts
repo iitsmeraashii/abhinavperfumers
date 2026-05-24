@@ -3,12 +3,16 @@
 
 import type { ManualEntryFields } from './types';
 
+export type QrContentType = 'vcard' | 'mecard' | 'url' | 'plaintext' | 'unknown';
+
 export interface ParsedContact {
   fields: Partial<ManualEntryFields>;
   /** Raw QR text for draftData.rawQr */
   raw: string;
-  /** True when at least one named field was extracted */
+  /** True when at least one named contact field was extracted */
   hasData: boolean;
+  /** Content classification for contextual UI messages */
+  qrType: QrContentType;
 }
 
 // ─── vCard ────────────────────────────────────────────────────────────────────
@@ -33,8 +37,8 @@ function parseVCard(text: string): Partial<ManualEntryFields> | null {
     }
   }
 
-  const org  = get(/^ORG[^:]*:(.+)$/im).split(';')[0];
-  const tel  = get(/^TEL[^:]*:(.+)$/im);
+  const org   = get(/^ORG[^:]*:(.+)$/im).split(';')[0];
+  const tel   = get(/^TEL[^:]*:(.+)$/im);
   const email = get(/^EMAIL[^:]*:(.+)$/im);
   const title = get(/^TITLE[^:]*:(.+)$/im);
   const note  = get(/^NOTE[^:]*:(.+)$/im);
@@ -42,12 +46,12 @@ function parseVCard(text: string): Partial<ManualEntryFields> | null {
   if (!name && !org && !tel && !email) return null;
 
   return {
-    clientName:  name    || undefined,
-    company:     org     || undefined,
-    phone:       tel     || undefined,
-    email:       email   || undefined,
-    designation: title   || undefined,
-    notes:       note    || undefined,
+    clientName:  name  || undefined,
+    company:     org   || undefined,
+    phone:       tel   || undefined,
+    email:       email || undefined,
+    designation: title || undefined,
+    notes:       note  || undefined,
   };
 }
 
@@ -96,7 +100,7 @@ function parsePlainText(text: string): Partial<ManualEntryFields> | null {
   const fields: Partial<ManualEntryFields> = {};
 
   for (const line of lines) {
-    // Phone: starts with +, or contains 7+ consecutive digits
+    // Phone: starts with + or digit, contains 7+ consecutive digits
     if (!fields.phone && /^[+\d]/.test(line) && /\d{7,}/.test(line.replace(/[\s\-().]/g, ''))) {
       fields.phone = line;
       continue;
@@ -137,12 +141,14 @@ function parseUrl(text: string): Partial<ManualEntryFields> | null {
 export function parseQrPayload(raw: string): ParsedContact {
   const text = raw.trim();
 
-  const parsed =
-    parseVCard(text) ??
-    parseMeCard(text) ??
-    parseUrl(text) ??
-    parsePlainText(text) ??
-    {};
+  let qrType: QrContentType = 'unknown';
+  let parsed: Partial<ManualEntryFields> | null = null;
+
+  if ((parsed = parseVCard(text)))   { qrType = 'vcard';     }
+  else if ((parsed = parseMeCard(text)))  { qrType = 'mecard';    }
+  else if ((parsed = parseUrl(text)))     { qrType = 'url';       }
+  else if ((parsed = parsePlainText(text))) { qrType = 'plaintext'; }
+  else { parsed = {}; qrType = 'unknown'; }
 
   const hasData = !!(
     parsed.clientName || parsed.company || parsed.phone || parsed.email
@@ -153,5 +159,5 @@ export function parseQrPayload(raw: string): ParsedContact {
     Object.entries(parsed).filter(([, v]) => v !== undefined),
   ) as Partial<ManualEntryFields>;
 
-  return { fields, raw: text, hasData };
+  return { fields, raw: text, hasData, qrType };
 }
