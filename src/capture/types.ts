@@ -2,6 +2,22 @@ export type CaptureMethod = 'BUSINESS_CARD' | 'QR' | 'MANUAL';
 
 export type SessionStatus = 'IDLE' | 'CAPTURING' | 'DRAFT' | 'READY_FOR_REVIEW';
 
+export type CardSide = 'front' | 'back';
+
+export interface BusinessCardAsset {
+  id: string;
+  sessionId: string;
+  side: CardSide;
+  dataUrl: string;        // compressed image as data: URI
+  mimeType: string;
+  originalWidth: number;
+  originalHeight: number;
+  storedWidth: number;
+  storedHeight: number;
+  sizeBytes: number;
+  createdAt: string;      // ISO string
+}
+
 export interface DraftData {
   // Manual entry fields
   clientName?: string;
@@ -10,9 +26,11 @@ export interface DraftData {
   email?: string;
   designation?: string;
   notes?: string;
-  // Scanner fields (future)
-  rawImageFront?: string;
-  rawImageBack?: string;
+  // Business card assets (IDs reference IndexedDB 'assets' store)
+  cardSessionId?: string;
+  cardFrontAssetId?: string;
+  cardBackAssetId?: string;
+  // QR scanner fields
   rawQr?: string;
   [key: string]: unknown;
 }

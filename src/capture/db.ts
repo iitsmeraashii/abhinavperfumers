@@ -3,7 +3,8 @@
 // Replace this module (e.g. with Capacitor SQLite) without touching callers.
 
 const DB_NAME = 'capture_app';
-const DB_VERSION = 1;
+// v2 adds the 'assets' object store for business card images
+const DB_VERSION = 2;
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -14,11 +15,29 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('drafts')) {
         db.createObjectStore('drafts', { keyPath: 'id' });
       }
+      if (!db.objectStoreNames.contains('assets')) {
+        const store = db.createObjectStore('assets', { keyPath: 'id' });
+        store.createIndex('by_session', 'sessionId', { unique: false });
+      }
     };
 
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
+}
+
+export async function dbGetAll<T>(store: string, indexName: string, indexValue: string): Promise<T[]> {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readonly');
+      const req = tx.objectStore(store).index(indexName).getAll(indexValue);
+      req.onsuccess = () => resolve(req.result ?? []);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return [];
+  }
 }
 
 export async function dbGet<T>(store: string, key: string): Promise<T | null> {

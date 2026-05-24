@@ -4,7 +4,7 @@
 import { useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Bug, X, ChevronDown, ChevronRight, Clipboard, Check } from 'lucide-react';
-import type { CaptureSession } from './types';
+import type { BusinessCardAsset, CaptureSession } from './types';
 import type { ParsedContact } from './parseQrPayload';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -137,12 +137,14 @@ interface OverlayProps {
   session: CaptureSession;
   lastScan: ParsedContact | null;
   qrScanning: boolean;
+  cardAssets: { front: BusinessCardAsset | null; back: BusinessCardAsset | null };
+  cardSessionId: string;
   log: DebugLogEntry[];
   onClose: () => void;
   onClearLog: () => void;
 }
 
-function DebugOverlay({ session, lastScan, qrScanning, log, onClose, onClearLog }: OverlayProps) {
+function DebugOverlay({ session, lastScan, qrScanning, cardAssets, cardSessionId, log, onClose, onClearLog }: OverlayProps) {
   const d = session.draftData;
 
   const sessionDisplay = {
@@ -325,6 +327,42 @@ function DebugOverlay({ session, lastScan, qrScanning, log, onClose, onClearLog 
               </Section>
             )}
 
+            {/* Business card assets */}
+            {(cardAssets.front || cardAssets.back || session.captureMethod === 'BUSINESS_CARD') && (
+              <Section title="Business Card Assets" defaultOpen>
+                <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 mb-2 uppercase tracking-wider">
+                  Session ID: <span className="text-amber-300 break-all">{cardSessionId || '—'}</span>
+                </div>
+
+                {(['front', 'back'] as const).map(side => {
+                  const asset = side === 'front' ? cardAssets.front : cardAssets.back;
+                  return (
+                    <div key={side} className="py-1.5 border-b border-stone-800 last:border-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span style={{ fontSize: 10, fontFamily: 'monospace' }} className={[
+                          'rounded-full px-2 py-0.5 font-bold uppercase',
+                          asset ? 'bg-green-900 text-green-300' : 'bg-stone-700 text-stone-500',
+                        ].join(' ')}>
+                          {side}
+                        </span>
+                        <span style={{ fontSize: 11 }} className={asset ? 'text-green-400' : 'text-stone-500'}>
+                          {asset ? 'captured' : 'empty'}
+                        </span>
+                      </div>
+                      {asset && (
+                        <div style={{ fontSize: 10, fontFamily: 'monospace', lineHeight: 1.6 }} className="text-stone-400 ml-1 break-all">
+                          <div>id: <span className="text-sky-300">{asset.id}</span></div>
+                          <div>size: <span className="text-amber-300">{Math.round(asset.sizeBytes / 1024)}KB</span></div>
+                          <div>dims: <span className="text-amber-300">{asset.storedWidth}×{asset.storedHeight}</span> (orig {asset.originalWidth}×{asset.originalHeight})</div>
+                          <div>stored: <span className="text-green-300">IndexedDB ✓</span></div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </Section>
+            )}
+
             {/* UI flags */}
             <Section title="UI Render Flags">
               <JsonBlock value={uiFlags} />
@@ -354,11 +392,13 @@ interface Props {
   session: CaptureSession;
   lastScan: ParsedContact | null;
   qrScanning: boolean;
+  cardAssets?: { front: BusinessCardAsset | null; back: BusinessCardAsset | null };
+  cardSessionId?: string;
   log: DebugLogEntry[];
   onClearLog: () => void;
 }
 
-export function CaptureDebugPanel({ session, lastScan, qrScanning, log, onClearLog }: Props) {
+export function CaptureDebugPanel({ session, lastScan, qrScanning, cardAssets, cardSessionId, log, onClearLog }: Props) {
   const [open, setOpen] = useState(false);
   const hasActivity = log.length > 0 || lastScan !== null;
 
@@ -394,6 +434,8 @@ export function CaptureDebugPanel({ session, lastScan, qrScanning, log, onClearL
           session={session}
           lastScan={lastScan}
           qrScanning={qrScanning}
+          cardAssets={cardAssets ?? { front: null, back: null }}
+          cardSessionId={cardSessionId ?? ''}
           log={log}
           onClose={() => setOpen(false)}
           onClearLog={onClearLog}

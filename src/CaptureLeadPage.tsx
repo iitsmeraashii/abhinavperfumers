@@ -4,13 +4,14 @@ import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
 import { useAutosave } from './capture/useAutosave';
 import { loadDraft, clearDraft } from './capture/captureDraftStorage';
+import { deleteSessionAssets } from './capture/captureAssetStorage';
 import { OfflineBanner } from './capture/OfflineBanner';
 import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
-import { CapturePlaceholder } from './capture/CapturePlaceholder';
 import { ManualEntryForm } from './capture/ManualEntryForm';
+import { BusinessCardCapture } from './capture/BusinessCardCapture';
 import { Toast } from './capture/CaptureUI';
 import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
-import type { CaptureMethod } from './capture/types';
+import type { CaptureMethod, BusinessCardAsset } from './capture/types';
 import type { ParsedContact } from './capture/parseQrPayload';
 
 const QrScannerView = lazy(() =>
@@ -27,6 +28,8 @@ export default function CaptureLeadPage() {
   const [lastScan, setLastScan] = useState<ParsedContact | null>(null);
 
   const { log, addEntry, clearLog } = useDebugLog();
+  const [cardSessionId, setCardSessionId] = useState<string>('');
+  const [cardAssets, setCardAssets] = useState<{ front: BusinessCardAsset | null; back: BusinessCardAsset | null }>({ front: null, back: null });
 
   // Keep a stable ref to addEntry so useCallback deps stay minimal
   const addEntryRef = useRef(addEntry);
@@ -40,6 +43,11 @@ export default function CaptureLeadPage() {
   useEffect(() => {
     loadDraft().then((saved) => {
       if (!saved || saved.sessionStatus === 'IDLE') return;
+
+      // Restore business card session ID so BusinessCardCapture can reload assets
+      if (saved.captureMethod === 'BUSINESS_CARD' && saved.draftData.cardSessionId) {
+        setCardSessionId(saved.draftData.cardSessionId as string);
+      }
 
       const normalised = saved.captureMethod === 'QR'
         ? { ...saved, captureMethod: 'MANUAL' as CaptureMethod }
@@ -63,6 +71,12 @@ export default function CaptureLeadPage() {
       addEntryRef.current('QR scanner opened');
       actions.startCapture('QR');
       setQrScanning(true);
+    } else if (method === 'BUSINESS_CARD') {
+      const sid = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      setCardSessionId(sid);
+      setCardAssets({ front: null, back: null });
+      actions.startCaptureWithDraft('BUSINESS_CARD', { cardSessionId: sid });
+      setQrScanning(false);
     } else {
       actions.startCapture(method);
       setQrScanning(false);
@@ -76,11 +90,17 @@ export default function CaptureLeadPage() {
   }, [actions, form]);
 
   const handleDiscardDraft = useCallback(async () => {
+    // Delete any locally-stored card images before discarding
+    if (cardSessionId) {
+      await deleteSessionAssets(cardSessionId);
+      setCardSessionId('');
+      setCardAssets({ front: null, back: null });
+    }
     await clearDraft();
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
-  }, [actions, form]);
+  }, [actions, form, cardSessionId]);
 
   // After a successful QR scan: normalize parsed fields into the exact DraftData
   // key shape, then seed the session atomically. ManualEntryForm reads from
@@ -128,10 +148,35 @@ export default function CaptureLeadPage() {
     setQrScanning(false);
   }, [actions, form]);
 
-  const isCapturing     = session.sessionStatus !== 'IDLE';
-  const showQrScanner   = isCapturing && session.captureMethod === 'QR' && qrScanning;
-  const showManualForm  = isCapturing && session.captureMethod === 'MANUAL';
-  const showPlaceholder = isCapturing && session.captureMethod === 'BUSINESS_CARD';
+  const handleCardAssetsChanged = useCallback((front: BusinessCardAsset | null, back: BusinessCardAsset | null) => {
+    setCardAssets({ front, back });
+    // Keep draft in sync with current asset IDs
+    actions.patchDraft({
+      cardFrontAssetId: front?.id ?? undefined,
+      cardBackAssetId:  back?.id  ?? undefined,
+    });
+    addEntryRef.current('Business card assets updated', { frontId: front?.id, backId: back?.id });
+  }, [actions]);
+
+  const handleCardComplete = useCallback((frontAssetId: string, backAssetId: string | null) => {
+    addEntryRef.current('Business card capture complete', { frontAssetId, backAssetId });
+    actions.patchDraft({
+      cardFrontAssetId: frontAssetId,
+      cardBackAssetId:  backAssetId ?? undefined,
+    });
+    // Transition to MANUAL form so user can add contact details
+    actions.startCaptureWithDraft('MANUAL', {
+      ...session.draftData,
+      cardSessionId:    cardSessionId,
+      cardFrontAssetId: frontAssetId,
+      cardBackAssetId:  backAssetId ?? undefined,
+    });
+  }, [actions, session.draftData, cardSessionId]);
+
+  const isCapturing      = session.sessionStatus !== 'IDLE';
+  const showQrScanner    = isCapturing && session.captureMethod === 'QR' && qrScanning;
+  const showManualForm   = isCapturing && session.captureMethod === 'MANUAL';
+  const showBusinessCard = isCapturing && session.captureMethod === 'BUSINESS_CARD';
 
   return (
     <div className="min-h-[calc(100vh-57px)] bg-stone-50 flex flex-col">
@@ -176,11 +221,13 @@ export default function CaptureLeadPage() {
           />
         )}
 
-        {showPlaceholder && (
-          <CapturePlaceholder
+        {showBusinessCard && (
+          <BusinessCardCapture
             session={session}
-            isOnline={isOnline}
+            sessionId={cardSessionId}
+            onComplete={handleCardComplete}
             onBack={handleBackToOptions}
+            onAssetsChanged={handleCardAssetsChanged}
           />
         )}
 
@@ -197,6 +244,8 @@ export default function CaptureLeadPage() {
         session={session}
         lastScan={lastScan}
         qrScanning={qrScanning}
+        cardAssets={cardAssets}
+        cardSessionId={cardSessionId}
         log={log}
         onClearLog={clearLog}
       />
