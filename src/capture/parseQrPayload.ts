@@ -444,6 +444,3 @@ export function parseQrPayload(raw: string): ParsedContact {
     ignoredLines,
   };
 }
-
-
-export { parseQrPayload }
