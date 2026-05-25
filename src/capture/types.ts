@@ -34,17 +34,58 @@ export interface OcrResult {
   completedAt: string;
 }
 
+// ─── Vision extraction (OpenAI) ───────────────────────────────────────────────
+
+export type VisionStatus = 'idle' | 'preprocessing' | 'extracting' | 'validating' | 'done' | 'error';
+
+export type FieldConfidence = 'high' | 'medium' | 'low' | 'unknown';
+
+export interface VisionExtractedFields {
+  fullName:     string;
+  firstName:    string;
+  lastName:     string;
+  company:      string;
+  designation:  string;
+  emails:       string[];
+  phoneNumbers: string[];
+  website:      string;
+  address:      string;
+  confidence:   number;   // 0-1 overall
+  notes:        string;
+  rawText:      string;
+}
+
+export interface VisionResult {
+  assetId:        string;
+  fields:         VisionExtractedFields;
+  source:         'openai_vision' | 'tesseract_fallback' | 'manual';
+  durationMs:     number;
+  attempt:        number;
+  completedAt:    string;
+  // Per-field confidence derived from overall + presence
+  fieldConfidence: Record<keyof VisionExtractedFields, FieldConfidence>;
+}
+
 export interface DraftData {
   clientName?:        string;
   company?:           string;
-  phone?:             string;
-  email?:             string;
+  phone?:             string;   // primary phone (first of phoneNumbers)
+  email?:             string;   // primary email (first of emails)
   designation?:       string;
   notes?:             string;
+  // Multi-value fields from vision extraction
+  phoneNumbers?:      string[];
+  emails?:            string[];
+  website?:           string;
+  address?:           string;
+  // Card session references
   cardSessionId?:     string;
   cardFrontAssetId?:  string;
   cardBackAssetId?:   string;
+  // Extraction metadata
   ocrRawText?:        string;
+  visionRawText?:     string;
+  extractionSource?:  string;
   rawQr?:             string;
   [key: string]: unknown;
 }

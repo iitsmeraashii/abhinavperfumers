@@ -19,7 +19,7 @@ import {
   syncUpdateSessionFields,
   syncAbandonSession,
 } from './capture/captureBackendSync';
-import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus } from './capture/types';
+import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
 
@@ -347,35 +347,62 @@ export default function CaptureLeadPage() {
     frontAssetId: string,
     backAssetId: string | null,
     ocrResult: OcrResult | null,
+    visionResult: VisionResult | null,
   ) => {
     addEntryRef.current('Business card capture complete — Continue pressed', {
-      frontAssetId, backAssetId, hasOcrResult: !!ocrResult,
+      frontAssetId, backAssetId,
+      hasOcrResult: !!ocrResult,
+      hasVisionResult: !!visionResult,
+      visionSource: visionResult?.source,
     });
 
-    const ocr = ocrResult ?? lastOcrResult;
-    if (!ocr) {
-      addEntryRef.current('OCR warning — no OCR result at Continue time', undefined, 'warn');
+    // Vision result takes precedence; fall back to legacy OCR result
+    let extractedFields: Record<string, unknown> = {};
+
+    if (visionResult) {
+      const f = visionResult.fields;
+      extractedFields = {
+        clientName:       f.fullName    || undefined,
+        company:          f.company     || undefined,
+        designation:      f.designation || undefined,
+        phone:            f.phoneNumbers?.[0] || undefined,
+        email:            f.emails?.[0]       || undefined,
+        notes:            f.notes       || undefined,
+        phoneNumbers:     f.phoneNumbers.length > 0 ? f.phoneNumbers : undefined,
+        emails:           f.emails.length > 0 ? f.emails : undefined,
+        website:          f.website     || undefined,
+        address:          f.address     || undefined,
+        visionRawText:    f.rawText     || undefined,
+        extractionSource: visionResult.source,
+      };
+    } else {
+      const ocr = ocrResult ?? lastOcrResult;
+      if (!ocr) {
+        addEntryRef.current('OCR warning — no OCR result at Continue time', undefined, 'warn');
+      }
+      if (ocr) {
+        extractedFields = {
+          clientName:  ocr.fields.clientName  || undefined,
+          company:     ocr.fields.company     || undefined,
+          phone:       ocr.fields.phone       || undefined,
+          email:       ocr.fields.email       || undefined,
+          designation: ocr.fields.designation || undefined,
+          notes:       ocr.fields.notes       || undefined,
+          ocrRawText:  ocr.rawText            || undefined,
+        };
+      }
     }
 
-    const ocrFields = ocr ? {
-      clientName:  ocr.fields.clientName  || undefined,
-      company:     ocr.fields.company     || undefined,
-      phone:       ocr.fields.phone       || undefined,
-      email:       ocr.fields.email       || undefined,
-      designation: ocr.fields.designation || undefined,
-      notes:       ocr.fields.notes       || undefined,
-    } : {};
-    const cleanOcr = Object.fromEntries(
-      Object.entries(ocrFields).filter(([, v]) => v !== undefined),
+    const cleanFields = Object.fromEntries(
+      Object.entries(extractedFields).filter(([, v]) => v !== undefined),
     );
 
     const newDraft = {
-      ...cleanOcr,
+      ...cleanFields,
       ...session.draftData,
       cardSessionId:    cardSessionId,
       cardFrontAssetId: frontAssetId,
       cardBackAssetId:  backAssetId ?? undefined,
-      ocrRawText:       ocr?.rawText,
     };
 
     addEntryRef.current('draftData updated — transitioning to manual form', {
