@@ -6,6 +6,7 @@ import { createPortal } from 'react-dom';
 import { Bug, X, ChevronDown, ChevronRight, Clipboard, Check, AlertTriangle, RefreshCw, WifiOff, CheckCircle, ShieldCheck, ShieldOff } from 'lucide-react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../supabaseClient';
+import { useAuth } from '../AuthContext';
 import type { BackendSyncState, BusinessCardAsset, CaptureSession, OcrResult, OcrStatus, SyncStatus } from './types';
 import type { ParsedContact } from './parseQrPayload';
 
@@ -524,6 +525,7 @@ interface OverlayProps {
 // ── Auth debug section ────────────────────────────────────────────────────────
 
 function AuthDebugSection() {
+  const { salesRep } = useAuth();
   const [authSession, setAuthSession] = useState<Session | null>(null);
   const [loading, setLoading]         = useState(true);
 
@@ -576,6 +578,12 @@ function AuthDebugSection() {
           auth_user_id:{' '}
           <span className={authSession?.user?.id ? 'text-sky-300 break-all' : 'text-stone-600'}>
             {authSession?.user?.id ?? '—'}
+          </span>
+        </div>
+        <div>
+          rep_code:{' '}
+          <span className={salesRep?.rep_code ? 'text-amber-300' : 'text-stone-600'}>
+            {salesRep?.rep_code ?? '—'}
           </span>
         </div>
         <div>

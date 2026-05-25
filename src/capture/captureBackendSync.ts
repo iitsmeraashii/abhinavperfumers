@@ -37,9 +37,26 @@ function online(): boolean {
   return typeof navigator !== 'undefined' ? navigator.onLine : true;
 }
 
-async function getUserId(): Promise<string | null> {
+interface AuthIdentity {
+  userId:  string;
+  repCode: string | null;
+}
+
+// Returns the authenticated user's ID and their rep_code from the rep profile.
+// rep_code may be null if the profile row hasn't loaded yet — that's fine,
+// the column is nullable in capture_sessions.
+async function getAuthIdentity(): Promise<AuthIdentity | null> {
   const { data } = await supabase.auth.getUser();
-  return data.user?.id ?? null;
+  const userId = data.user?.id;
+  if (!userId) return null;
+
+  // Read rep_code from the RLS-filtered view — this is a cheap indexed lookup
+  const { data: profile } = await supabase
+    .from('my_rep_profile')
+    .select('rep_code')
+    .maybeSingle();
+
+  return { userId, repCode: profile?.rep_code ?? null };
 }
 
 // ─── Session upsert ───────────────────────────────────────────────────────────
@@ -61,9 +78,10 @@ export async function syncUpsertSession(
   cbs.onSyncing();
 
   try {
-    const userId = await getUserId();
-    if (!userId) { cbs.onSyncError('Not authenticated'); return; }
+    const identity = await getAuthIdentity();
+    if (!identity) { cbs.onSyncError('Not authenticated'); return; }
 
+    const { userId, repCode } = identity;
     const {
       sessionId, captureMethod, draftData, sessionStatus, localDraftKey,
     } = payload;
@@ -85,6 +103,8 @@ export async function syncUpsertSession(
       .upsert({
         id:               sessionId,
         user_id:          userId,
+        // Attach rep identity for reporting and filtering
+        sales_rep_code:   repCode,
         capture_method:   captureMethod,
         session_status:   sessionStatus.toLowerCase(),
         extracted_fields: extractedFields,
@@ -128,8 +148,9 @@ export async function syncUpsertAsset(
   cbs.onSyncing();
 
   try {
-    const userId = await getUserId();
-    if (!userId) { cbs.onSyncError('Not authenticated'); return; }
+    const identity = await getAuthIdentity();
+    if (!identity) { cbs.onSyncError('Not authenticated'); return; }
+    const { userId } = identity;
 
     const { backendSessionId, asset } = payload;
 
@@ -198,8 +219,9 @@ export async function syncUpsertOcrExtraction(
   cbs.onSyncing();
 
   try {
-    const userId = await getUserId();
-    if (!userId) { cbs.onSyncError('Not authenticated'); return; }
+    const identity = await getAuthIdentity();
+    if (!identity) { cbs.onSyncError('Not authenticated'); return; }
+    const { userId } = identity;
 
     const { extractionId, backendSessionId, backendAssetId, ocrResult, durationMs } = payload;
 
@@ -262,8 +284,9 @@ export async function syncUpsertQrExtraction(
   cbs.onSyncing();
 
   try {
-    const userId = await getUserId();
-    if (!userId) { cbs.onSyncError('Not authenticated'); return; }
+    const identity = await getAuthIdentity();
+    if (!identity) { cbs.onSyncError('Not authenticated'); return; }
+    const { userId } = identity;
 
     const { extractionId, backendSessionId, parsed, durationMs } = payload;
 
@@ -322,8 +345,9 @@ export async function syncUpdateSessionFields(
   cbs.onSyncing();
 
   try {
-    const userId = await getUserId();
-    if (!userId) { cbs.onSyncError('Not authenticated'); return; }
+    const identity = await getAuthIdentity();
+    if (!identity) { cbs.onSyncError('Not authenticated'); return; }
+    const { userId } = identity;
 
     const extractedFields: Record<string, unknown> = {};
     if (draftData.clientName)   extractedFields.clientName   = draftData.clientName;
@@ -366,8 +390,9 @@ export async function syncAbandonSession(
   if (!online()) { cbs.onOffline(); return; }
 
   try {
-    const userId = await getUserId();
-    if (!userId) return;
+    const identity = await getAuthIdentity();
+    if (!identity) return;
+    const { userId } = identity;
 
     await supabase
       .from('capture_sessions')

@@ -1,26 +1,41 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import type { Session } from '@supabase/supabase-js';
+import { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
+import type { Session, User as SupabaseUser } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-// Shape is kept identical to the old AuthContext so all consumers (LeadsPage,
-// DashboardPage, EventsPage, etc.) continue to work without changes.
 
-interface User {
+// Business profile from sales_representatives — separate from the auth identity.
+export interface SalesRep {
+  id:           string;
+  rep_code:     string;
+  name:         string;
+  role:         string;
+  email:        string;
+  auth_user_id: string;
+  login_enabled: boolean;
+  is_active:    boolean;
+}
+
+// Legacy shape kept identical so all consumers (LeadsPage, DashboardPage, etc.)
+// continue to work without changes.
+export interface AuthUser {
   rep_code:    string;
   name:        string;
   role:        string;
-  // New fields available to consumers that want them
   authUserId?: string;
   email?:      string;
 }
 
 interface AuthContextType {
-  user:      User | null;
-  session:   Session | null;
-  loading:   boolean;
-  login:     (rep_code: string, password: string) => Promise<string | null>;
-  logout:    () => Promise<void>;
+  // Legacy field — identical shape to old User, safe for all existing consumers
+  user:     AuthUser | null;
+  // New structured fields for consumers that want the full picture
+  salesRep: SalesRep | null;
+  authUser: SupabaseUser | null;
+  session:  Session | null;
+  loading:  boolean;
+  login:    (rep_code: string, password: string) => Promise<string | null>;
+  logout:   () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -28,35 +43,36 @@ const AuthContext = createContext<AuthContextType | null>(null);
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user,    setUser]    = useState<User | null>(null);
-  const [session, setSession] = useState<Session | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [salesRep, setSalesRep] = useState<SalesRep | null>(null);
+  const [authUser, setAuthUser] = useState<SupabaseUser | null>(null);
+  const [session,  setSession]  = useState<Session | null>(null);
+  const [loading,  setLoading]  = useState(true);
 
-  // ── Bootstrap: restore session from Supabase's own storage ────────────────
-  // supabase-js v2 persists the session in localStorage automatically.
-  // onAuthStateChange fires synchronously on mount with the restored session.
+  // Guard: prevents loadRepProfile from running concurrently when both
+  // getSession() and onAuthStateChange fire on mount with the same session.
+  const profileLoadingRef = useRef(false);
+
+  // ── Bootstrap ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    // Get the current session immediately (avoids a blank flash on reload)
-    supabase.auth.getSession().then(({ data: { session: s } }) => {
-      if (s) {
-        setSession(s);
-        loadRepProfile(s);
-      } else {
-        // Fall back: clear any stale legacy token
-        localStorage.removeItem('session_token');
-        setLoading(false);
-      }
-    });
-
-    // Subscribe to future auth changes (login, logout, token refresh)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+    // onAuthStateChange fires immediately with the current session state,
+    // which handles both "already logged in" and "not logged in" cases.
+    // We do NOT call getSession() separately to avoid the double-load race.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
       setSession(s);
-      if (s) {
-        // Use async block to avoid deadlock with supabase-js internals
-        (async () => { await loadRepProfile(s); })();
+      setAuthUser(s?.user ?? null);
+
+      if (s?.user) {
+        // Async block avoids deadlock: never await supabase calls directly
+        // inside onAuthStateChange per the Supabase JS docs.
+        (async () => {
+          await loadRepProfile(s);
+        })();
       } else {
-        setUser(null);
+        // Signed out or no session
+        setSalesRep(null);
         setLoading(false);
+        // Clear stale legacy token if present
+        localStorage.removeItem('session_token');
       }
     });
 
@@ -64,92 +80,148 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Load the rep's profile row after auth ──────────────────────────────────
+  // ── Load rep profile ───────────────────────────────────────────────────────
+  // Reads the authenticated rep's row via my_rep_profile view (RLS-filtered
+  // to auth.uid()). Calls link_auth_user_to_rep() first in case this is a
+  // first login before the linking migration ran for this specific user.
   async function loadRepProfile(s: Session): Promise<void> {
+    // Deduplicate concurrent calls (mount fires getSession + onAuthStateChange)
+    if (profileLoadingRef.current) return;
+    profileLoadingRef.current = true;
+
     try {
-      // Ensure the auth_user_id column is linked for this rep (idempotent)
+      // Link auth_user_id if not yet done (idempotent — safe to call every time)
       await supabase.rpc('link_auth_user_to_rep');
 
-      // Read rep profile via the view (filtered to auth.uid())
       const { data, error } = await supabase
         .from('my_rep_profile')
-        .select('rep_code, name, role, auth_user_id, email')
+        .select('id, rep_code, name, role, email, auth_user_id, login_enabled, is_active')
         .maybeSingle();
 
-      if (error || !data) {
-        // Auth user exists but has no matching sales_rep row — treat as unauthorized
-        console.warn('[AuthContext] No matching sales_rep for auth user', s.user.email, error);
+      if (error) {
+        console.error('[AuthContext] loadRepProfile query failed', error);
         await supabase.auth.signOut();
-        setUser(null);
-      } else {
-        setUser({
-          rep_code:   data.rep_code,
-          name:       data.name,
-          role:       data.role,
-          authUserId: data.auth_user_id ?? s.user.id,
-          email:      data.email ?? s.user.email,
-        });
+        setSalesRep(null);
+        return;
       }
+
+      if (!data) {
+        // Valid Supabase auth user but no matching sales_rep row — unauthorized
+        console.warn('[AuthContext] No sales_rep row for auth user', s.user.email);
+        await supabase.auth.signOut();
+        setSalesRep(null);
+        return;
+      }
+
+      if (!data.login_enabled || !data.is_active) {
+        console.warn('[AuthContext] Rep account disabled/inactive', data.rep_code);
+        await supabase.auth.signOut();
+        setSalesRep(null);
+        return;
+      }
+
+      setSalesRep({
+        id:            data.id,
+        rep_code:      data.rep_code,
+        name:          data.name,
+        role:          data.role,
+        email:         data.email ?? s.user.email ?? '',
+        auth_user_id:  data.auth_user_id ?? s.user.id,
+        login_enabled: data.login_enabled,
+        is_active:     data.is_active,
+      });
     } catch (err) {
-      console.error('[AuthContext] loadRepProfile failed', err);
-      setUser(null);
+      console.error('[AuthContext] loadRepProfile threw', err);
+      setSalesRep(null);
     } finally {
+      profileLoadingRef.current = false;
       setLoading(false);
     }
   }
 
   // ── Login ──────────────────────────────────────────────────────────────────
-  // NEW flow:
-  //   STEP 1 — look up email by rep_code via RPC (no password exposed)
-  //   STEP 2 — signInWithPassword(email, password)
-  //   STEP 3 — onAuthStateChange fires → loadRepProfile fills user state
+  // STEP 1: get_rep_login_status(rep_code) — returns structured status with email
+  // STEP 2: signInWithPassword(email, password)
+  // STEP 3: onAuthStateChange fires → loadRepProfile → setSalesRep
   async function login(rep_code: string, password: string): Promise<string | null> {
-    // Step 1: Resolve rep_code → email
-    const { data: emailData, error: lookupError } = await supabase
-      .rpc('get_rep_email_by_code', { p_rep_code: rep_code.trim().toUpperCase() });
+    const normalised = rep_code.trim().toUpperCase();
 
-    if (lookupError) {
-      console.error('[login] rep lookup failed', lookupError);
-      return 'Invalid credentials';
+    // Step 1: Check rep status and retrieve email
+    const { data: statusData, error: statusError } = await supabase
+      .rpc('get_rep_login_status', { p_rep_code: normalised });
+
+    if (statusError) {
+      console.error('[login] get_rep_login_status failed', statusError);
+      return 'Login failed — please try again';
     }
 
-    const email = emailData as string | null;
-    if (!email) {
-      // rep_code not found or login disabled — same message as before
-      return 'Invalid credentials';
+    const status = (statusData as { status: string; email?: string }) ?? { status: 'not_found' };
+
+    switch (status.status) {
+      case 'not_found':
+        return 'Rep code not recognised';
+      case 'inactive':
+        return 'This account is no longer active';
+      case 'disabled':
+        return 'Login is disabled for this account';
+      case 'no_auth_account':
+        return 'Account not set up for login — contact your administrator';
+      case 'no_email':
+        return 'No email address on file — contact your administrator';
+      case 'ok':
+        break;
+      default:
+        return 'Invalid credentials';
     }
 
-    // Step 2: Authenticate via Supabase Auth
+    const email = status.email!;
+
+    // Step 2: Authenticate via Supabase Auth (validates the password)
     const { error: authError } = await supabase.auth.signInWithPassword({
       email,
       password,
     });
 
     if (authError) {
+      // Supabase returns "Invalid login credentials" for wrong password
       console.warn('[login] signInWithPassword failed', authError.message);
-      // Supabase returns "Invalid login credentials" for wrong password —
-      // normalise to the same message the old system used
-      return 'Invalid credentials';
+      if (authError.message.toLowerCase().includes('email not confirmed')) {
+        return 'Email not confirmed — contact your administrator';
+      }
+      return 'Incorrect password';
     }
 
-    // Step 3: onAuthStateChange handles the rest (loadRepProfile → setUser)
+    // Step 3: onAuthStateChange fires automatically → loadRepProfile → setSalesRep
     return null;
   }
 
   // ── Logout ─────────────────────────────────────────────────────────────────
+  // Clears Supabase session and local state.
+  // Does NOT touch IndexedDB — offline drafts are preserved.
   async function logout(): Promise<void> {
     await supabase.auth.signOut();
-    // onAuthStateChange will set user → null and session → null
+    // onAuthStateChange sets everything to null via the subscriber above
   }
 
+  // ── Legacy user shape (backward-compat for all existing consumers) ─────────
+  const user: AuthUser | null = salesRep
+    ? {
+        rep_code:   salesRep.rep_code,
+        name:       salesRep.name,
+        role:       salesRep.role,
+        authUserId: salesRep.auth_user_id,
+        email:      salesRep.email,
+      }
+    : null;
+
   return (
-    <AuthContext.Provider value={{ user, session, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, salesRep, authUser, session, loading, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
 }
 
-// ─── Hook ─────────────────────────────────────────────────────────────────────
+// ─── Hooks ────────────────────────────────────────────────────────────────────
 
 export function useAuth(): AuthContextType {
   const ctx = useContext(AuthContext);
