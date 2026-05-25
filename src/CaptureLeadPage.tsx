@@ -19,6 +19,11 @@ import {
   syncUpdateSessionFields,
   syncAbandonSession,
 } from './capture/captureBackendSync';
+import {
+  enqueueOp,
+  flushQueue,
+  getPendingCount,
+} from './capture/captureOfflineQueue';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
@@ -27,7 +32,7 @@ const QrScannerView = lazy(() =>
   import('./capture/QrScannerView').then(m => ({ default: m.QrScannerView })),
 );
 
-// ─── Stable ID generator (mirrors useCaptureSession) ─────────────────────────
+// ─── Stable ID generator ──────────────────────────────────────────────────────
 
 function genStableId(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -40,7 +45,21 @@ function genStableId(): string {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function CaptureLeadPage() {
-  const isOnline = useOnlineStatus();
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [isFlushing, setIsFlushing] = useState(false);
+
+  // Flush the offline queue and update pending count badge
+  const handleReconnect = useCallback(async () => {
+    setIsFlushing(true);
+    try {
+      await flushQueue();
+    } finally {
+      setIsFlushing(false);
+      getPendingCount().then(setPendingSyncCount);
+    }
+  }, []);
+
+  const isOnline = useOnlineStatus({ onReconnect: handleReconnect });
   const [session, actions] = useCaptureSession();
   const form = useManualEntryForm(actions);
   const [recoveryToast, setRecoveryToast] = useState<string | null>(null);
@@ -61,15 +80,19 @@ export default function CaptureLeadPage() {
   }>({ status: 'idle', progress: 0, progressLabel: '', error: null });
   const [ocrDiagnostics, setOcrDiagnostics] = useState<OcrPipelineDiagnostics | null>(null);
 
-  // Stable refs — avoids useCallback dep arrays growing
+  // Stable refs
   const addEntryRef = useRef(addEntry);
   addEntryRef.current = addEntry;
   const sessionRef = useRef(session);
   sessionRef.current = session;
 
-  // ── Backend sync callbacks ────────────────────────────────────────────────
-  // These are passed to every syncXxx call and update React state after the
-  // fire-and-forget network op settles. UI never waits on these.
+  // Poll pending count on mount and after flush
+  useEffect(() => {
+    getPendingCount().then(setPendingSyncCount);
+  }, [isFlushing]);
+
+  // ── Backend sync helpers ──────────────────────────────────────────────────
+  // When online: run immediately. When offline: enqueue for later.
 
   const makeSyncCbs = useCallback(() => ({
     onSyncing: () => actions.setSyncStatus('syncing'),
@@ -87,6 +110,79 @@ export default function CaptureLeadPage() {
       actions.decrementPendingOps();
     },
   }), [actions]);
+
+  // Upsert session — online: immediate; offline: queue
+  const syncSessionOp = useCallback(async (
+    payload: Parameters<typeof syncUpsertSession>[0],
+    bsid: string,
+  ) => {
+    if (isOnline) {
+      actions.incrementPendingOps();
+      syncUpsertSession(payload, makeSyncCbs()).catch(() => {});
+    } else {
+      await enqueueOp('upsert_session', bsid, payload);
+      actions.setSyncStatus('offline');
+      setPendingSyncCount(n => n + 1);
+      addEntryRef.current('Session queued for offline sync', { sessionId: bsid });
+    }
+  }, [isOnline, actions, makeSyncCbs]);
+
+  // Upsert asset — online: immediate; offline: queue
+  const syncAssetOp = useCallback(async (
+    payload: Parameters<typeof syncUpsertAsset>[0],
+  ) => {
+    if (isOnline) {
+      actions.incrementPendingOps();
+      syncUpsertAsset(payload, makeSyncCbs()).catch(() => {});
+    } else {
+      await enqueueOp('upsert_asset', payload.backendSessionId, payload);
+      actions.setSyncStatus('offline');
+      setPendingSyncCount(n => n + 1);
+      addEntryRef.current('Asset queued for offline sync', { assetId: payload.asset.id });
+    }
+  }, [isOnline, actions, makeSyncCbs]);
+
+  // Upsert OCR extraction — online: immediate; offline: queue
+  const syncOcrOp = useCallback(async (
+    payload: Parameters<typeof syncUpsertOcrExtraction>[0],
+  ) => {
+    if (isOnline) {
+      actions.incrementPendingOps();
+      syncUpsertOcrExtraction(payload, makeSyncCbs()).catch(() => {});
+    } else {
+      await enqueueOp('upsert_ocr_extraction', payload.backendSessionId, payload);
+      actions.setSyncStatus('offline');
+      setPendingSyncCount(n => n + 1);
+    }
+  }, [isOnline, actions, makeSyncCbs]);
+
+  // Upsert QR extraction — online: immediate; offline: queue
+  const syncQrOp = useCallback(async (
+    payload: Parameters<typeof syncUpsertQrExtraction>[0],
+  ) => {
+    if (isOnline) {
+      actions.incrementPendingOps();
+      syncUpsertQrExtraction(payload, makeSyncCbs()).catch(() => {});
+    } else {
+      await enqueueOp('upsert_qr_extraction', payload.backendSessionId, payload);
+      actions.setSyncStatus('offline');
+      setPendingSyncCount(n => n + 1);
+    }
+  }, [isOnline, actions, makeSyncCbs]);
+
+  // Update session fields — online: immediate; offline: queue
+  const syncFieldsOp = useCallback(async (
+    bsid: string,
+    draftData: typeof session.draftData,
+  ) => {
+    if (isOnline) {
+      syncUpdateSessionFields(bsid, draftData, makeSyncCbs()).catch(() => {});
+    } else {
+      await enqueueOp('update_session_fields', bsid, { sessionId: bsid, draftData });
+      actions.setSyncStatus('offline');
+      setPendingSyncCount(n => n + 1);
+    }
+  }, [isOnline, actions, makeSyncCbs, session.draftData]);
 
   useAutosave(session);
 
@@ -110,7 +206,7 @@ export default function CaptureLeadPage() {
         lastSyncedAt:    normalised.sync.lastSyncedAt,
       });
 
-      // Re-sync restored session to backend if online — keeps the DB row fresh
+      // Re-sync restored session if online
       if (normalised.sync.backendSessionId && navigator.onLine) {
         actions.incrementPendingOps();
         syncUpsertSession({
@@ -119,7 +215,7 @@ export default function CaptureLeadPage() {
           draftData:     normalised.draftData,
           sessionStatus: normalised.sessionStatus,
           localDraftKey: 'active_capture_draft',
-        }, makeSyncCbs()).catch(() => { /* already handled in callbacks */ });
+        }, makeSyncCbs()).catch(() => {});
       }
 
       setRecoveryToast('Recovered unfinished draft');
@@ -131,7 +227,7 @@ export default function CaptureLeadPage() {
   }, []);
 
   // ── Method selection ──────────────────────────────────────────────────────
-  const handleMethodSelect = useCallback((method: CaptureMethod) => {
+  const handleMethodSelect = useCallback(async (method: CaptureMethod) => {
     form.handleReset();
 
     if (method === 'QR') {
@@ -139,17 +235,14 @@ export default function CaptureLeadPage() {
       const backendSessionId = actions.startCapture('QR');
       setQrScanning(true);
 
-      // Fire-and-forget: create capture_session record in backend
-      actions.incrementPendingOps();
-      syncUpsertSession({
+      await syncSessionOp({
         sessionId:     backendSessionId,
         captureMethod: 'QR',
         draftData:     {},
         sessionStatus: 'CAPTURING',
         localDraftKey: 'active_capture_draft',
-      }, makeSyncCbs()).catch(() => {});
-
-      addEntryRef.current('Backend session created (QR)', { backendSessionId });
+      }, backendSessionId);
+      addEntryRef.current('Session created/queued (QR)', { backendSessionId });
 
     } else if (method === 'BUSINESS_CARD') {
       const sid = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -162,53 +255,48 @@ export default function CaptureLeadPage() {
       actions.startCaptureWithDraft('BUSINESS_CARD', { cardSessionId: sid });
       setQrScanning(false);
 
-      // The backendSessionId was set inside startCaptureWithDraft — read it
-      // from state via a tiny timeout (state update is sync in React 18 batching)
-      setTimeout(() => {
+      setTimeout(async () => {
         const bsid = sessionRef.current.sync.backendSessionId;
         if (!bsid) return;
-        actions.incrementPendingOps();
-        syncUpsertSession({
+        await syncSessionOp({
           sessionId:     bsid,
           captureMethod: 'BUSINESS_CARD',
           draftData:     { cardSessionId: sid },
           sessionStatus: 'CAPTURING',
           localDraftKey: 'active_capture_draft',
-        }, makeSyncCbs()).catch(() => {});
-        addEntryRef.current('Backend session created (BUSINESS_CARD)', { backendSessionId: bsid });
+        }, bsid);
+        addEntryRef.current('Session created/queued (BUSINESS_CARD)', { backendSessionId: bsid });
       }, 0);
 
     } else {
       const backendSessionId = actions.startCapture(method);
       setQrScanning(false);
 
-      actions.incrementPendingOps();
-      syncUpsertSession({
+      await syncSessionOp({
         sessionId:     backendSessionId,
         captureMethod: method,
         draftData:     {},
         sessionStatus: 'CAPTURING',
         localDraftKey: 'active_capture_draft',
-      }, makeSyncCbs()).catch(() => {});
-      addEntryRef.current('Backend session created (MANUAL)', { backendSessionId });
+      }, backendSessionId);
+      addEntryRef.current('Session created/queued (MANUAL)', { backendSessionId });
     }
-  }, [actions, form, makeSyncCbs]);
+  }, [actions, form, syncSessionOp]);
 
   // ── Back / discard ────────────────────────────────────────────────────────
   const handleBackToOptions = useCallback(() => {
-    // Mark the backend session as abandoned (fire-and-forget)
     const bsid = sessionRef.current.sync.backendSessionId;
-    if (bsid) {
+    if (bsid && isOnline) {
       syncAbandonSession(bsid, makeSyncCbs()).catch(() => {});
     }
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
-  }, [actions, form, makeSyncCbs]);
+  }, [actions, form, isOnline, makeSyncCbs]);
 
   const handleDiscardDraft = useCallback(async () => {
     const bsid = sessionRef.current.sync.backendSessionId;
-    if (bsid) {
+    if (bsid && isOnline) {
       syncAbandonSession(bsid, makeSyncCbs()).catch(() => {});
     }
     if (cardSessionId) {
@@ -220,15 +308,12 @@ export default function CaptureLeadPage() {
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
-  }, [actions, form, cardSessionId, makeSyncCbs]);
+  }, [actions, form, cardSessionId, isOnline, makeSyncCbs]);
 
   // ── QR scan complete ──────────────────────────────────────────────────────
-  const handleQrScanned = useCallback((parsed: ParsedContact) => {
+  const handleQrScanned = useCallback(async (parsed: ParsedContact) => {
     const scanStart = Date.now();
-    addEntryRef.current('QR scanned — raw text received', parsed.raw);
-    addEntryRef.current('Parsing completed', {
-      hasData: parsed.hasData, qrType: parsed.qrType, fields: parsed.fields,
-    });
+    addEntryRef.current('QR scanned', parsed.raw);
 
     const f = parsed.fields;
     const mappedDraft = {
@@ -244,38 +329,32 @@ export default function CaptureLeadPage() {
       Object.entries(mappedDraft).filter(([, v]) => v !== undefined),
     );
 
-    addEntryRef.current('draft object built (explicit mapping)', draft);
-
     setLastScan(parsed);
     actions.startCaptureWithDraft('MANUAL', draft);
     form.handleReset();
     setQrScanning(false);
 
-    // Sync: upsert extraction_result for the QR parse, then update session fields
-    setTimeout(() => {
+    setTimeout(async () => {
       const bsid = sessionRef.current.sync.backendSessionId;
       if (!bsid) return;
 
       const extractionId = genStableId();
-      actions.incrementPendingOps();
-      syncUpsertQrExtraction({
+
+      await syncQrOp({
         extractionId,
         backendSessionId: bsid,
         parsed,
         durationMs: Date.now() - scanStart,
-      }, makeSyncCbs()).catch(() => {});
-
-      actions.incrementPendingOps();
-      syncUpdateSessionFields(bsid, draft, makeSyncCbs()).catch(() => {});
-
-      addEntryRef.current('Backend: QR extraction result queued', {
-        extractionId, backendSessionId: bsid,
       });
+
+      await syncFieldsOp(bsid, draft);
+
+      addEntryRef.current('QR extraction queued/synced', { extractionId, bsid });
     }, 0);
-  }, [actions, form, makeSyncCbs]);
+  }, [actions, form, syncQrOp, syncFieldsOp]);
 
   // ── Business card assets changed ─────────────────────────────────────────
-  const handleCardAssetsChanged = useCallback((
+  const handleCardAssetsChanged = useCallback(async (
     front: BusinessCardAsset | null,
     back: BusinessCardAsset | null,
   ) => {
@@ -286,77 +365,54 @@ export default function CaptureLeadPage() {
     });
     addEntryRef.current('Business card assets updated', { frontId: front?.id, backId: back?.id });
 
-    // Sync: upsert capture_asset record for newly saved images
     const bsid = sessionRef.current.sync.backendSessionId;
     const asset = front ?? back;
     if (!bsid || !asset) return;
 
-    actions.incrementPendingOps();
-    syncUpsertAsset({ backendSessionId: bsid, asset }, makeSyncCbs()).catch(() => {});
-    addEntryRef.current('Backend: asset upsert queued', {
-      localAssetId: asset.id, side: asset.side, backendSessionId: bsid,
-    });
-  }, [actions, makeSyncCbs]);
+    await syncAssetOp({ backendSessionId: bsid, asset });
+    addEntryRef.current('Asset queued/synced', { localAssetId: asset.id });
+  }, [actions, syncAssetOp]);
 
   // ── OCR result received ───────────────────────────────────────────────────
-  const handleOcrResult = useCallback((result: OcrResult) => {
+  const handleOcrResult = useCallback(async (result: OcrResult) => {
     setLastOcrResult(result);
     setOcrDebug({ status: 'done', progress: 1, progressLabel: 'Done', error: null });
 
     addEntryRef.current('OCR completed', {
       assetId:        result.assetId,
       confidence:     result.confidence,
-      inferredFields: result.inferredFields,
       rawTextLength:  result.rawText.length,
-      rawTextPreview: result.rawText.slice(0, 300),
     });
-
-    if (result.inferredFields.length === 0) {
-      addEntryRef.current('OCR warning — no fields inferred', {
-        rawText: result.rawText, ignoredLines: result.ignoredLines,
-      }, 'warn');
-    }
-    if (!result.rawText?.trim()) {
-      addEntryRef.current('OCR error — empty raw text', undefined, 'error');
-    }
 
     actions.patchDraft({ ocrRawText: result.rawText });
 
-    // Sync: upsert extraction_result for this OCR run
     const bsid = sessionRef.current.sync.backendSessionId;
     if (!bsid) return;
 
-    const backendAssetId = sessionRef.current.sync.backendAssetIds[result.assetId] ?? null;
-    const extractionId   = genStableId();
+    const backendAssetId   = sessionRef.current.sync.backendAssetIds[result.assetId] ?? null;
+    const extractionId     = genStableId();
 
-    actions.incrementPendingOps();
-    syncUpsertOcrExtraction({
+    await syncOcrOp({
       extractionId,
       backendSessionId: bsid,
       backendAssetId,
       ocrResult:        result,
-    }, makeSyncCbs()).catch(() => {});
-
-    addEntryRef.current('Backend: OCR extraction result queued', {
-      extractionId, backendSessionId: bsid, backendAssetId,
     });
-  }, [actions, makeSyncCbs]);
+  }, [actions, syncOcrOp]);
 
   // ── Card capture complete (Continue pressed) ──────────────────────────────
-  const handleCardComplete = useCallback((
+  const handleCardComplete = useCallback(async (
     frontAssetId: string,
     backAssetId: string | null,
     ocrResult: OcrResult | null,
     visionResult: VisionResult | null,
   ) => {
-    addEntryRef.current('Business card capture complete — Continue pressed', {
+    addEntryRef.current('Business card capture complete', {
       frontAssetId, backAssetId,
-      hasOcrResult: !!ocrResult,
       hasVisionResult: !!visionResult,
       visionSource: visionResult?.source,
     });
 
-    // Vision result takes precedence; fall back to legacy OCR result
     let extractedFields: Record<string, unknown> = {};
 
     if (visionResult) {
@@ -377,9 +433,6 @@ export default function CaptureLeadPage() {
       };
     } else {
       const ocr = ocrResult ?? lastOcrResult;
-      if (!ocr) {
-        addEntryRef.current('OCR warning — no OCR result at Continue time', undefined, 'warn');
-      }
       if (ocr) {
         extractedFields = {
           clientName:  ocr.fields.clientName  || undefined,
@@ -405,30 +458,16 @@ export default function CaptureLeadPage() {
       cardBackAssetId:  backAssetId ?? undefined,
     };
 
-    addEntryRef.current('draftData updated — transitioning to manual form', {
-      draftKeys:   Object.keys(newDraft),
-      clientName:  newDraft.clientName  ?? '(empty)',
-      company:     newDraft.company     ?? '(empty)',
-      phone:       newDraft.phone       ?? '(empty)',
-      email:       newDraft.email       ?? '(empty)',
-      designation: newDraft.designation ?? '(empty)',
-    });
-
     actions.startCaptureWithDraft('MANUAL', newDraft);
 
-    // Sync: update session fields in backend with merged data
     const bsid = sessionRef.current.sync.backendSessionId;
     if (bsid) {
-      actions.incrementPendingOps();
-      syncUpdateSessionFields(bsid, newDraft, makeSyncCbs()).catch(() => {});
-      addEntryRef.current('Backend: session fields updated after card complete', { bsid });
+      await syncFieldsOp(bsid, newDraft);
+      addEntryRef.current('Session fields queued/synced after card complete', { bsid });
     }
-  }, [actions, session.draftData, cardSessionId, lastOcrResult, makeSyncCbs]);
+  }, [actions, session.draftData, cardSessionId, lastOcrResult, syncFieldsOp]);
 
-  // ── Manual form field changes (debounced by useAutosave) ──────────────────
-  // useAutosave already saves to IndexedDB. Here we also push to backend
-  // when the session is in MANUAL mode and has a backend ID.
-  // We use a ref to debounce this separately without adding to useAutosave.
+  // ── Manual form field sync (debounced 1.5s) ───────────────────────────────
   const fieldSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (session.captureMethod !== 'MANUAL') return;
@@ -437,11 +476,10 @@ export default function CaptureLeadPage() {
 
     if (fieldSyncTimerRef.current) clearTimeout(fieldSyncTimerRef.current);
     fieldSyncTimerRef.current = setTimeout(() => {
-      syncUpdateSessionFields(bsid, session.draftData, makeSyncCbs()).catch(() => {});
-    }, 1500); // 1.5s debounce — coarser than local autosave (700ms)
+      syncFieldsOp(bsid, session.draftData).catch(() => {});
+    }, 1500);
 
     return () => { if (fieldSyncTimerRef.current) clearTimeout(fieldSyncTimerRef.current); };
-  // Only re-run when draftData changes, not on every render
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.draftData]);
 
@@ -453,7 +491,7 @@ export default function CaptureLeadPage() {
 
   return (
     <div className="min-h-[calc(100vh-57px)] bg-stone-50 flex flex-col">
-      <OfflineBanner visible={!isOnline} />
+      <OfflineBanner visible={!isOnline} pendingCount={pendingSyncCount} isFlushing={isFlushing} />
 
       <div className="flex-1 w-full max-w-lg mx-auto px-5 pt-10 pb-10 flex flex-col">
 
@@ -498,6 +536,7 @@ export default function CaptureLeadPage() {
           <BusinessCardCapture
             session={session}
             sessionId={cardSessionId}
+            isOnline={isOnline}
             onComplete={handleCardComplete}
             onBack={handleBackToOptions}
             onAssetsChanged={handleCardAssetsChanged}

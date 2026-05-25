@@ -6,7 +6,7 @@ import {
   ArrowLeft, Camera, FlipHorizontal, Trash2, CheckCircle2,
   RotateCcw, ChevronRight, ImageOff, AlertCircle, Loader2,
   CreditCard, Check, Sparkles, Globe, MapPin, Phone, Mail,
-  Info, Plus, X as XIcon,
+  Info, Plus, X as XIcon, WifiOff,
 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { saveAsset, deleteAsset, getSessionAssets } from './captureAssetStorage';
@@ -26,6 +26,7 @@ interface CardState {
 interface Props {
   session: CaptureSession;
   sessionId: string;
+  isOnline?: boolean;
   onComplete: (frontAssetId: string, backAssetId: string | null, ocrResult: OcrResult | null, visionResult: VisionResult | null) => void;
   onBack: () => void;
   onAssetsChanged?: (front: BusinessCardAsset | null, back: BusinessCardAsset | null) => void;
@@ -504,7 +505,7 @@ function StepDot({ done, active, label, isFinish }: {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function BusinessCardCapture({
-  session, sessionId, onComplete, onBack, onAssetsChanged,
+  session, sessionId, isOnline = true, onComplete, onBack, onAssetsChanged,
   onVisionResult, onOcrResult, onOcrStateChange, onOcrDiagnostics: _ignored,
   onDebugLog,
 }: Props) {
@@ -665,14 +666,18 @@ export function BusinessCardCapture({
       );
 
       if (side === 'front') {
-        onDebugLog?.('Front captured — starting vision extraction', {
-          assetId: asset.id, sizeBytes: asset.sizeBytes,
-          dims: `${asset.storedWidth}×${asset.storedHeight}`,
-        });
-
-        const result = await runExtraction(asset.id, asset.dataUrl);
-        if (result) applyVisionResult(result);
-        else onDebugLog?.('Vision extraction failed or cancelled', undefined, 'error');
+        if (!isOnline) {
+          onDebugLog?.('Front captured — offline, extraction deferred', { assetId: asset.id });
+          showToast('Image saved. Fill in details manually — AI extraction will run when online.');
+        } else {
+          onDebugLog?.('Front captured — starting vision extraction', {
+            assetId: asset.id, sizeBytes: asset.sizeBytes,
+            dims: `${asset.storedWidth}×${asset.storedHeight}`,
+          });
+          const result = await runExtraction(asset.id, asset.dataUrl);
+          if (result) applyVisionResult(result);
+          else onDebugLog?.('Vision extraction failed or cancelled', undefined, 'error');
+        }
       } else {
         onDebugLog?.('Back side saved', { assetId: asset.id, sizeBytes: asset.sizeBytes });
       }
@@ -768,7 +773,9 @@ export function BusinessCardCapture({
             </div>
             <div>
               <h2 className="text-base font-semibold text-stone-900 leading-tight">Scan Business Card</h2>
-              <p className="text-xs text-stone-500 mt-0.5">AI-powered contact extraction</p>
+              <p className="text-xs text-stone-500 mt-0.5">
+              {isOnline ? 'AI-powered contact extraction' : 'Offline — saves locally, syncs later'}
+            </p>
             </div>
           </div>
         </div>
@@ -781,8 +788,21 @@ export function BusinessCardCapture({
         </div>
       </div>
 
+      {/* Offline notice */}
+      {!isOnline && (
+        <div className="mb-4 rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3.5 flex items-start gap-3 animate-in fade-in duration-200">
+          <WifiOff className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-semibold text-amber-900 leading-tight">Offline — AI extraction unavailable</p>
+            <p className="text-xs text-amber-700 mt-0.5 leading-snug">
+              Photos save locally. Fill details manually below. Extraction runs automatically when you reconnect.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Extraction banner */}
-      {showBanner && (
+      {showBanner && isOnline && (
         <div className="mb-4 animate-in fade-in duration-200">
           <ExtractionBanner
             visionState={visionState}
@@ -804,8 +824,8 @@ export function BusinessCardCapture({
         )}
       </div>
 
-      {/* Extracted fields review — shown after extraction */}
-      {(hasExtractionResult || (front.asset && !isRunning)) && (
+      {/* Extracted fields review — shown after extraction OR offline after capture */}
+      {(hasExtractionResult || (front.asset && !isRunning) || (!isOnline && front.asset)) && (
         <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden mb-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
           <div className="px-5 pt-4 pb-3 border-b border-stone-100 flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-amber-500 flex-shrink-0" />

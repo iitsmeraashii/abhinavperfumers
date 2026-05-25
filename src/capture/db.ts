@@ -3,8 +3,8 @@
 // Replace this module (e.g. with Capacitor SQLite) without touching callers.
 
 const DB_NAME = 'capture_app';
-// v2 adds the 'assets' object store for business card images
-const DB_VERSION = 2;
+// v3 adds the 'pending_ops' object store for offline sync queue
+const DB_VERSION = 3;
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -19,11 +19,30 @@ function openDB(): Promise<IDBDatabase> {
         const store = db.createObjectStore('assets', { keyPath: 'id' });
         store.createIndex('by_session', 'sessionId', { unique: false });
       }
+      if (!db.objectStoreNames.contains('pending_ops')) {
+        const opStore = db.createObjectStore('pending_ops', { keyPath: 'id' });
+        opStore.createIndex('by_session', 'sessionId', { unique: false });
+        opStore.createIndex('by_created', 'createdAt', { unique: false });
+      }
     };
 
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
+}
+
+export async function dbGetAllInStore<T>(store: string): Promise<T[]> {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readonly');
+      const req = tx.objectStore(store).getAll();
+      req.onsuccess = () => resolve(req.result ?? []);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return [];
+  }
 }
 
 export async function dbGetAll<T>(store: string, indexName: string, indexValue: string): Promise<T[]> {
