@@ -1,9 +1,11 @@
 // Mobile debug overlay for QR + OCR capture troubleshooting.
 // Floating button + bottom-sheet. Visible in all environments.
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Bug, X, ChevronDown, ChevronRight, Clipboard, Check, AlertTriangle, RefreshCw, WifiOff, CheckCircle } from 'lucide-react';
+import { Bug, X, ChevronDown, ChevronRight, Clipboard, Check, AlertTriangle, RefreshCw, WifiOff, CheckCircle, ShieldCheck, ShieldOff } from 'lucide-react';
+import type { Session } from '@supabase/supabase-js';
+import { supabase } from '../supabaseClient';
 import type { BackendSyncState, BusinessCardAsset, CaptureSession, OcrResult, OcrStatus, SyncStatus } from './types';
 import type { ParsedContact } from './parseQrPayload';
 
@@ -519,6 +521,109 @@ interface OverlayProps {
   onClearLog: () => void;
 }
 
+// ── Auth debug section ────────────────────────────────────────────────────────
+
+function AuthDebugSection() {
+  const [authSession, setAuthSession] = useState<Session | null>(null);
+  const [loading, setLoading]         = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session: s } }) => {
+      setAuthSession(s);
+      setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => {
+      setAuthSession(s);
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const isAuthenticated = !!authSession;
+  const expiresAt = authSession?.expires_at
+    ? new Date(authSession.expires_at * 1000).toISOString()
+    : null;
+  const expiresInMs  = authSession?.expires_at
+    ? authSession.expires_at * 1000 - Date.now()
+    : null;
+  const expiresInMin = expiresInMs != null
+    ? Math.round(expiresInMs / 60_000)
+    : null;
+
+  return (
+    <Section
+      title="Auth Session"
+      badge={loading ? 'LOADING' : isAuthenticated ? 'AUTHENTICATED' : 'NOT AUTH'}
+      badgeColor={loading ? undefined : isAuthenticated ? 'green' : 'red'}
+      defaultOpen
+    >
+      <div className="flex items-center gap-3 py-1">
+        {isAuthenticated
+          ? <ShieldCheck className="w-4 h-4 text-green-400 flex-shrink-0" />
+          : <ShieldOff   className="w-4 h-4 text-red-400  flex-shrink-0" />}
+        <span
+          style={{ fontFamily: 'monospace', fontSize: 11 }}
+          className={isAuthenticated ? 'text-green-300' : 'text-red-300'}
+        >
+          {loading ? 'Checking…' : isAuthenticated ? 'Authenticated' : 'Not authenticated'}
+        </span>
+      </div>
+
+      <div style={{ fontFamily: 'monospace', fontSize: 10, lineHeight: 1.8 }} className="mt-2 text-stone-400 space-y-0.5">
+        <div>
+          auth_user_id:{' '}
+          <span className={authSession?.user?.id ? 'text-sky-300 break-all' : 'text-stone-600'}>
+            {authSession?.user?.id ?? '—'}
+          </span>
+        </div>
+        <div>
+          email:{' '}
+          <span className={authSession?.user?.email ? 'text-amber-300' : 'text-stone-600'}>
+            {authSession?.user?.email ?? '—'}
+          </span>
+        </div>
+        <div>
+          session exists:{' '}
+          <span className={isAuthenticated ? 'text-green-400' : 'text-red-400'}>
+            {String(isAuthenticated)}
+          </span>
+        </div>
+        <div>
+          token expiry:{' '}
+          <span className={expiresAt ? (expiresInMin != null && expiresInMin < 5 ? 'text-red-400' : 'text-green-300') : 'text-stone-600'}>
+            {expiresAt ?? '—'}
+          </span>
+        </div>
+        {expiresInMin != null && (
+          <div>
+            expires in:{' '}
+            <span className={expiresInMin < 5 ? 'text-red-400' : 'text-stone-300'}>
+              {expiresInMin} min
+            </span>
+          </div>
+        )}
+        <div>
+          provider:{' '}
+          <span className="text-stone-300">
+            {authSession?.user?.app_metadata?.provider ?? '—'}
+          </span>
+        </div>
+      </div>
+
+      {/* Diagnostic checks */}
+      <div className="mt-3 pt-2 border-t border-stone-800 space-y-1">
+        <DiagRow label="Session object present"  ok={isAuthenticated}                              pending={loading} />
+        <DiagRow label="access_token present"     ok={!!authSession?.access_token}                 pending={loading} />
+        <DiagRow label="user.id present"          ok={!!authSession?.user?.id}                     pending={loading} />
+        <DiagRow label="Token not expired"        ok={expiresInMin != null && expiresInMin > 0}    pending={loading} />
+        <DiagRow label="Token valid > 5 min"      ok={expiresInMin != null && expiresInMin > 5}    pending={loading} />
+      </div>
+    </Section>
+  );
+}
+
 // ── Backend sync section ──────────────────────────────────────────────────────
 
 function SyncStatusPill({ status }: { status: SyncStatus | 'unknown' }) {
@@ -734,6 +839,15 @@ function DebugOverlay({
                 </div>
               </>
             )}
+
+            {/* Auth Session */}
+            <div
+              style={{ fontFamily: 'monospace', fontSize: 10 }}
+              className="text-green-400 uppercase tracking-widest font-bold pt-1 pb-0.5 border-b border-stone-700"
+            >
+              ─── Auth Session ───
+            </div>
+            <AuthDebugSection />
 
             {/* Backend Sync */}
             {session.sessionStatus !== 'IDLE' && (
