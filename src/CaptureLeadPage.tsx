@@ -11,12 +11,32 @@ import { ManualEntryForm } from './capture/ManualEntryForm';
 import { BusinessCardCapture } from './capture/BusinessCardCapture';
 import { Toast } from './capture/CaptureUI';
 import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
-import type { CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus } from './capture/types';
+import {
+  syncUpsertSession,
+  syncUpsertAsset,
+  syncUpsertOcrExtraction,
+  syncUpsertQrExtraction,
+  syncUpdateSessionFields,
+  syncAbandonSession,
+} from './capture/captureBackendSync';
+import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus } from './capture/types';
 import type { ParsedContact } from './capture/parseQrPayload';
 
 const QrScannerView = lazy(() =>
   import('./capture/QrScannerView').then(m => ({ default: m.QrScannerView })),
 );
+
+// ─── Stable ID generator (mirrors useCaptureSession) ─────────────────────────
+
+function genStableId(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function CaptureLeadPage() {
   const isOnline = useOnlineStatus();
@@ -32,7 +52,6 @@ export default function CaptureLeadPage() {
   const [cardAssets, setCardAssets] = useState<{ front: BusinessCardAsset | null; back: BusinessCardAsset | null }>({ front: null, back: null });
   const [lastOcrResult, setLastOcrResult] = useState<OcrResult | null>(null);
 
-  // Live OCR state surfaced from BusinessCardCapture for the debug panel
   const [ocrDebug, setOcrDebug] = useState<{
     status: 'idle' | 'processing' | 'done' | 'error';
     progress: number;
@@ -40,20 +59,40 @@ export default function CaptureLeadPage() {
     error: string | null;
   }>({ status: 'idle', progress: 0, progressLabel: '', error: null });
 
-  // Keep a stable ref to addEntry so useCallback deps stay minimal
+  // Stable refs — avoids useCallback dep arrays growing
   const addEntryRef = useRef(addEntry);
   addEntryRef.current = addEntry;
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+
+  // ── Backend sync callbacks ────────────────────────────────────────────────
+  // These are passed to every syncXxx call and update React state after the
+  // fire-and-forget network op settles. UI never waits on these.
+
+  const makeSyncCbs = useCallback(() => ({
+    onSyncing: () => actions.setSyncStatus('syncing'),
+    onSynced:  (patch: Partial<BackendSyncState>) => {
+      actions.patchSync({ ...patch, status: 'synced' });
+      actions.decrementPendingOps();
+    },
+    onSyncError: (err: string) => {
+      actions.setSyncStatus('error', err);
+      actions.decrementPendingOps();
+      addEntryRef.current('Backend sync error', err, 'warn');
+    },
+    onOffline: () => {
+      actions.setSyncStatus('offline');
+      actions.decrementPendingOps();
+    },
+  }), [actions]);
 
   useAutosave(session);
 
-  // Restore a persisted draft on mount.
-  // A QR-method session means the scan already completed — treat as MANUAL
-  // so the user lands on the editable form, not the scanner.
+  // ── Draft restore on mount ────────────────────────────────────────────────
   useEffect(() => {
     loadDraft().then((saved) => {
       if (!saved || saved.sessionStatus === 'IDLE') return;
 
-      // Restore business card session ID so BusinessCardCapture can reload assets
       if (saved.captureMethod === 'BUSINESS_CARD' && saved.draftData.cardSessionId) {
         setCardSessionId(saved.draftData.cardSessionId as string);
       }
@@ -63,46 +102,113 @@ export default function CaptureLeadPage() {
         : saved;
 
       actions.restoreSession(normalised);
+      addEntryRef.current('Draft restored from IndexedDB', {
+        method:          normalised.captureMethod,
+        backendSessionId: normalised.sync.backendSessionId,
+        lastSyncedAt:    normalised.sync.lastSyncedAt,
+      });
+
+      // Re-sync restored session to backend if online — keeps the DB row fresh
+      if (normalised.sync.backendSessionId && navigator.onLine) {
+        actions.incrementPendingOps();
+        syncUpsertSession({
+          sessionId:     normalised.sync.backendSessionId,
+          captureMethod: (normalised.captureMethod ?? 'MANUAL') as CaptureMethod,
+          draftData:     normalised.draftData,
+          sessionStatus: normalised.sessionStatus,
+          localDraftKey: 'active_capture_draft',
+        }, makeSyncCbs()).catch(() => { /* already handled in callbacks */ });
+      }
 
       setRecoveryToast('Recovered unfinished draft');
       recoveryTimer.current = setTimeout(() => setRecoveryToast(null), 3200);
     });
 
-    return () => {
-      if (recoveryTimer.current) clearTimeout(recoveryTimer.current);
-    };
+    return () => { if (recoveryTimer.current) clearTimeout(recoveryTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Method selection ──────────────────────────────────────────────────────
   const handleMethodSelect = useCallback((method: CaptureMethod) => {
     form.handleReset();
+
     if (method === 'QR') {
       addEntryRef.current('QR scanner opened');
-      actions.startCapture('QR');
+      const backendSessionId = actions.startCapture('QR');
       setQrScanning(true);
+
+      // Fire-and-forget: create capture_session record in backend
+      actions.incrementPendingOps();
+      syncUpsertSession({
+        sessionId:     backendSessionId,
+        captureMethod: 'QR',
+        draftData:     {},
+        sessionStatus: 'CAPTURING',
+        localDraftKey: 'active_capture_draft',
+      }, makeSyncCbs()).catch(() => {});
+
+      addEntryRef.current('Backend session created (QR)', { backendSessionId });
+
     } else if (method === 'BUSINESS_CARD') {
       const sid = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       setCardSessionId(sid);
       setCardAssets({ front: null, back: null });
       setOcrDebug({ status: 'idle', progress: 0, progressLabel: '', error: null });
       setLastOcrResult(null);
+
       addEntryRef.current('Business card capture session started', { cardSessionId: sid });
       actions.startCaptureWithDraft('BUSINESS_CARD', { cardSessionId: sid });
       setQrScanning(false);
-    } else {
-      actions.startCapture(method);
-      setQrScanning(false);
-    }
-  }, [actions, form]);
 
+      // The backendSessionId was set inside startCaptureWithDraft — read it
+      // from state via a tiny timeout (state update is sync in React 18 batching)
+      setTimeout(() => {
+        const bsid = sessionRef.current.sync.backendSessionId;
+        if (!bsid) return;
+        actions.incrementPendingOps();
+        syncUpsertSession({
+          sessionId:     bsid,
+          captureMethod: 'BUSINESS_CARD',
+          draftData:     { cardSessionId: sid },
+          sessionStatus: 'CAPTURING',
+          localDraftKey: 'active_capture_draft',
+        }, makeSyncCbs()).catch(() => {});
+        addEntryRef.current('Backend session created (BUSINESS_CARD)', { backendSessionId: bsid });
+      }, 0);
+
+    } else {
+      const backendSessionId = actions.startCapture(method);
+      setQrScanning(false);
+
+      actions.incrementPendingOps();
+      syncUpsertSession({
+        sessionId:     backendSessionId,
+        captureMethod: method,
+        draftData:     {},
+        sessionStatus: 'CAPTURING',
+        localDraftKey: 'active_capture_draft',
+      }, makeSyncCbs()).catch(() => {});
+      addEntryRef.current('Backend session created (MANUAL)', { backendSessionId });
+    }
+  }, [actions, form, makeSyncCbs]);
+
+  // ── Back / discard ────────────────────────────────────────────────────────
   const handleBackToOptions = useCallback(() => {
+    // Mark the backend session as abandoned (fire-and-forget)
+    const bsid = sessionRef.current.sync.backendSessionId;
+    if (bsid) {
+      syncAbandonSession(bsid, makeSyncCbs()).catch(() => {});
+    }
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
-  }, [actions, form]);
+  }, [actions, form, makeSyncCbs]);
 
   const handleDiscardDraft = useCallback(async () => {
-    // Delete any locally-stored card images before discarding
+    const bsid = sessionRef.current.sync.backendSessionId;
+    if (bsid) {
+      syncAbandonSession(bsid, makeSyncCbs()).catch(() => {});
+    }
     if (cardSessionId) {
       await deleteSessionAssets(cardSessionId);
       setCardSessionId('');
@@ -112,20 +218,16 @@ export default function CaptureLeadPage() {
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
-  }, [actions, form, cardSessionId]);
+  }, [actions, form, cardSessionId, makeSyncCbs]);
 
-  // After a successful QR scan: normalize parsed fields into the exact DraftData
-  // key shape, then seed the session atomically. ManualEntryForm reads from
-  // session.draftData directly so fields appear immediately without a hydration step.
-  //
-  // Wrapped in useCallback so QrScannerView's effect dep array stays stable —
-  // prevents the success effect from re-firing on unrelated parent re-renders.
+  // ── QR scan complete ──────────────────────────────────────────────────────
   const handleQrScanned = useCallback((parsed: ParsedContact) => {
+    const scanStart = Date.now();
     addEntryRef.current('QR scanned — raw text received', parsed.raw);
-    addEntryRef.current('Parsing completed', { hasData: parsed.hasData, qrType: parsed.qrType, fields: parsed.fields });
+    addEntryRef.current('Parsing completed', {
+      hasData: parsed.hasData, qrType: parsed.qrType, fields: parsed.fields,
+    });
 
-    // Explicit field-by-field normalization — never assume parser key names
-    // match DraftData keys automatically.
     const f = parsed.fields;
     const mappedDraft = {
       clientName:  String(f.clientName  ?? '').trim() || undefined,
@@ -136,90 +238,121 @@ export default function CaptureLeadPage() {
       notes:       String(f.notes       ?? '').trim() || undefined,
       rawQr:       parsed.raw,
     };
-
-    // Strip undefined so draftData stays clean
     const draft = Object.fromEntries(
       Object.entries(mappedDraft).filter(([, v]) => v !== undefined),
     );
 
     addEntryRef.current('draft object built (explicit mapping)', draft);
 
-    console.group('[QR Scan] handleQrScanned');
-    console.log('raw QR text:', parsed.raw);
-    console.log('qrType:', parsed.qrType);
-    console.log('parsed.fields:', parsed.fields);
-    console.log('mapped draft:', draft);
-    console.groupEnd();
-
     setLastScan(parsed);
-    addEntryRef.current('startCaptureWithDraft called', { method: 'MANUAL', draftKeys: Object.keys(draft) });
     actions.startCaptureWithDraft('MANUAL', draft);
-
-    addEntryRef.current('Form view triggered — captureMethod MANUAL, qrScanning false');
     form.handleReset();
     setQrScanning(false);
-  }, [actions, form]);
 
-  const handleCardAssetsChanged = useCallback((front: BusinessCardAsset | null, back: BusinessCardAsset | null) => {
+    // Sync: upsert extraction_result for the QR parse, then update session fields
+    setTimeout(() => {
+      const bsid = sessionRef.current.sync.backendSessionId;
+      if (!bsid) return;
+
+      const extractionId = genStableId();
+      actions.incrementPendingOps();
+      syncUpsertQrExtraction({
+        extractionId,
+        backendSessionId: bsid,
+        parsed,
+        durationMs: Date.now() - scanStart,
+      }, makeSyncCbs()).catch(() => {});
+
+      actions.incrementPendingOps();
+      syncUpdateSessionFields(bsid, draft, makeSyncCbs()).catch(() => {});
+
+      addEntryRef.current('Backend: QR extraction result queued', {
+        extractionId, backendSessionId: bsid,
+      });
+    }, 0);
+  }, [actions, form, makeSyncCbs]);
+
+  // ── Business card assets changed ─────────────────────────────────────────
+  const handleCardAssetsChanged = useCallback((
+    front: BusinessCardAsset | null,
+    back: BusinessCardAsset | null,
+  ) => {
     setCardAssets({ front, back });
-    // Keep draft in sync with current asset IDs
     actions.patchDraft({
       cardFrontAssetId: front?.id ?? undefined,
       cardBackAssetId:  back?.id  ?? undefined,
     });
     addEntryRef.current('Business card assets updated', { frontId: front?.id, backId: back?.id });
-  }, [actions]);
 
+    // Sync: upsert capture_asset record for newly saved images
+    const bsid = sessionRef.current.sync.backendSessionId;
+    const asset = front ?? back;
+    if (!bsid || !asset) return;
+
+    actions.incrementPendingOps();
+    syncUpsertAsset({ backendSessionId: bsid, asset }, makeSyncCbs()).catch(() => {});
+    addEntryRef.current('Backend: asset upsert queued', {
+      localAssetId: asset.id, side: asset.side, backendSessionId: bsid,
+    });
+  }, [actions, makeSyncCbs]);
+
+  // ── OCR result received ───────────────────────────────────────────────────
   const handleOcrResult = useCallback((result: OcrResult) => {
     setLastOcrResult(result);
     setOcrDebug({ status: 'done', progress: 1, progressLabel: 'Done', error: null });
 
     addEntryRef.current('OCR completed', {
-      assetId: result.assetId,
-      confidence: result.confidence,
+      assetId:        result.assetId,
+      confidence:     result.confidence,
       inferredFields: result.inferredFields,
-      rawTextLength: result.rawText.length,
+      rawTextLength:  result.rawText.length,
       rawTextPreview: result.rawText.slice(0, 300),
     });
 
-    addEntryRef.current('OCR parsed fields', {
-      clientName:  result.fields.clientName  ?? '(empty)',
-      company:     result.fields.company     ?? '(empty)',
-      phone:       result.fields.phone       ?? '(empty)',
-      email:       result.fields.email       ?? '(empty)',
-      designation: result.fields.designation ?? '(empty)',
-    });
-
     if (result.inferredFields.length === 0) {
-      addEntryRef.current('OCR warning — no fields inferred from raw text', {
-        rawText: result.rawText,
-        ignoredLines: result.ignoredLines,
+      addEntryRef.current('OCR warning — no fields inferred', {
+        rawText: result.rawText, ignoredLines: result.ignoredLines,
       }, 'warn');
     }
-
-    if (!result.rawText || result.rawText.trim().length === 0) {
-      addEntryRef.current('OCR error — empty raw text returned by Tesseract', undefined, 'error');
+    if (!result.rawText?.trim()) {
+      addEntryRef.current('OCR error — empty raw text', undefined, 'error');
     }
 
-    // Store raw text in draft for debugging/future enrichment
     actions.patchDraft({ ocrRawText: result.rawText });
-    addEntryRef.current('draftData patched with ocrRawText', { length: result.rawText.length });
-  }, [actions]);
 
-  const handleCardComplete = useCallback((frontAssetId: string, backAssetId: string | null, ocrResult: OcrResult | null) => {
+    // Sync: upsert extraction_result for this OCR run
+    const bsid = sessionRef.current.sync.backendSessionId;
+    if (!bsid) return;
+
+    const backendAssetId = sessionRef.current.sync.backendAssetIds[result.assetId] ?? null;
+    const extractionId   = genStableId();
+
+    actions.incrementPendingOps();
+    syncUpsertOcrExtraction({
+      extractionId,
+      backendSessionId: bsid,
+      backendAssetId,
+      ocrResult:        result,
+    }, makeSyncCbs()).catch(() => {});
+
+    addEntryRef.current('Backend: OCR extraction result queued', {
+      extractionId, backendSessionId: bsid, backendAssetId,
+    });
+  }, [actions, makeSyncCbs]);
+
+  // ── Card capture complete (Continue pressed) ──────────────────────────────
+  const handleCardComplete = useCallback((
+    frontAssetId: string,
+    backAssetId: string | null,
+    ocrResult: OcrResult | null,
+  ) => {
     addEntryRef.current('Business card capture complete — Continue pressed', {
-      frontAssetId,
-      backAssetId,
-      hasOcrResult: !!ocrResult,
-      hasLastOcrResult: !!lastOcrResult,
+      frontAssetId, backAssetId, hasOcrResult: !!ocrResult,
     });
 
-    // Build draft by merging OCR fields — only populate fields that are empty
-    // so manually typed values are never overwritten by OCR.
     const ocr = ocrResult ?? lastOcrResult;
-
     if (!ocr) {
-      addEntryRef.current('OCR warning — no OCR result available at Continue time', undefined, 'warn');
+      addEntryRef.current('OCR warning — no OCR result at Continue time', undefined, 'warn');
     }
 
     const ocrFields = ocr ? {
@@ -230,23 +363,13 @@ export default function CaptureLeadPage() {
       designation: ocr.fields.designation || undefined,
       notes:       ocr.fields.notes       || undefined,
     } : {};
-
-    // Strip undefined
     const cleanOcr = Object.fromEntries(
       Object.entries(ocrFields).filter(([, v]) => v !== undefined),
     );
 
-    addEntryRef.current('OCR field mapping — cleanOcr object', cleanOcr);
-
-    const existingDraftKeys = Object.keys(session.draftData).filter(k => {
-      const v = session.draftData[k];
-      return v !== undefined && v !== null && v !== '';
-    });
-    addEntryRef.current('Existing draftData keys (will override OCR)', existingDraftKeys);
-
     const newDraft = {
-      ...cleanOcr,                      // OCR fields as base
-      ...session.draftData,             // existing draft overrides (preserves manual edits)
+      ...cleanOcr,
+      ...session.draftData,
       cardSessionId:    cardSessionId,
       cardFrontAssetId: frontAssetId,
       cardBackAssetId:  backAssetId ?? undefined,
@@ -254,7 +377,7 @@ export default function CaptureLeadPage() {
     };
 
     addEntryRef.current('draftData updated — transitioning to manual form', {
-      draftKeys: Object.keys(newDraft),
+      draftKeys:   Object.keys(newDraft),
       clientName:  newDraft.clientName  ?? '(empty)',
       company:     newDraft.company     ?? '(empty)',
       phone:       newDraft.phone       ?? '(empty)',
@@ -262,12 +385,38 @@ export default function CaptureLeadPage() {
       designation: newDraft.designation ?? '(empty)',
     });
 
-    // Transition to MANUAL form so user can review/edit
     actions.startCaptureWithDraft('MANUAL', newDraft);
 
-    addEntryRef.current('Manual entry form rendered — captureMethod: MANUAL');
-  }, [actions, session.draftData, cardSessionId, lastOcrResult]);
+    // Sync: update session fields in backend with merged data
+    const bsid = sessionRef.current.sync.backendSessionId;
+    if (bsid) {
+      actions.incrementPendingOps();
+      syncUpdateSessionFields(bsid, newDraft, makeSyncCbs()).catch(() => {});
+      addEntryRef.current('Backend: session fields updated after card complete', { bsid });
+    }
+  }, [actions, session.draftData, cardSessionId, lastOcrResult, makeSyncCbs]);
 
+  // ── Manual form field changes (debounced by useAutosave) ──────────────────
+  // useAutosave already saves to IndexedDB. Here we also push to backend
+  // when the session is in MANUAL mode and has a backend ID.
+  // We use a ref to debounce this separately without adding to useAutosave.
+  const fieldSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (session.captureMethod !== 'MANUAL') return;
+    const bsid = session.sync.backendSessionId;
+    if (!bsid) return;
+
+    if (fieldSyncTimerRef.current) clearTimeout(fieldSyncTimerRef.current);
+    fieldSyncTimerRef.current = setTimeout(() => {
+      syncUpdateSessionFields(bsid, session.draftData, makeSyncCbs()).catch(() => {});
+    }, 1500); // 1.5s debounce — coarser than local autosave (700ms)
+
+    return () => { if (fieldSyncTimerRef.current) clearTimeout(fieldSyncTimerRef.current); };
+  // Only re-run when draftData changes, not on every render
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.draftData]);
+
+  // ─── Derived flags ─────────────────────────────────────────────────────────
   const isCapturing      = session.sessionStatus !== 'IDLE';
   const showQrScanner    = isCapturing && session.captureMethod === 'QR' && qrScanning;
   const showManualForm   = isCapturing && session.captureMethod === 'MANUAL';

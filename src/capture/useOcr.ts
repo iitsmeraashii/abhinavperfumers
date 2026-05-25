@@ -237,11 +237,13 @@ export function useOcr(): UseOcrReturn {
 
       // ── 3. Recognize ──────────────────────────────────────────────────────
       // Pass the object URL so Tesseract fetches the Blob — never sees base64
-      const { data } = await withTimeout(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const recognizeResult = await withTimeout<any>(
         worker.recognize(prepared.objectUrl),
         OCR_TIMEOUT_MS,
         `recognize ${prepared.width}×${prepared.height}`,
       );
+      const { data } = recognizeResult;
 
       URL.revokeObjectURL(prepared.objectUrl);
       prepared = null;

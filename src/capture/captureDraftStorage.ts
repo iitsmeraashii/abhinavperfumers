@@ -4,41 +4,62 @@
 
 import { dbGet, dbPut, dbDelete } from './db';
 import type { CaptureSession } from './types';
+import { INITIAL_SYNC_STATE } from './types';
 
 const STORE = 'drafts';
 const DRAFT_KEY = 'active_capture_draft';
 
-// What we actually persist — a serialisable snapshot of CaptureSession.
+// Serialisable snapshot of CaptureSession — persisted to IndexedDB.
+// Includes backend sync IDs so the session reconnects to its DB row on restore.
 export interface PersistedDraft {
-  id: string;
-  captureMethod: CaptureSession['captureMethod'];
-  sessionStatus: CaptureSession['sessionStatus'];
-  draftData: CaptureSession['draftData'];
-  hasUnsavedChanges: boolean;
-  createdAt: string | null; // ISO string
-  updatedAt: string | null;
+  id:                   string;
+  captureMethod:        CaptureSession['captureMethod'];
+  sessionStatus:        CaptureSession['sessionStatus'];
+  draftData:            CaptureSession['draftData'];
+  hasUnsavedChanges:    boolean;
+  createdAt:            string | null;
+  updatedAt:            string | null;
+  // Backend sync state persisted for session continuity across refreshes
+  backendSessionId:     string | null;
+  backendAssetIds:      Record<string, string>;
+  backendExtractionIds: Record<string, string>;
+  lastSyncedAt:         string | null;
 }
 
 function toRecord(session: CaptureSession): PersistedDraft {
   return {
-    id: DRAFT_KEY,
-    captureMethod: session.captureMethod,
-    sessionStatus: session.sessionStatus,
-    draftData: session.draftData,
-    hasUnsavedChanges: session.hasUnsavedChanges,
-    createdAt: session.createdAt?.toISOString() ?? null,
-    updatedAt: session.updatedAt?.toISOString() ?? null,
+    id:                   DRAFT_KEY,
+    captureMethod:        session.captureMethod,
+    sessionStatus:        session.sessionStatus,
+    draftData:            session.draftData,
+    hasUnsavedChanges:    session.hasUnsavedChanges,
+    createdAt:            session.createdAt?.toISOString() ?? null,
+    updatedAt:            session.updatedAt?.toISOString() ?? null,
+    backendSessionId:     session.sync.backendSessionId,
+    backendAssetIds:      session.sync.backendAssetIds,
+    backendExtractionIds: session.sync.backendExtractionIds,
+    lastSyncedAt:         session.sync.lastSyncedAt,
   };
 }
 
 function fromRecord(record: PersistedDraft): CaptureSession {
   return {
-    captureMethod: record.captureMethod,
-    sessionStatus: record.sessionStatus,
-    draftData: record.draftData ?? {},
+    captureMethod:     record.captureMethod,
+    sessionStatus:     record.sessionStatus,
+    draftData:         record.draftData ?? {},
     hasUnsavedChanges: record.hasUnsavedChanges ?? false,
-    createdAt: record.createdAt ? new Date(record.createdAt) : null,
-    updatedAt: record.updatedAt ? new Date(record.updatedAt) : null,
+    createdAt:         record.createdAt ? new Date(record.createdAt) : null,
+    updatedAt:         record.updatedAt ? new Date(record.updatedAt) : null,
+    sync: {
+      ...INITIAL_SYNC_STATE,
+      backendSessionId:     record.backendSessionId     ?? null,
+      backendAssetIds:      record.backendAssetIds       ?? {},
+      backendExtractionIds: record.backendExtractionIds  ?? {},
+      lastSyncedAt:         record.lastSyncedAt          ?? null,
+      // Restored sessions start as 'synced' (or 'idle' if never synced).
+      // CaptureLeadPage will trigger a re-sync if online.
+      status: record.backendSessionId ? 'synced' : 'idle',
+    },
   };
 }
 
@@ -54,7 +75,6 @@ function isValidDraft(record: unknown): record is PersistedDraft {
 }
 
 export async function saveDraft(session: CaptureSession): Promise<void> {
-  // Only persist sessions that have actual data
   if (session.sessionStatus === 'IDLE') return;
   await dbPut(STORE, toRecord(session));
 }

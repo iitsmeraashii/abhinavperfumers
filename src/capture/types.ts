@@ -1,21 +1,25 @@
+// ─── Capture method / status ──────────────────────────────────────────────────
+
 export type CaptureMethod = 'BUSINESS_CARD' | 'QR' | 'MANUAL';
 
 export type SessionStatus = 'IDLE' | 'CAPTURING' | 'DRAFT' | 'READY_FOR_REVIEW';
 
 export type CardSide = 'front' | 'back';
 
+// ─── Local (IndexedDB) models ─────────────────────────────────────────────────
+
 export interface BusinessCardAsset {
   id: string;
   sessionId: string;
   side: CardSide;
-  dataUrl: string;        // compressed image as data: URI
+  dataUrl: string;
   mimeType: string;
   originalWidth: number;
   originalHeight: number;
   storedWidth: number;
   storedHeight: number;
   sizeBytes: number;
-  createdAt: string;      // ISO string
+  createdAt: string;
 }
 
 export type OcrStatus = 'idle' | 'processing' | 'done' | 'error';
@@ -31,44 +35,138 @@ export interface OcrResult {
 }
 
 export interface DraftData {
-  // Manual entry fields
-  clientName?: string;
-  company?: string;
-  phone?: string;
-  email?: string;
-  designation?: string;
-  notes?: string;
-  // Business card assets (IDs reference IndexedDB 'assets' store)
-  cardSessionId?: string;
-  cardFrontAssetId?: string;
-  cardBackAssetId?: string;
-  // OCR results
-  ocrRawText?: string;
-  // QR scanner fields
-  rawQr?: string;
+  clientName?:        string;
+  company?:           string;
+  phone?:             string;
+  email?:             string;
+  designation?:       string;
+  notes?:             string;
+  cardSessionId?:     string;
+  cardFrontAssetId?:  string;
+  cardBackAssetId?:   string;
+  ocrRawText?:        string;
+  rawQr?:             string;
   [key: string]: unknown;
 }
 
 export interface ManualEntryFields {
-  clientName: string;
-  company: string;
-  phone: string;
-  email: string;
-  designation: string;
-  notes: string;
+  clientName:   string;
+  company:      string;
+  phone:        string;
+  email:        string;
+  designation:  string;
+  notes:        string;
 }
 
 export interface ManualEntryErrors {
   clientName?: string;
-  company?: string;
-  phone?: string;
+  company?:    string;
+  phone?:      string;
 }
 
+// ─── Backend sync state ───────────────────────────────────────────────────────
+
+export type SyncStatus =
+  | 'idle'        // no backend session yet
+  | 'syncing'     // upsert in flight
+  | 'synced'      // last upsert succeeded
+  | 'error'       // last upsert failed
+  | 'offline';    // skipped because navigator.onLine was false
+
+export interface BackendSyncState {
+  status:             SyncStatus;
+  backendSessionId:   string | null;  // capture_sessions.id
+  lastSyncedAt:       string | null;  // ISO timestamp
+  pendingOps:         number;         // ops queued but not yet confirmed
+  lastError:          string | null;
+  // per-record backend IDs for debug panel
+  backendAssetIds:    Record<string, string>;       // localAssetId → capture_assets.id
+  backendExtractionIds: Record<string, string>;     // localKey → extraction_results.id
+}
+
+export const INITIAL_SYNC_STATE: BackendSyncState = {
+  status:               'idle',
+  backendSessionId:     null,
+  lastSyncedAt:         null,
+  pendingOps:           0,
+  lastError:            null,
+  backendAssetIds:      {},
+  backendExtractionIds: {},
+};
+
+// ─── Frontend session (React state) ──────────────────────────────────────────
+
 export interface CaptureSession {
-  captureMethod: CaptureMethod | null;
-  sessionStatus: SessionStatus;
-  createdAt: Date | null;
-  updatedAt: Date | null;
-  draftData: DraftData;
+  captureMethod:    CaptureMethod | null;
+  sessionStatus:    SessionStatus;
+  createdAt:        Date | null;
+  updatedAt:        Date | null;
+  draftData:        DraftData;
   hasUnsavedChanges: boolean;
+  sync:             BackendSyncState;
+}
+
+// ─── Backend DB row types ─────────────────────────────────────────────────────
+// These mirror the Supabase table columns exactly.
+
+export interface DbCaptureSession {
+  id:                    string;
+  user_id:               string;
+  event_id?:             string | null;
+  capture_method:        string;
+  session_status:        string;
+  extracted_fields:      Record<string, unknown>;
+  extraction_confidence: string;
+  extraction_metadata:   Record<string, unknown>;
+  review_state:          Record<string, unknown>;
+  notes:                 string;
+  phones:                string[];
+  emails:                string[];
+  local_draft_key?:      string | null;
+  promoted_lead_id?:     string | null;
+  synced_at?:            string | null;
+  created_at:            string;
+  updated_at:            string;
+  // legacy columns kept for backward compat
+  client_name?:          string | null;
+  company?:              string | null;
+  designation?:          string | null;
+  raw_extraction?:       Record<string, unknown> | null;
+}
+
+export interface DbCaptureAsset {
+  id:               string;
+  capture_session_id: string;
+  user_id:          string;
+  asset_type:       string;
+  side?:            string | null;
+  local_asset_id:   string;
+  storage_path?:    string | null;
+  original_width:   number;
+  original_height:  number;
+  stored_width:     number;
+  stored_height:    number;
+  size_bytes:       number;
+  mime_type:        string;
+  processing_state: string;
+  processing_error?: string | null;
+  created_at:       string;
+  updated_at:       string;
+}
+
+export interface DbExtractionResult {
+  id:                  string;
+  capture_session_id:  string;
+  asset_id?:           string | null;
+  user_id:             string;
+  engine:              string;
+  raw_text:            string;
+  extracted_json:      Record<string, unknown>;
+  confidence:          string;
+  duration_ms?:        number | null;
+  status:              string;
+  error_message?:      string | null;
+  metadata:            Record<string, unknown>;
+  created_at:          string;
+  updated_at:          string;
 }

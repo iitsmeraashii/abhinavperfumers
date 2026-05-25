@@ -3,8 +3,8 @@
 
 import { useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { Bug, X, ChevronDown, ChevronRight, Clipboard, Check, AlertTriangle } from 'lucide-react';
-import type { BusinessCardAsset, CaptureSession, OcrResult, OcrStatus } from './types';
+import { Bug, X, ChevronDown, ChevronRight, Clipboard, Check, AlertTriangle, RefreshCw, WifiOff, CheckCircle } from 'lucide-react';
+import type { BackendSyncState, BusinessCardAsset, CaptureSession, OcrResult, OcrStatus, SyncStatus } from './types';
 import type { ParsedContact } from './parseQrPayload';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -519,6 +519,122 @@ interface OverlayProps {
   onClearLog: () => void;
 }
 
+// ── Backend sync section ──────────────────────────────────────────────────────
+
+function SyncStatusPill({ status }: { status: SyncStatus | 'unknown' }) {
+  const cfg: Record<string, { bg: string; text: string; label: string }> = {
+    idle:    { bg: 'bg-stone-700',  text: 'text-stone-300', label: 'IDLE' },
+    syncing: { bg: 'bg-amber-700',  text: 'text-amber-200', label: 'SYNCING' },
+    synced:  { bg: 'bg-green-800',  text: 'text-green-300', label: 'SYNCED' },
+    error:   { bg: 'bg-red-800',    text: 'text-red-300',   label: 'ERROR' },
+    offline: { bg: 'bg-stone-600',  text: 'text-stone-300', label: 'OFFLINE' },
+    unknown: { bg: 'bg-stone-700',  text: 'text-stone-500', label: 'UNKNOWN' },
+  };
+  const c = cfg[status] ?? cfg.unknown;
+  return (
+    <span
+      style={{ fontFamily: 'monospace', fontSize: 10 }}
+      className={`inline-flex items-center rounded-full px-2.5 py-1 font-bold uppercase tracking-wider ${c.bg} ${c.text}`}
+    >
+      {c.label}
+    </span>
+  );
+}
+
+function BackendSyncSection({ sync }: { sync: BackendSyncState }) {
+  const isActive = sync.backendSessionId !== null;
+  const assetEntries  = Object.entries(sync.backendAssetIds);
+  const extractionEntries = Object.entries(sync.backendExtractionIds);
+
+  const badgeColor: 'green' | 'red' | 'amber' | undefined =
+    sync.status === 'synced'  ? 'green' :
+    sync.status === 'error'   ? 'red' :
+    sync.status === 'syncing' ? 'amber' :
+    undefined;
+
+  return (
+    <Section
+      title="Backend Sync"
+      badge={sync.status.toUpperCase()}
+      badgeColor={badgeColor}
+      defaultOpen={isActive}
+    >
+      <div className="flex items-center gap-3 py-1">
+        <SyncStatusPill status={sync.status} />
+        {sync.status === 'syncing' && (
+          <RefreshCw className="w-3 h-3 text-amber-400 animate-spin flex-shrink-0" />
+        )}
+        {sync.status === 'synced' && (
+          <CheckCircle className="w-3 h-3 text-green-400 flex-shrink-0" />
+        )}
+        {sync.status === 'offline' && (
+          <WifiOff className="w-3 h-3 text-stone-400 flex-shrink-0" />
+        )}
+        {sync.pendingOps > 0 && (
+          <span style={{ fontFamily: 'monospace', fontSize: 10 }} className="text-amber-300">
+            {sync.pendingOps} op{sync.pendingOps !== 1 ? 's' : ''} pending
+          </span>
+        )}
+      </div>
+
+      <div style={{ fontFamily: 'monospace', fontSize: 10, lineHeight: 1.7 }} className="mt-2 text-stone-400 space-y-0.5">
+        <div>
+          backendSessionId:{' '}
+          <span className={sync.backendSessionId ? 'text-sky-300 break-all' : 'text-stone-600'}>
+            {sync.backendSessionId ?? '— not created yet'}
+          </span>
+        </div>
+        <div>
+          lastSyncedAt:{' '}
+          <span className={sync.lastSyncedAt ? 'text-green-300' : 'text-stone-600'}>
+            {sync.lastSyncedAt ?? '—'}
+          </span>
+        </div>
+        {sync.lastError && (
+          <div className="text-red-400 break-all">lastError: {sync.lastError}</div>
+        )}
+      </div>
+
+      {/* Asset linkage */}
+      <div className="mt-3 pt-2 border-t border-stone-800">
+        <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 mb-1.5 uppercase tracking-wider">
+          Asset Linkage ({assetEntries.length})
+        </div>
+        {assetEntries.length === 0 ? (
+          <p style={{ fontSize: 11 }} className="text-stone-600">No assets synced yet.</p>
+        ) : (
+          assetEntries.map(([localId, backendId]) => (
+            <div key={localId} className="py-1 border-b border-stone-800 last:border-0">
+              <div style={{ fontFamily: 'monospace', fontSize: 10 }} className="text-stone-500 break-all">
+                local: <span className="text-sky-400">{localId}</span>
+              </div>
+              <div style={{ fontFamily: 'monospace', fontSize: 10 }} className="text-stone-500 break-all">
+                backend: <span className="text-green-300">{backendId}</span>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Extraction result IDs */}
+      <div className="mt-3 pt-2 border-t border-stone-800">
+        <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 mb-1.5 uppercase tracking-wider">
+          Extraction Results ({extractionEntries.length})
+        </div>
+        {extractionEntries.length === 0 ? (
+          <p style={{ fontSize: 11 }} className="text-stone-600">No extraction results synced yet.</p>
+        ) : (
+          extractionEntries.map(([key, id]) => (
+            <div key={key} style={{ fontFamily: 'monospace', fontSize: 10 }} className="text-green-300 break-all py-0.5">
+              {id}
+            </div>
+          ))
+        )}
+      </div>
+    </Section>
+  );
+}
+
 function DebugOverlay({
   session, lastScan, qrScanning, cardAssets, cardSessionId,
   lastOcrResult, ocrStatus, ocrProgress, ocrProgressLabel, ocrError,
@@ -616,6 +732,19 @@ function DebugOverlay({
                 >
                   ─── Session & Form ───
                 </div>
+              </>
+            )}
+
+            {/* Backend Sync */}
+            {session.sessionStatus !== 'IDLE' && (
+              <>
+                <div
+                  style={{ fontFamily: 'monospace', fontSize: 10 }}
+                  className="text-sky-400 uppercase tracking-widest font-bold pt-1 pb-0.5 border-b border-stone-700"
+                >
+                  ─── Backend Sync ───
+                </div>
+                <BackendSyncSection sync={session.sync} />
               </>
             )}
 
