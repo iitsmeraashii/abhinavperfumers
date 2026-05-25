@@ -11,6 +11,7 @@ import {
 import { createPortal } from 'react-dom';
 import { saveAsset, deleteAsset, getSessionAssets } from './captureAssetStorage';
 import { useOcr } from './useOcr';
+import type { OcrPipelineDiagnostics } from './useOcr';
 import type { BusinessCardAsset, CardSide, CaptureSession, OcrResult } from './types';
 import { Toast } from './CaptureUI';
 
@@ -30,6 +31,7 @@ interface Props {
   onAssetsChanged?: (front: BusinessCardAsset | null, back: BusinessCardAsset | null) => void;
   onOcrResult?: (result: OcrResult) => void;
   onOcrStateChange?: (state: { status: string; progress: number; progressLabel: string; error: string | null }) => void;
+  onOcrDiagnostics?: (diag: OcrPipelineDiagnostics | null) => void;
   onDebugLog?: (step: string, detail?: unknown, level?: 'info' | 'warn' | 'error') => void;
 }
 
@@ -372,7 +374,7 @@ function PreviewCard({
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function BusinessCardCapture({
-  session, sessionId, onComplete, onBack, onAssetsChanged, onOcrResult, onOcrStateChange, onDebugLog,
+  session, sessionId, onComplete, onBack, onAssetsChanged, onOcrResult, onOcrStateChange, onOcrDiagnostics, onDebugLog,
 }: Props) {
   const [front, setFront] = useState<CardState>({ asset: null, status: 'empty' });
   const [back,  setBack]  = useState<CardState>({ asset: null, status: 'empty' });
@@ -380,7 +382,12 @@ export function BusinessCardCapture({
   const [toast, setToast] = useState<{ msg: string; isError?: boolean } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const { ocrState, runOcr, cancelOcr, resetOcr } = useOcr();
+  const { ocrState, runOcr, cancelOcr, resetOcr, diagnostics } = useOcr();
+
+  // Propagate diagnostics to parent for debug panel
+  useEffect(() => {
+    onOcrDiagnostics?.(diagnostics);
+  }, [diagnostics, onOcrDiagnostics]);
 
   // Propagate live OCR state to parent for debug panel
   useEffect(() => {

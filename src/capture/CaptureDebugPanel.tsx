@@ -8,6 +8,7 @@ import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../supabaseClient';
 import { useAuth } from '../AuthContext';
 import type { BackendSyncState, BusinessCardAsset, CaptureSession, OcrResult, OcrStatus, SyncStatus } from './types';
+import type { OcrPipelineDiagnostics } from './useOcr';
 import type { ParsedContact } from './parseQrPayload';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -177,10 +178,11 @@ interface OcrDebugSectionsProps {
   ocrError: string | null;
   ocrLog: DebugLogEntry[];
   draftData: CaptureSession['draftData'];
+  ocrDiagnostics: OcrPipelineDiagnostics | null;
 }
 
 function OcrDebugSections({
-  ocrStatus, ocrProgress, ocrProgressLabel, lastOcrResult, ocrError, ocrLog, draftData,
+  ocrStatus, ocrProgress, ocrProgressLabel, lastOcrResult, ocrError, ocrLog, draftData, ocrDiagnostics,
 }: OcrDebugSectionsProps) {
   const hasResult = !!lastOcrResult;
   const hasError  = ocrStatus === 'error' || !!ocrError;
@@ -201,8 +203,134 @@ function OcrDebugSections({
     ocrStatus === 'processing' ? 'amber' :
     undefined;
 
+  const d = ocrDiagnostics;
+
   return (
     <>
+      {/* 0. OCR INPUT PREVIEW */}
+      <Section
+        title="OCR Input Preview"
+        badge={d ? (d.canvasIsBlank ? 'BLANK!' : d.fallbackTriggered ? 'FALLBACK' : 'OK') : undefined}
+        badgeColor={d ? (d.canvasIsBlank ? 'red' : d.fallbackTriggered ? 'amber' : 'green') : undefined}
+        defaultOpen
+      >
+        {!d ? (
+          <p style={{ fontSize: 11 }} className="text-stone-500 py-1">
+            No OCR run yet. Capture a business card front to see image previews.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {/* Processed / OCR input image */}
+            <div>
+              <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-amber-400 uppercase tracking-wider mb-1.5">
+                OCR Input Image ({d.ocrInputSource === 'original_fallback' ? 'ORIGINAL FALLBACK' : 'PROCESSED'})
+              </div>
+              {d.processedObjectUrl ? (
+                <img
+                  src={d.processedObjectUrl}
+                  alt="OCR input"
+                  className="w-full rounded-lg border border-stone-700"
+                  style={{ maxHeight: 200, objectFit: 'contain', background: '#000' }}
+                />
+              ) : d.ocrInputObjectUrl ? (
+                <img
+                  src={d.ocrInputObjectUrl}
+                  alt="OCR input (original)"
+                  className="w-full rounded-lg border border-amber-700"
+                  style={{ maxHeight: 200, objectFit: 'contain', background: '#000' }}
+                />
+              ) : (
+                <div
+                  className="w-full rounded-lg border border-stone-700 flex items-center justify-center"
+                  style={{ height: 100, background: '#111' }}
+                >
+                  <span style={{ fontSize: 11 }} className="text-stone-500">No image URL available</span>
+                </div>
+              )}
+              <div style={{ fontSize: 10, fontFamily: 'monospace', lineHeight: 1.6 }} className="mt-1 text-stone-500">
+                <span className="text-amber-300">{d.processedWidth}×{d.processedHeight}px</span>
+                {' · '}
+                <span className="text-amber-300">{Math.round(d.processedSizeBytes / 1024)}KB</span>
+                {' · '}
+                {d.processedMimeType}
+              </div>
+            </div>
+          </div>
+        )}
+      </Section>
+
+      {/* 0b. IMAGE PIPELINE DIAGNOSTICS */}
+      <Section
+        title="Image Pipeline Diagnostics"
+        badge={d ? (d.canvasIsBlank ? 'CANVAS BLANK' : d.toBlobOk === false ? 'BLOB FAIL' : 'PASS') : undefined}
+        badgeColor={d ? (d.canvasIsBlank || d.toBlobOk === false ? 'red' : 'green') : undefined}
+        defaultOpen={!!d}
+      >
+        {!d ? (
+          <p style={{ fontSize: 11 }} className="text-stone-500 py-1">Run OCR to see pipeline diagnostics.</p>
+        ) : (
+          <div className="space-y-2">
+            {/* Original image info */}
+            <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 uppercase tracking-wider">Original Image</div>
+            <div style={{ fontFamily: 'monospace', fontSize: 10, lineHeight: 1.7 }} className="text-stone-400 space-y-0.5 pl-1">
+              <div>dataUrl length: <span className="text-amber-300">{d.originalDataUrlLength.toLocaleString()} chars</span></div>
+              <div>mime type: <span className="text-amber-300">{d.originalMimeType}</span></div>
+              <div>natural dims: <span className={d.originalNaturalWidth > 0 ? 'text-green-300' : 'text-red-400'}>{d.originalNaturalWidth}×{d.originalNaturalHeight}</span></div>
+              <div>loaded: <span className={d.originalImageLoaded ? 'text-green-400' : 'text-red-400'}>{String(d.originalImageLoaded)}</span></div>
+            </div>
+
+            {/* Canvas state */}
+            <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 uppercase tracking-wider mt-2">Canvas Pipeline</div>
+            <div style={{ fontFamily: 'monospace', fontSize: 10, lineHeight: 1.7 }} className="text-stone-400 space-y-0.5 pl-1">
+              <div>canvas ctx: <span className={d.canvasContextOk ? 'text-green-400' : 'text-red-400'}>{d.canvasContextOk ? '✓ ok' : '✗ null (memory pressure?)'}</span></div>
+              <div>drawImage: <span className={d.drawImageOk ? 'text-green-400' : 'text-red-400'}>{d.drawImageOk ? '✓ called' : '✗ failed'}</span></div>
+              <div>toBlob: <span className={d.toBlobOk ? 'text-green-400' : 'text-red-400'}>{d.toBlobOk ? '✓ ok' : '✗ returned null'}</span></div>
+              <div>processed dims: <span className="text-amber-300">{d.processedWidth}×{d.processedHeight}</span></div>
+              <div>processed bytes: <span className="text-amber-300">{Math.round(d.processedSizeBytes / 1024)}KB</span></div>
+              <div>stage: <span className="text-sky-300">{d.processingStage}</span></div>
+            </div>
+
+            {/* Pixel validation */}
+            <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 uppercase tracking-wider mt-2">Pixel Validation</div>
+            <div style={{ fontFamily: 'monospace', fontSize: 10, lineHeight: 1.7 }} className="text-stone-400 space-y-0.5 pl-1">
+              <div>canvas blank: <span className={d.canvasIsBlank ? 'text-red-400 font-bold' : 'text-green-400'}>{d.canvasIsBlank ? '✗ YES — all pixels zero!' : '✓ no'}</span></div>
+              <div>non-zero pixels: <span className={d.nonZeroPixelCount > 0 ? 'text-green-300' : 'text-red-400'}>{d.nonZeroPixelCount} / {d.totalPixelsChecked}</span></div>
+              {d.pixelSampleRgba.length > 0 && (
+                <div className="break-all">
+                  first 20 RGBA: <span className="text-stone-300">[{d.pixelSampleRgba.join(', ')}]</span>
+                </div>
+              )}
+            </div>
+
+            {/* Fallback info */}
+            {d.fallbackTriggered && (
+              <div className="mt-2 p-2 rounded-lg bg-amber-900/30 border border-amber-700">
+                <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-amber-300 font-bold mb-1">FALLBACK TRIGGERED</div>
+                <div style={{ fontSize: 11, fontFamily: 'monospace' }} className="text-amber-200">{d.fallbackReason}</div>
+              </div>
+            )}
+
+            {/* OCR source */}
+            <div style={{ fontSize: 10, fontFamily: 'monospace' }} className="text-stone-500 uppercase tracking-wider mt-2">OCR Source</div>
+            <div style={{ fontFamily: 'monospace', fontSize: 10 }} className="pl-1">
+              <span className={d.ocrInputSource === 'original_fallback' ? 'text-amber-300' : 'text-green-300'}>
+                {d.ocrInputSource}
+              </span>
+            </div>
+
+            {/* Checklist */}
+            <div className="mt-3 pt-2 border-t border-stone-800 space-y-1">
+              <DiagRow label="Image loaded (naturalWidth > 0)"  ok={d.originalImageLoaded && d.originalNaturalWidth > 0} />
+              <DiagRow label="Canvas context not null"          ok={d.canvasContextOk} />
+              <DiagRow label="drawImage called"                 ok={d.drawImageOk} />
+              <DiagRow label="canvas.toBlob succeeded"          ok={!!d.toBlobOk} />
+              <DiagRow label="Canvas has non-zero pixels"       ok={!d.canvasIsBlank} />
+              <DiagRow label="Processed size > 0"               ok={d.processedSizeBytes > 0} />
+            </div>
+          </div>
+        )}
+      </Section>
+
       {/* 1. OCR STATUS */}
       <Section
         title="OCR Status"
@@ -517,6 +645,7 @@ interface OverlayProps {
   ocrProgress: number;
   ocrProgressLabel: string;
   ocrError: string | null;
+  ocrDiagnostics: OcrPipelineDiagnostics | null;
   log: DebugLogEntry[];
   onClose: () => void;
   onClearLog: () => void;
@@ -750,7 +879,7 @@ function BackendSyncSection({ sync }: { sync: BackendSyncState }) {
 
 function DebugOverlay({
   session, lastScan, qrScanning, cardAssets, cardSessionId,
-  lastOcrResult, ocrStatus, ocrProgress, ocrProgressLabel, ocrError,
+  lastOcrResult, ocrStatus, ocrProgress, ocrProgressLabel, ocrError, ocrDiagnostics,
   log, onClose, onClearLog,
 }: OverlayProps) {
   const d = session.draftData;
@@ -838,6 +967,7 @@ function DebugOverlay({
                   ocrError={ocrError}
                   ocrLog={log}
                   draftData={d}
+                  ocrDiagnostics={ocrDiagnostics}
                 />
                 <div
                   style={{ fontFamily: 'monospace', fontSize: 10 }}
@@ -1054,13 +1184,14 @@ interface Props {
   ocrProgress?: number;
   ocrProgressLabel?: string;
   ocrError?: string | null;
+  ocrDiagnostics?: OcrPipelineDiagnostics | null;
   log: DebugLogEntry[];
   onClearLog: () => void;
 }
 
 export function CaptureDebugPanel({
   session, lastScan, qrScanning, cardAssets, cardSessionId,
-  lastOcrResult, ocrStatus, ocrProgress, ocrProgressLabel, ocrError,
+  lastOcrResult, ocrStatus, ocrProgress, ocrProgressLabel, ocrError, ocrDiagnostics,
   log, onClearLog,
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -1108,6 +1239,7 @@ export function CaptureDebugPanel({
           ocrProgress={ocrProgress ?? 0}
           ocrProgressLabel={ocrProgressLabel ?? ''}
           ocrError={ocrError ?? null}
+          ocrDiagnostics={ocrDiagnostics ?? null}
           log={log}
           onClose={() => setOpen(false)}
           onClearLog={onClearLog}

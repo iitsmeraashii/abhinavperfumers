@@ -20,6 +20,7 @@ import {
   syncAbandonSession,
 } from './capture/captureBackendSync';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus } from './capture/types';
+import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
 
 const QrScannerView = lazy(() =>
@@ -58,6 +59,7 @@ export default function CaptureLeadPage() {
     progressLabel: string;
     error: string | null;
   }>({ status: 'idle', progress: 0, progressLabel: '', error: null });
+  const [ocrDiagnostics, setOcrDiagnostics] = useState<OcrPipelineDiagnostics | null>(null);
 
   // Stable refs — avoids useCallback dep arrays growing
   const addEntryRef = useRef(addEntry);
@@ -474,6 +476,7 @@ export default function CaptureLeadPage() {
             onAssetsChanged={handleCardAssetsChanged}
             onOcrResult={handleOcrResult}
             onOcrStateChange={(s) => setOcrDebug(s as typeof ocrDebug)}
+            onOcrDiagnostics={setOcrDiagnostics}
             onDebugLog={(step, detail, level) => addEntry(step, detail, level)}
           />
         )}
@@ -498,6 +501,7 @@ export default function CaptureLeadPage() {
         ocrProgress={ocrDebug.progress}
         ocrProgressLabel={ocrDebug.progressLabel}
         ocrError={ocrDebug.error}
+        ocrDiagnostics={ocrDiagnostics}
         log={log}
         onClearLog={clearLog}
       />
