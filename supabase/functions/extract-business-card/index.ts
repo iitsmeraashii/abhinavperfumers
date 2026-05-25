@@ -134,7 +134,7 @@ async function callOpenAIVision(
   mimeType: string,
   apiKey: string,
 ): Promise<ExtractionResult> {
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${apiKey}`,
@@ -142,7 +142,7 @@ async function callOpenAIVision(
     },
     body: JSON.stringify({
       model: "gpt-4o",
-      input: [
+      messages: [
         {
           role: "system",
           content: SYSTEM_PROMPT,
@@ -151,21 +151,20 @@ async function callOpenAIVision(
           role: "user",
           content: [
             {
-              type: "input_image",
-              source: {
-                type: "base64",
-                media_type: mimeType,
-                data: b64Image,
+              type: "image_url",
+              image_url: {
+                url: `data:${mimeType};base64,${b64Image}`,
+                detail: "high",
               },
             },
             {
-              type: "input_text",
+              type: "text",
               text: "Extract all contact information from this business card. Return valid JSON only.",
             },
           ],
         },
       ],
-      max_output_tokens: 1024,
+      max_tokens: 1024,
       temperature: 0.1,
     }),
   });
@@ -177,17 +176,7 @@ async function callOpenAIVision(
 
   const json = await response.json();
 
-  // Extract text content from Responses API format
-  const outputContent = json?.output?.[0]?.content;
-  let text = "";
-
-  if (Array.isArray(outputContent)) {
-    const textBlock = outputContent.find((b: { type: string; text?: string }) => b.type === "output_text");
-    text = textBlock?.text ?? "";
-  } else if (typeof outputContent === "string") {
-    text = outputContent;
-  }
-
+  const text: string = json?.choices?.[0]?.message?.content ?? "";
   if (!text) throw new Error("OpenAI returned empty response");
 
   // Strip markdown code fences if present
