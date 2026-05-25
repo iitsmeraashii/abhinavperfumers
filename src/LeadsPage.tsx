@@ -15,6 +15,7 @@ interface Lead {
   sales_rep_code: string;
   lead_type: string;
   lead_temperature: string;
+  lead_status: string;
   state: string;
   application: string;
   system_status: string;
@@ -61,6 +62,22 @@ const TEMP_COLORS: Record<string, string> = {
   cold: 'bg-blue-100 text-blue-700',
 };
 
+const STATUS_COLORS: Record<string, string> = {
+  new:       'bg-stone-100 text-stone-600',
+  contacted: 'bg-sky-100 text-sky-700',
+  qualified: 'bg-teal-100 text-teal-700',
+  lost:      'bg-red-100 text-red-600',
+  converted: 'bg-green-100 text-green-700',
+};
+
+const STATUS_OPTIONS: { label: string; value: string }[] = [
+  { label: 'New',       value: 'NEW' },
+  { label: 'Contacted', value: 'CONTACTED' },
+  { label: 'Qualified', value: 'QUALIFIED' },
+  { label: 'Lost',      value: 'LOST' },
+  { label: 'Converted', value: 'CONVERTED' },
+];
+
 function badge(value: string | null, colorMap?: Record<string, string>) {
   if (!value) return <span className="text-stone-400">—</span>;
   const key = value.toLowerCase();
@@ -88,7 +105,7 @@ function getDateFilterStart(filter: DateFilter): string | null {
 }
 
 function countActiveAdvanced(f: AdvancedFilters): number {
-  return [f.leadType, f.temperature, f.state, f.application, f.leadStatus, f.dateFrom, f.dateTo]
+  return [f.leadType, f.temperature, f.state, f.application, f.dateFrom, f.dateTo]
     .filter(Boolean).length;
 }
 
@@ -216,6 +233,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
   // initialEventCode (from parent Dashboard click) wins over URL param only on first load
   const [eventFilter, setEventFilter] = useState(initialEventCode ?? init.eventFilter);
   const [repFilter, setRepFilter] = useState(init.repFilter);
+  const [statusFilter, setStatusFilter] = useState(init.adv.leadStatus);
 
   // Advanced filters (draft = what's in the panel, applied = active)
   const [panelOpen, setPanelOpen] = useState(false);
@@ -241,8 +259,9 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
 
   // Sync state → URL whenever anything changes
   useEffect(() => {
-    pushParams(buildParams(page, searchTerm, dateFilter, eventFilter, repFilter, applied));
-  }, [page, searchTerm, dateFilter, eventFilter, repFilter, applied]);
+    const advWithStatus = { ...applied, leadStatus: statusFilter || applied.leadStatus };
+    pushParams(buildParams(page, searchTerm, dateFilter, eventFilter, repFilter, advWithStatus));
+  }, [page, searchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter]);
 
   // Fetch static option lists
   useEffect(() => {
@@ -289,6 +308,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     eventFilt: string,
     repFilt: string,
     adv: AdvancedFilters,
+    statusFilt: string,
   ) => {
     if (!user) return;
     setLoading(true);
@@ -320,7 +340,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     if (adv.temperature) query = query.eq('lead_temperature', adv.temperature);
     if (adv.state) query = query.eq('state', adv.state);
     if (adv.application) query = query.ilike('application', `%${adv.application}%`);
-    if (adv.leadStatus) query = query.eq('lead_status', adv.leadStatus);
+    const effectiveStatus = statusFilt || adv.leadStatus;
+    if (effectiveStatus) query = query.eq('lead_status', effectiveStatus);
     if (adv.dateFrom) query = query.gte('created_at', new Date(adv.dateFrom).toISOString());
     if (adv.dateTo) {
       const end = new Date(adv.dateTo);
@@ -356,13 +377,14 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     setDateFilter(null);
     setEventFilter(initialEventCode ?? '');
     setRepFilter('');
+    setStatusFilter('');
     setApplied(EMPTY_ADVANCED);
     setDraft(EMPTY_ADVANCED);
   }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    fetchLeads(page, searchTerm, dateFilter, eventFilter, repFilter, applied);
-  }, [page, searchTerm, dateFilter, eventFilter, repFilter, applied, fetchLeads]);
+    fetchLeads(page, searchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter);
+  }, [page, searchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter, fetchLeads]);
 
   async function exportCSV() {
     if (!user) return;
@@ -484,6 +506,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     setDateFilter(null);
     setEventFilter('');
     setRepFilter('');
+    setStatusFilter('');
     setPage(0);
   }
 
@@ -512,7 +535,6 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     applied.temperature ? { label: `Temp: ${applied.temperature}`, key: 'temperature' } : null,
     applied.state ? { label: `State: ${applied.state}`, key: 'state' } : null,
     applied.application ? { label: `App: ${applied.application}`, key: 'application' } : null,
-    applied.leadStatus ? { label: `Status: ${applied.leadStatus}`, key: 'leadStatus' } : null,
     applied.dateFrom ? { label: `From: ${applied.dateFrom}`, key: 'dateFrom' } : null,
     applied.dateTo ? { label: `To: ${applied.dateTo}`, key: 'dateTo' } : null,
   ].filter(Boolean) as { label: string; key: keyof AdvancedFilters }[];
@@ -540,7 +562,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
 
   const rangeStart = total === 0 ? 0 : page * PAGE_SIZE + 1;
   const rangeEnd = Math.min((page + 1) * PAGE_SIZE, total);
-  const hasQuickFilters = dateFilter !== null || eventFilter !== '' || repFilter !== '';
+  const hasQuickFilters = dateFilter !== null || eventFilter !== '' || repFilter !== '' || statusFilter !== '';
   const selectedEvent = events.find(e => e.event_code === eventFilter);
   const eventButtonLabel = eventFilter ? (selectedEvent?.name ?? eventFilter) : 'Event';
   const selectedRep = salesReps.find(r => r.rep_code === repFilter);
@@ -606,6 +628,21 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
             }`}
           >
             {btn.label}
+          </button>
+        ))}
+
+        {/* Status quick-filter pills */}
+        {STATUS_OPTIONS.map(opt => (
+          <button
+            key={opt.value}
+            onClick={() => { setStatusFilter(prev => prev === opt.value ? '' : opt.value); setPage(0); }}
+            className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition ${
+              statusFilter === opt.value
+                ? 'bg-amber-700 border-amber-700 text-white'
+                : 'border-stone-200 bg-white text-stone-600 hover:border-stone-300 hover:bg-stone-50'
+            }`}
+          >
+            {opt.label}
           </button>
         ))}
 
@@ -768,19 +805,20 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
                 <th className="text-left px-4 py-3 font-medium text-stone-500">Rep</th>
                 <th className="text-left px-4 py-3 font-medium text-stone-500">Type</th>
                 <th className="text-left px-4 py-3 font-medium text-stone-500">Temp</th>
+                <th className="text-left px-4 py-3 font-medium text-stone-500">Status</th>
                 <th className="text-left px-4 py-3 font-medium text-stone-500">Created</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="py-16 text-center">
+                  <td colSpan={9} className="py-16 text-center">
                     <Loader2 className="w-5 h-5 text-amber-600 animate-spin mx-auto" />
                   </td>
                 </tr>
               ) : leads.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-16 text-center">
+                  <td colSpan={9} className="py-16 text-center">
                     <Inbox className="w-8 h-8 text-stone-300 mx-auto mb-2" />
                     <p className="text-stone-400 text-sm">No leads found</p>
                   </td>
@@ -814,6 +852,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
                       <td className="px-4 py-3 text-stone-600 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{lead.sales_rep_code || '—'}</td>
                       <td className="px-4 py-3 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{badge(lead.lead_type)}</td>
                       <td className="px-4 py-3 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{badge(lead.lead_temperature, TEMP_COLORS)}</td>
+                      <td className="px-4 py-3 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{badge(lead.lead_status, STATUS_COLORS)}</td>
                       <td className="px-4 py-3 text-stone-500 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{formatDate(lead.created_at)}</td>
                     </tr>
                   );
@@ -921,19 +960,6 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
                 value={draft.application}
                 onChange={v => patchDraft('application', v)}
                 options={applicationOptions.map(a => ({ label: a, value: a }))}
-              />
-
-              <SelectField
-                label="Lead Status"
-                value={draft.leadStatus}
-                onChange={v => patchDraft('leadStatus', v)}
-                options={[
-                  { label: 'New', value: 'NEW' },
-                  { label: 'Contacted', value: 'CONTACTED' },
-                  { label: 'Qualified', value: 'QUALIFIED' },
-                  { label: 'Lost', value: 'LOST' },
-                  { label: 'Converted', value: 'CONVERTED' },
-                ]}
               />
 
               <div className="flex flex-col gap-3">
