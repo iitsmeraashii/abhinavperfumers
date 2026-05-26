@@ -26,6 +26,7 @@ import {
   flushQueue,
   getPendingCount,
 } from './capture/captureOfflineQueue';
+import { saveCompletedLead, buildCompletedLead } from './capture/completedLeadsStorage';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
@@ -341,7 +342,28 @@ export default function CaptureLeadPage() {
   }, [actions, form, cardSessionId, isOnline, makeSyncCbs]);
 
   // ── Save & start next lead (rapid capture) ───────────────────────────
-  const handleSaveAndNext = useCallback(() => {
+  const handleSaveAndNext = useCallback(async () => {
+    // Persist the current session to completed_leads BEFORE resetting
+    const s    = sessionRef.current;
+    const bsid = s.sync.backendSessionId;
+    if (s.sessionStatus !== 'IDLE' && bsid) {
+      const lead = buildCompletedLead(
+        bsid,
+        s.captureMethod,
+        s.draftData,
+        bsid,
+        selectedEvent?.id ?? null,
+        selectedEvent?.name ?? null,
+      );
+      if (s.sync.pendingOps > 0 || s.sync.status === 'syncing') {
+        lead.status = 'pending_sync';
+      } else if (s.sync.status === 'synced') {
+        lead.status = 'synced';
+        lead.syncedAt = s.sync.lastSyncedAt;
+      }
+      await saveCompletedLead(lead);
+      addEntryRef.current('Save & Next — lead saved to completed_leads', { id: bsid, status: lead.status });
+    }
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
@@ -349,7 +371,7 @@ export default function CaptureLeadPage() {
     setCardAssets({ front: null, back: null });
     setLastOcrResult(null);
     addEntryRef.current('Save & Next — session reset for new capture');
-  }, [actions, form]);
+  }, [actions, form, selectedEvent]);
 
   // ── QR scan complete ──────────────────────────────────────────────────────
   const handleQrScanned = useCallback(async (parsed: ParsedContact) => {
@@ -390,9 +412,17 @@ export default function CaptureLeadPage() {
 
       await syncFieldsOp(bsid, draft);
 
+      // Persist to completed_leads so the Queue screen can show it
+      const lead = buildCompletedLead(
+        bsid, 'QR', draft as import('./capture/types').DraftData,
+        bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
+      );
+      lead.status = isOnline ? 'pending_sync' : 'local_only';
+      await saveCompletedLead(lead);
+
       addEntryRef.current('QR extraction queued/synced', { extractionId, bsid });
     }, 0);
-  }, [actions, form, syncQrOp, syncFieldsOp]);
+  }, [actions, form, syncQrOp, syncFieldsOp, selectedEvent, isOnline]);
 
   // ── Business card assets changed ─────────────────────────────────────────
   const handleCardAssetsChanged = useCallback(async (
@@ -505,8 +535,17 @@ export default function CaptureLeadPage() {
     if (bsid) {
       await syncFieldsOp(bsid, newDraft);
       addEntryRef.current('Session fields queued/synced after card complete', { bsid });
+
+      // Persist to completed_leads so the Queue screen can show it
+      const lead = buildCompletedLead(
+        bsid, 'BUSINESS_CARD', newDraft as import('./capture/types').DraftData,
+        bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
+      );
+      lead.status = isOnline ? 'pending_sync' : 'local_only';
+      await saveCompletedLead(lead);
+      addEntryRef.current('Card complete — lead saved to completed_leads', { id: bsid, status: lead.status });
     }
-  }, [actions, session.draftData, cardSessionId, lastOcrResult, syncFieldsOp]);
+  }, [actions, session.draftData, cardSessionId, lastOcrResult, syncFieldsOp, selectedEvent, isOnline]);
 
   // ── Manual form field sync (debounced 1.5s) ───────────────────────────────
   const fieldSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

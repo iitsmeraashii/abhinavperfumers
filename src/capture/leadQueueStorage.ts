@@ -1,26 +1,26 @@
-// Local lead queue — synthesizes a live view from the existing IndexedDB stores.
+// Lead queue — aggregates all locally captured leads from two sources:
+//   1. drafts store        → the single active capture-in-progress draft
+//   2. completed_leads     → every lead saved via Save&Next / Card Complete / QR
 //
-// Nothing in the capture flow needs to explicitly "enqueue" a lead.
-// The queue is always a derived view of:
-//   drafts      → the single active capture draft
-//   pending_ops → grouped by sessionId, surfaced as pending/failed items
-//
-// This means the queue is always accurate without any extra write step.
+// Nothing needs to write here explicitly.
+// loadQueueItems() always reflects current local state accurately.
 
-import { dbGet, dbGetAllInStore, dbDelete } from './db';
-import type { CaptureMethod, DraftData, LeadTemperature } from './types';
+import { dbGet, dbDelete } from './db';
+import { loadCompletedLeads, deleteCompletedLead, type CompletedLead, type CompletedLeadStatus } from './completedLeadsStorage';
 import type { PersistedDraft } from './captureDraftStorage';
-import type { PendingOp } from './captureOfflineQueue';
+import type { CaptureMethod, DraftData, LeadTemperature } from './types';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Unified queue item type ───────────────────────────────────────────────────
+// Superset of CompletedLeadStatus + draft-specific statuses
 
 export type QueueItemStatus =
-  | 'draft'            // active capture draft (not yet submitted)
-  | 'pending_sync'     // has pending ops waiting to flush
-  | 'syncing'          // flush in-flight (set externally)
-  | 'synced'           // all ops confirmed — no longer in queue naturally
-  | 'failed'           // ops retried > threshold
-  | 'needs_review';    // captured but key fields missing
+  | 'draft'            // active capture draft — not yet saved
+  | 'local_only'       // saved locally, sync not yet attempted
+  | 'pending_sync'     // sync ops queued / in-flight
+  | 'syncing'          // explicitly marked syncing
+  | 'synced'           // confirmed on backend
+  | 'failed'           // sync failed
+  | 'needs_review';    // missing key fields
 
 export interface QueueItem {
   id:               string;
@@ -35,172 +35,116 @@ export interface QueueItem {
   syncedAt:         string | null;
   retries:          number;
   lastError:        string | null;
+  source:           'draft' | 'completed';
 }
 
-// ─── Derive status from pending ops ──────────────────────────────────────────
+// ─── Map CompletedLeadStatus → QueueItemStatus ────────────────────────────────
 
-const FAIL_THRESHOLD = 3;
-
-function statusFromOps(ops: PendingOp[]): QueueItemStatus {
-  if (ops.length === 0) return 'synced';
-  const maxRetries = Math.max(...ops.map(o => o.retries));
-  if (maxRetries >= FAIL_THRESHOLD) return 'failed';
-  return 'pending_sync';
+function mapStatus(s: CompletedLeadStatus): QueueItemStatus {
+  if (s === 'local_only') return 'local_only';
+  return s as QueueItemStatus;
 }
 
-function lastErrorFromOps(_ops: PendingOp[]): string | null {
-  // PendingOp doesn't store an error message — we show a generic one for failed
-  return null;
-}
-
-// ─── Load queue — derives from drafts + pending_ops ──────────────────────────
+// ─── Load — aggregates from both stores ──────────────────────────────────────
 
 export async function loadQueueItems(): Promise<QueueItem[]> {
-  const [draftRaw, allOps] = await Promise.all([
+  const [draftRaw, completedLeads] = await Promise.all([
     dbGet<PersistedDraft>('drafts', 'active_capture_draft'),
-    dbGetAllInStore<PendingOp>('pending_ops'),
+    loadCompletedLeads(),
   ]);
 
   const items: QueueItem[] = [];
 
-  // ── 1. Active draft ──────────────────────────────────────────────────────
+  // ── 1. Active draft (if exists and not IDLE) ──────────────────────────────
   if (
     draftRaw &&
     typeof draftRaw === 'object' &&
     'draftData' in draftRaw &&
-    draftRaw.sessionStatus !== 'IDLE'
+    (draftRaw as PersistedDraft).sessionStatus !== 'IDLE'
   ) {
     const draft = draftRaw as PersistedDraft;
     const draftData = (draft.draftData ?? {}) as DraftData;
+    const bsid = draft.backendSessionId;
 
-    // Find ops for this session (if any) to determine sync status
-    const sessionId  = draft.backendSessionId ?? draft.id;
-    const sessionOps = allOps.filter(o => o.sessionId === sessionId || o.sessionId === draft.backendSessionId);
+    // Don't show the draft if it already has a completed_leads entry
+    // (means it was saved via Save & Next and we're now showing it there)
+    const alreadySaved = completedLeads.some(c => c.id === bsid || c.backendSessionId === bsid);
 
-    let status: QueueItemStatus;
-    if (sessionOps.length > 0) {
-      status = statusFromOps(sessionOps);
-    } else if (draft.backendSessionId && draft.lastSyncedAt) {
-      status = 'synced';
-    } else {
-      // Has data but not yet synced — is it reviewable?
-      const hasRequiredFields = !!(draftData.clientName?.trim() || draftData.company?.trim());
-      status = hasRequiredFields ? 'pending_sync' : 'draft';
+    if (!alreadySaved) {
+      const hasKey = !!(draftData.clientName?.trim() || draftData.company?.trim());
+      const status: QueueItemStatus = hasKey ? 'draft' : 'draft';
+
+      items.push({
+        id:               bsid ?? 'active_draft',
+        status,
+        captureMethod:    draft.captureMethod,
+        draftData,
+        backendSessionId: bsid,
+        eventId:          null,
+        eventName:        null,
+        createdAt:        draft.createdAt ?? new Date().toISOString(),
+        updatedAt:        draft.updatedAt ?? new Date().toISOString(),
+        syncedAt:         draft.lastSyncedAt,
+        retries:          0,
+        lastError:        null,
+        source:           'draft',
+      });
     }
+  }
 
-    const maxRetries = sessionOps.length > 0 ? Math.max(...sessionOps.map(o => o.retries)) : 0;
-
+  // ── 2. Completed leads ────────────────────────────────────────────────────
+  for (const c of completedLeads) {
     items.push({
-      id:               sessionId || 'active_draft',
-      status,
-      captureMethod:    draft.captureMethod,
-      draftData,
-      backendSessionId: draft.backendSessionId,
-      eventId:          null,
-      eventName:        null,
-      createdAt:        draft.createdAt ?? new Date().toISOString(),
-      updatedAt:        draft.updatedAt ?? new Date().toISOString(),
-      syncedAt:         draft.lastSyncedAt,
-      retries:          maxRetries,
-      lastError:        maxRetries >= FAIL_THRESHOLD ? 'Sync failed after multiple retries. Will retry when online.' : null,
+      id:               c.id,
+      status:           mapStatus(c.status),
+      captureMethod:    c.captureMethod,
+      draftData:        c.draftData,
+      backendSessionId: c.backendSessionId,
+      eventId:          c.eventId,
+      eventName:        c.eventName,
+      createdAt:        c.createdAt,
+      updatedAt:        c.updatedAt,
+      syncedAt:         c.syncedAt,
+      retries:          c.retries,
+      lastError:        c.lastError,
+      source:           'completed',
     });
   }
 
-  // ── 2. Pending ops grouped by sessionId (orphaned — no matching draft) ──
-  // Group all pending ops by sessionId. Any sessionId that is NOT the active
-  // draft's session shows up as its own queue item (e.g. a submitted lead).
-  const activeDraftSessionId = (draftRaw as PersistedDraft | null)?.backendSessionId ?? null;
-
-  const grouped = new Map<string, PendingOp[]>();
-  for (const op of allOps) {
-    if (op.sessionId === activeDraftSessionId) continue; // already handled above
-    if (!grouped.has(op.sessionId)) grouped.set(op.sessionId, []);
-    grouped.get(op.sessionId)!.push(op);
-  }
-
-  for (const [sessionId, ops] of grouped.entries()) {
-    // Extract best available draftData from the op payloads
-    const draftData = extractDraftFromOps(ops);
-    const status    = statusFromOps(ops);
-    const maxRetries = Math.max(...ops.map(o => o.retries));
-    const earliest  = ops.reduce((a, b) => a.createdAt < b.createdAt ? a : b);
-    const latest    = ops.reduce((a, b) => a.createdAt > b.createdAt ? a : b);
-    const method    = extractMethodFromOps(ops);
-
-    items.push({
-      id:               sessionId,
-      status,
-      captureMethod:    method,
-      draftData,
-      backendSessionId: sessionId,
-      eventId:          null,
-      eventName:        null,
-      createdAt:        earliest.createdAt,
-      updatedAt:        latest.createdAt,
-      syncedAt:         null,
-      retries:          maxRetries,
-      lastError:        maxRetries >= FAIL_THRESHOLD
-        ? 'Sync failed after multiple retries. Will retry when online.'
-        : null,
-    });
-  }
+  // Deduplicate by id (draft + completed can share bsid)
+  const seen = new Set<string>();
+  const deduped = items.filter(item => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
 
   // Sort newest first
-  return items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-}
-
-// ─── Extract draftData from pending op payloads ───────────────────────────────
-
-function extractDraftFromOps(ops: PendingOp[]): DraftData {
-  // update_session_fields carries the richest draftData
-  const fieldsOp = ops.find(o => o.type === 'update_session_fields');
-  if (fieldsOp) {
-    const p = fieldsOp.payload as { draftData?: DraftData };
-    if (p?.draftData && typeof p.draftData === 'object') return p.draftData;
-  }
-  // upsert_session also carries draftData
-  const sessionOp = ops.find(o => o.type === 'upsert_session');
-  if (sessionOp) {
-    const p = sessionOp.payload as { draftData?: DraftData };
-    if (p?.draftData && typeof p.draftData === 'object') return p.draftData;
-  }
-  return {};
-}
-
-function extractMethodFromOps(ops: PendingOp[]): CaptureMethod | null {
-  const sessionOp = ops.find(o => o.type === 'upsert_session');
-  if (sessionOp) {
-    const p = sessionOp.payload as { captureMethod?: CaptureMethod };
-    return p?.captureMethod ?? null;
-  }
-  if (ops.some(o => o.type === 'upsert_ocr_extraction')) return 'BUSINESS_CARD';
-  if (ops.some(o => o.type === 'upsert_qr_extraction'))  return 'QR';
-  return 'MANUAL';
+  return deduped.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 // ─── Delete ───────────────────────────────────────────────────────────────────
-// For the active draft: clear the draft store.
-// For pending op groups: remove all ops for that sessionId.
 
 export async function deleteQueueItem(id: string): Promise<void> {
-  // Check if this is the active draft
+  // Remove from completed_leads
+  await deleteCompletedLead(id);
+
+  // Also clear the active draft if this is it
   const draft = await dbGet<PersistedDraft>('drafts', 'active_capture_draft');
-  const draftSessionId = (draft as PersistedDraft | null)?.backendSessionId ?? null;
-
-  if (id === 'active_draft' || id === draftSessionId || id === 'active_capture_draft') {
-    await dbDelete('drafts', 'active_capture_draft');
+  if (draft) {
+    const draftBsid = (draft as PersistedDraft).backendSessionId;
+    if (id === 'active_draft' || id === draftBsid) {
+      await dbDelete('drafts', 'active_capture_draft');
+    }
   }
-
-  // Remove all pending ops for this sessionId
-  const allOps = await dbGetAllInStore<PendingOp>('pending_ops');
-  const toDelete = allOps.filter(o => o.sessionId === id || o.sessionId === draftSessionId);
-  await Promise.all(toDelete.map(o => dbDelete('pending_ops', o.id)));
 }
 
 // ─── Display helpers ──────────────────────────────────────────────────────────
 
 export function getDisplayName(item: QueueItem): string {
-  return item.draftData.clientName?.trim() || item.draftData.company?.trim() || 'Unnamed Lead';
+  return item.draftData.clientName?.trim()
+    || item.draftData.company?.trim()
+    || 'Unnamed Lead';
 }
 
 export function getDisplayCompany(item: QueueItem): string | null {
@@ -214,22 +158,18 @@ export function getLeadTemperature(item: QueueItem): LeadTemperature | null {
   return (item.draftData.leadTemperature as LeadTemperature | undefined) ?? null;
 }
 
-// ─── Unused but exported for API compat ──────────────────────────────────────
+// ─── API compat stubs ─────────────────────────────────────────────────────────
 
 export async function saveQueueItem(_item: QueueItem): Promise<void> {
-  // No-op: queue is derived from existing stores, not written directly.
+  // Queue is populated by saveCompletedLead, not this function.
 }
 
 export async function getQueueCounts(): Promise<Record<QueueItemStatus, number>> {
   const items = await loadQueueItems();
   const counts: Record<QueueItemStatus, number> = {
-    draft: 0, pending_sync: 0, syncing: 0,
+    draft: 0, local_only: 0, pending_sync: 0, syncing: 0,
     synced: 0, failed: 0, needs_review: 0,
   };
   for (const item of items) counts[item.status]++;
   return counts;
-}
-
-export function buildQueueItemFromDraft(): QueueItem {
-  throw new Error('Not needed — queue is derived from existing stores.');
 }

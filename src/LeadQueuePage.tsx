@@ -25,7 +25,7 @@ interface StatusConfig {
 
 const STATUS_CONFIG: Record<QueueItemStatus, StatusConfig> = {
   draft: {
-    label: 'Local Draft', short: 'Draft',
+    label: 'In Progress', short: 'Draft',
     dot:   'bg-stone-400',
     badge: 'bg-stone-100 text-stone-600 border-stone-200',
     icon:  <FileText className="w-3 h-3" />,
@@ -38,38 +38,45 @@ const STATUS_CONFIG: Record<QueueItemStatus, StatusConfig> = {
     icon:  <AlertCircle className="w-3 h-3" />,
     section: 'Needs Review', priority: 2,
   },
+  local_only: {
+    label: 'Saved Locally', short: 'Local',
+    dot:   'bg-stone-500',
+    badge: 'bg-stone-100 text-stone-700 border-stone-200',
+    icon:  <FileText className="w-3 h-3" />,
+    section: 'Saved Locally', priority: 3,
+  },
   pending_sync: {
     label: 'Pending Sync', short: 'Pending',
     dot:   'bg-blue-400',
     badge: 'bg-blue-50 text-blue-700 border-blue-200',
     icon:  <Clock className="w-3 h-3" />,
-    section: 'Pending Sync', priority: 3,
+    section: 'Pending Sync', priority: 4,
   },
   syncing: {
     label: 'Syncing', short: 'Syncing',
     dot:   'bg-blue-500 animate-pulse',
     badge: 'bg-blue-50 text-blue-700 border-blue-200',
     icon:  <Loader2 className="w-3 h-3 animate-spin" />,
-    section: 'Pending Sync', priority: 3,
+    section: 'Pending Sync', priority: 4,
   },
   failed: {
     label: 'Sync Failed', short: 'Failed',
     dot:   'bg-red-400',
     badge: 'bg-red-50 text-red-700 border-red-200',
     icon:  <AlertCircle className="w-3 h-3" />,
-    section: 'Failed', priority: 4,
+    section: 'Failed', priority: 5,
   },
   synced: {
     label: 'Synced', short: 'Synced',
     dot:   'bg-green-500',
     badge: 'bg-green-50 text-green-700 border-green-200',
     icon:  <CheckCircle2 className="w-3 h-3" />,
-    section: 'Synced', priority: 5,
+    section: 'Synced', priority: 6,
   },
 };
 
-// Section display order (higher priority = shown first)
-const SECTION_ORDER = ['Failed', 'Needs Review', 'Pending Sync', 'Drafts', 'Synced'];
+// Section display order
+const SECTION_ORDER = ['Failed', 'Needs Review', 'Pending Sync', 'Saved Locally', 'Drafts', 'Synced'];
 
 // ─── Filter types ─────────────────────────────────────────────────────────────
 
@@ -85,7 +92,10 @@ const FILTER_TABS: { id: FilterTab; label: string }[] = [
 
 function matchesFilter(item: QueueItem, filter: FilterTab): boolean {
   if (filter === 'all') return true;
-  if (filter === 'pending') return item.status === 'pending_sync' || item.status === 'syncing' || item.status === 'needs_review';
+  if (filter === 'pending') return (
+    item.status === 'pending_sync' || item.status === 'syncing' ||
+    item.status === 'local_only'   || item.status === 'needs_review'
+  );
   if (filter === 'failed')  return item.status === 'failed';
   if (filter === 'drafts')  return item.status === 'draft';
   if (filter === 'synced')  return item.status === 'synced';
@@ -145,7 +155,7 @@ function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView }: Qu
   const temp      = getLeadTemperature(item);
   const cfg       = STATUS_CONFIG[item.status];
   const isFailed  = item.status === 'failed';
-  const isDraft   = item.status === 'draft' || item.status === 'needs_review';
+  const isDraft   = item.status === 'draft' || item.status === 'needs_review' || item.status === 'local_only';
   const isSynced  = item.status === 'synced';
   const phone     = item.draftData.phone || (item.draftData.phoneNumbers as string[] | undefined)?.[0];
   const hasNotes  = !!item.draftData.notes?.trim();
@@ -393,6 +403,110 @@ function DeleteSheet({ item, onConfirm, onCancel }: {
   );
 }
 
+// ─── Debug panel ─────────────────────────────────────────────────────────────
+
+function QueueDebugPanel({ items, filtered, pendingOps, isOnline }: {
+  items:      QueueItem[];
+  filtered:   QueueItem[];
+  pendingOps: number;
+  isOnline:   boolean;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const statusBreakdown = items.reduce<Record<string, number>>((acc, i) => {
+    acc[i.status] = (acc[i.status] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  const sourceBreakdown = items.reduce<Record<string, number>>((acc, i) => {
+    const src = (i as QueueItem & { source?: string }).source ?? 'unknown';
+    acc[src] = (acc[src] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    <div className="mt-8 rounded-2xl border border-stone-200 bg-white overflow-hidden">
+      <button
+        className="w-full flex items-center justify-between px-4 py-3 text-left"
+        onClick={() => setOpen(o => !o)}
+      >
+        <span className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Queue Debug</span>
+        {open ? <ChevronDown className="w-4 h-4 text-stone-400" /> : <ChevronRight className="w-4 h-4 text-stone-400" />}
+      </button>
+
+      {open && (
+        <div className="px-4 pb-4 space-y-3 border-t border-stone-100 pt-3 text-xs text-stone-600 font-mono">
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-stone-50 rounded-lg px-3 py-2">
+              <p className="text-[10px] text-stone-400 mb-0.5">Total in queue</p>
+              <p className="font-bold text-stone-800 text-sm">{items.length}</p>
+            </div>
+            <div className="bg-stone-50 rounded-lg px-3 py-2">
+              <p className="text-[10px] text-stone-400 mb-0.5">Showing (filtered)</p>
+              <p className="font-bold text-stone-800 text-sm">{filtered.length}</p>
+            </div>
+            <div className="bg-stone-50 rounded-lg px-3 py-2">
+              <p className="text-[10px] text-stone-400 mb-0.5">Pending ops (IDB)</p>
+              <p className="font-bold text-stone-800 text-sm">{pendingOps}</p>
+            </div>
+            <div className="bg-stone-50 rounded-lg px-3 py-2">
+              <p className="text-[10px] text-stone-400 mb-0.5">Network</p>
+              <p className={`font-bold text-sm ${isOnline ? 'text-green-700' : 'text-amber-700'}`}>
+                {isOnline ? 'Online' : 'Offline'}
+              </p>
+            </div>
+          </div>
+
+          {Object.keys(statusBreakdown).length > 0 && (
+            <div>
+              <p className="text-[10px] text-stone-400 mb-1.5 uppercase tracking-wide">Status breakdown</p>
+              <div className="space-y-1">
+                {Object.entries(statusBreakdown).map(([status, count]) => (
+                  <div key={status} className="flex items-center justify-between bg-stone-50 rounded-lg px-3 py-1.5">
+                    <span className="text-stone-600">{status}</span>
+                    <span className="font-bold text-stone-800">{count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {Object.keys(sourceBreakdown).length > 0 && (
+            <div>
+              <p className="text-[10px] text-stone-400 mb-1.5 uppercase tracking-wide">Source breakdown</p>
+              <div className="space-y-1">
+                {Object.entries(sourceBreakdown).map(([src, count]) => (
+                  <div key={src} className="flex items-center justify-between bg-stone-50 rounded-lg px-3 py-1.5">
+                    <span className="text-stone-600">{src}</span>
+                    <span className="font-bold text-stone-800">{count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {items.length > 0 && (
+            <div>
+              <p className="text-[10px] text-stone-400 mb-1.5 uppercase tracking-wide">Raw records</p>
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {items.map(item => (
+                  <div key={item.id} className="bg-stone-50 rounded-lg px-3 py-2 text-[10px] leading-relaxed">
+                    <p className="font-bold text-stone-700 truncate">{getDisplayName(item)}</p>
+                    <p className="text-stone-400">status: <span className="text-stone-600">{item.status}</span></p>
+                    <p className="text-stone-400">method: <span className="text-stone-600">{item.captureMethod ?? 'null'}</span></p>
+                    <p className="text-stone-400 truncate">id: <span className="text-stone-600">{item.id.slice(0, 24)}…</span></p>
+                    <p className="text-stone-400">updated: <span className="text-stone-600">{relativeTime(item.updatedAt)}</span></p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Empty state ──────────────────────────────────────────────────────────────
 
 function EmptyState({ filter, onCapture }: { filter: FilterTab; onCapture: () => void }) {
@@ -498,7 +612,10 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
     const c: Record<FilterTab, number> = { all: 0, pending: 0, failed: 0, drafts: 0, synced: 0 };
     for (const item of items) {
       c.all++;
-      if (item.status === 'pending_sync' || item.status === 'syncing' || item.status === 'needs_review') c.pending++;
+      if (
+        item.status === 'pending_sync' || item.status === 'syncing' ||
+        item.status === 'local_only'   || item.status === 'needs_review'
+      ) c.pending++;
       if (item.status === 'failed')  c.failed++;
       if (item.status === 'draft')   c.drafts++;
       if (item.status === 'synced')  c.synced++;
@@ -694,6 +811,9 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
             ))}
           </div>
         )}
+
+        {/* ── Debug panel ── */}
+        {!loading && <QueueDebugPanel items={items} filtered={filtered} pendingOps={pendingOps} isOnline={isOnline} />}
 
         {/* ── FAB — Capture new lead ── */}
         {!loading && (
