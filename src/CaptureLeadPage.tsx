@@ -559,6 +559,10 @@ export default function CaptureLeadPage() {
             <QrScannerView
               onScanned={handleQrScanned}
               onCancel={handleBackToOptions}
+              onManualEntry={() => {
+                setQrScanning(false);
+                actions.startCaptureWithDraft('MANUAL', sessionRef.current.draftData);
+              }}
             />
           </Suspense>
         )}
