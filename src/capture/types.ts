@@ -66,13 +66,43 @@ export interface VisionResult {
   fieldConfidence: Record<keyof VisionExtractedFields, FieldConfidence>;
 }
 
+export type LeadTemperature = 'Hot' | 'Warm' | 'Cold';
+export type LeadType        = 'NEW' | 'EXISTING';
+
+export const APPLICATION_OPTIONS = [
+  'Fine Fragrances',
+  'Air Care',
+  'Incense Sticks',
+  'Cosmetics',
+  'Fabric Care',
+  'Home Care',
+  'Candle',
+] as const;
+
+export type ApplicationOption = typeof APPLICATION_OPTIONS[number];
+
 export interface DraftData {
+  // Section 1 — priority contact
   clientName?:        string;
   company?:           string;
-  phone?:             string;   // primary phone (first of phoneNumbers)
-  email?:             string;   // primary email (first of emails)
+  phone?:             string;
+  email?:             string;
   designation?:       string;
+  leadTemperature?:   LeadTemperature;
+  // Section 2 — quick notes
   notes?:             string;
+  notesImageDataUrl?: string;
+  voiceNoteDurationMs?: number;
+  voiceNoteTranscript?: string;
+  // Section 3 — additional details
+  leadType?:          LeadType;
+  previousRepCode?:   string;
+  application?:       ApplicationOption[];
+  priceRange?:        string;
+  quickKeywords?:     string[];
+  targetMarket?:      string[];
+  certification?:     string[];
+  benchmark?:         string[];
   // Multi-value fields from vision extraction
   phoneNumbers?:      string[];
   emails?:            string[];
@@ -100,9 +130,7 @@ export interface ManualEntryFields {
 }
 
 export interface ManualEntryErrors {
-  clientName?: string;
-  company?:    string;
-  phone?:      string;
+  _form?: string;
 }
 
 // ─── Backend sync state ───────────────────────────────────────────────────────

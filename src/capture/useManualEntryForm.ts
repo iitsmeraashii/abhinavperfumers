@@ -8,29 +8,40 @@ import type { ManualEntryErrors, DraftData, CaptureSession } from './types';
 import type { CaptureSessionActions } from './useCaptureSession';
 import { saveDraft, clearDraft } from './captureDraftStorage';
 
-export type FormField = 'clientName' | 'company' | 'phone' | 'email' | 'designation' | 'notes';
+export type FormField =
+  | 'clientName' | 'company' | 'phone' | 'email' | 'designation'
+  | 'notes' | 'leadTemperature' | 'leadType' | 'previousRepCode'
+  | 'priceRange' | 'voiceNoteTranscript';
 
+// Relaxed validation: saveable if ANY meaningful data exists.
 function validate(data: DraftData): ManualEntryErrors {
-  const errors: ManualEntryErrors = {};
-  if (!String(data.clientName ?? '').trim()) errors.clientName = 'Name is required';
-  if (!String(data.company    ?? '').trim()) errors.company    = 'Company is required';
-  if (!String(data.phone      ?? '').trim()) errors.phone      = 'Phone is required';
-  return errors;
+  const hasName     = !!String(data.clientName ?? '').trim();
+  const hasPhone    = !!String(data.phone ?? '').trim();
+  const hasCompany  = !!String(data.company ?? '').trim();
+  const hasNotes    = !!String(data.notes ?? '').trim();
+  const hasImage    = !!data.notesImageDataUrl || !!data.cardFrontAssetId;
+  const hasQr       = !!data.rawQr;
+
+  if (hasName || hasPhone || hasCompany || hasNotes || hasImage || hasQr) {
+    return {};
+  }
+  return { _form: 'Add at least a name, phone, company, or note to save' };
 }
 
 export interface UseManualEntryFormReturn {
-  touched: Partial<Record<FormField, boolean>>;
-  toastMessage: string | null;
-  toastIsError: boolean;
-  handleChange: (field: FormField, value: string) => void;
-  handleBlur: (field: FormField) => void;
-  handleSaveDraft: (session: CaptureSession) => Promise<void>;
-  handleReset: () => void;
-  errorsFor: (data: DraftData) => ManualEntryErrors;
+  touched:       Partial<Record<FormField, boolean>>;
+  toastMessage:  string | null;
+  toastIsError:  boolean;
+  handleChange:  (field: FormField, value: string) => void;
+  handleBlur:    (field: FormField) => void;
+  handlePatchDraft: (patch: Partial<DraftData>) => void;
+  handleSaveDraft: (session: CaptureSession) => Promise<boolean>;
+  handleReset:   () => void;
+  errorsFor:     (data: DraftData) => ManualEntryErrors;
 }
 
 export function useManualEntryForm(actions: CaptureSessionActions): UseManualEntryFormReturn {
-  const [touched, setTouched] = useState<Partial<Record<FormField, boolean>>>({});
+  const [touched, setTouched]           = useState<Partial<Record<FormField, boolean>>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastIsError, setToastIsError] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -46,16 +57,20 @@ export function useManualEntryForm(actions: CaptureSessionActions): UseManualEnt
     actions.patchDraft({ [field]: value });
   }, [actions]);
 
+  const handlePatchDraft = useCallback((patch: Partial<DraftData>) => {
+    actions.patchDraft(patch);
+  }, [actions]);
+
   const handleBlur = useCallback((field: FormField) => {
     setTouched(prev => ({ ...prev, [field]: true }));
   }, []);
 
-  const handleSaveDraft = useCallback(async (session: CaptureSession) => {
-    setTouched({ clientName: true, company: true, phone: true });
+  // Returns true on success so caller can do save-and-next.
+  const handleSaveDraft = useCallback(async (session: CaptureSession): Promise<boolean> => {
     const errors = validate(session.draftData);
     if (Object.keys(errors).length > 0) {
-      showToast('Please fill in the required fields', true);
-      return;
+      showToast(errors._form ?? 'Add some data before saving', true);
+      return false;
     }
     actions.setStatus('DRAFT');
     const snapshot: CaptureSession = {
@@ -65,7 +80,8 @@ export function useManualEntryForm(actions: CaptureSessionActions): UseManualEnt
       hasUnsavedChanges: false,
     };
     await saveDraft(snapshot);
-    showToast('Draft saved offline');
+    showToast('Lead saved');
+    return true;
   }, [actions, showToast]);
 
   const handleReset = useCallback(() => {
@@ -80,6 +96,7 @@ export function useManualEntryForm(actions: CaptureSessionActions): UseManualEnt
     toastIsError,
     handleChange,
     handleBlur,
+    handlePatchDraft,
     handleSaveDraft,
     handleReset,
     errorsFor: validate,

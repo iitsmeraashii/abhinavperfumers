@@ -104,7 +104,6 @@ export async function syncUpsertSession(
       .upsert({
         id:               sessionId,
         user_id:          userId,
-        // Attach rep identity for reporting and filtering
         sales_rep_code:   repCode,
         event_id:         eventId ?? null,
         capture_method:   captureMethod,
@@ -114,7 +113,20 @@ export async function syncUpsertSession(
         phones,
         emails,
         local_draft_key:  localDraftKey ?? null,
-        // legacy columns for backward compat
+        // New enrichment fields
+        lead_temperature:       draftData.leadTemperature ?? null,
+        lead_type:              draftData.leadType ?? null,
+        previous_rep_code:      draftData.previousRepCode ?? null,
+        application:            draftData.application?.length ? draftData.application : null,
+        price_range:            draftData.priceRange ?? null,
+        quick_keywords:         draftData.quickKeywords?.length ? draftData.quickKeywords : null,
+        target_market:          draftData.targetMarket?.length ? draftData.targetMarket : null,
+        certification:          draftData.certification?.length ? draftData.certification : null,
+        benchmark:              draftData.benchmark?.length ? draftData.benchmark : null,
+        notes_image_url:        draftData.notesImageDataUrl ?? null,
+        voice_note_duration_ms: draftData.voiceNoteDurationMs ?? null,
+        voice_note_transcript:  draftData.voiceNoteTranscript ?? null,
+        // Legacy columns
         client_name:      draftData.clientName ?? null,
         company:          draftData.company    ?? null,
         designation:      draftData.designation ?? null,
@@ -368,6 +380,18 @@ export async function syncUpdateSessionFields(
         client_name:      draftData.clientName ?? null,
         company:          draftData.company    ?? null,
         designation:      draftData.designation ?? null,
+        lead_temperature:       draftData.leadTemperature ?? null,
+        lead_type:              draftData.leadType ?? null,
+        previous_rep_code:      draftData.previousRepCode ?? null,
+        application:            draftData.application?.length ? draftData.application : null,
+        price_range:            draftData.priceRange ?? null,
+        quick_keywords:         draftData.quickKeywords?.length ? draftData.quickKeywords : null,
+        target_market:          draftData.targetMarket?.length ? draftData.targetMarket : null,
+        certification:          draftData.certification?.length ? draftData.certification : null,
+        benchmark:              draftData.benchmark?.length ? draftData.benchmark : null,
+        notes_image_url:        draftData.notesImageDataUrl ?? null,
+        voice_note_duration_ms: draftData.voiceNoteDurationMs ?? null,
+        voice_note_transcript:  draftData.voiceNoteTranscript ?? null,
         synced_at:        new Date().toISOString(),
       })
       .eq('id', backendSessionId)

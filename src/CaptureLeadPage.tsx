@@ -316,6 +316,17 @@ export default function CaptureLeadPage() {
     setQrScanning(false);
   }, [actions, form, cardSessionId, isOnline, makeSyncCbs]);
 
+  // ── Save & start next lead (rapid capture) ───────────────────────────
+  const handleSaveAndNext = useCallback(() => {
+    form.handleReset();
+    actions.resetSession();
+    setQrScanning(false);
+    setCardSessionId('');
+    setCardAssets({ front: null, back: null });
+    setLastOcrResult(null);
+    addEntryRef.current('Save & Next — session reset for new capture');
+  }, [actions, form]);
+
   // ── QR scan complete ──────────────────────────────────────────────────────
   const handleQrScanned = useCallback(async (parsed: ParsedContact) => {
     const scanStart = Date.now();
@@ -535,6 +546,7 @@ export default function CaptureLeadPage() {
             form={form}
             onBack={handleBackToOptions}
             onDiscard={handleDiscardDraft}
+            onSaveAndNext={handleSaveAndNext}
           />
         )}
 
