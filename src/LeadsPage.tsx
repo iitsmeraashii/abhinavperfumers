@@ -40,6 +40,7 @@ interface AdvancedFilters {
   state: string;
   application: string;
   leadStatus: string;
+  systemStatus: string;
   dateFrom: string;
   dateTo: string;
 }
@@ -50,6 +51,7 @@ const EMPTY_ADVANCED: AdvancedFilters = {
   state: '',
   application: '',
   leadStatus: '',
+  systemStatus: '',
   dateFrom: '',
   dateTo: '',
 };
@@ -105,7 +107,7 @@ function getDateFilterStart(filter: DateFilter): string | null {
 }
 
 function countActiveAdvanced(f: AdvancedFilters): number {
-  return [f.leadType, f.temperature, f.state, f.application, f.dateFrom, f.dateTo]
+  return [f.leadType, f.temperature, f.state, f.application, f.systemStatus, f.dateFrom, f.dateTo]
     .filter(Boolean).length;
 }
 
@@ -163,6 +165,7 @@ function readParams(): {
       state: p.get('state') ?? '',
       application: p.get('application') ?? '',
       leadStatus: p.get('leadStatus') ?? '',
+      systemStatus: p.get('systemStatus') ?? '',
       dateFrom: p.get('dateFrom') ?? '',
       dateTo: p.get('dateTo') ?? '',
     },
@@ -192,6 +195,7 @@ function buildParams(
   set('state', adv.state);
   set('application', adv.application);
   set('leadStatus', adv.leadStatus);
+  set('systemStatus', adv.systemStatus);
   set('dateFrom', adv.dateFrom);
   set('dateTo', adv.dateTo);
 
@@ -206,12 +210,19 @@ function pushParams(params: URLSearchParams) {
 
 // ── Component ────────────────────────────────────────────────────────────────
 
+export interface LeadsInitialFilters {
+  dateFilter?: 'today' | '7days' | '30days';
+  systemStatus?: string;
+  leadStatus?: string;
+}
+
 interface LeadsPageProps {
   onSelectLead: (id: string) => void;
   initialEventCode?: string;
+  initialFilters?: LeadsInitialFilters;
 }
 
-export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageProps) {
+export default function LeadsPage({ onSelectLead, initialEventCode, initialFilters }: LeadsPageProps) {
   const { user } = useAuth();
 
   // Initialise all state from URL on first render (stable — not recomputed on re-renders)
@@ -226,19 +237,25 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
   const [page, setPage] = useState(init.page);
   const [total, setTotal] = useState(0);
 
-  // Quick filters
+  // Quick filters — initialFilters (from dashboard tile click) win over URL params on first mount
   const [searchInput, setSearchInput] = useState(init.search);
   const [searchTerm, setSearchTerm] = useState(init.search);
-  const [dateFilter, setDateFilter] = useState<DateFilter>(init.dateFilter);
+  const [dateFilter, setDateFilter] = useState<DateFilter>(initialFilters?.dateFilter ?? init.dateFilter);
   // initialEventCode (from parent Dashboard click) wins over URL param only on first load
   const [eventFilter, setEventFilter] = useState(initialEventCode ?? init.eventFilter);
   const [repFilter, setRepFilter] = useState(init.repFilter);
-  const [statusFilter, setStatusFilter] = useState(init.adv.leadStatus);
+  const [statusFilter, setStatusFilter] = useState(initialFilters?.leadStatus ?? init.adv.leadStatus);
+
+  // Advanced filters — system_status comes in via initialFilters
+  const initAdv: AdvancedFilters = {
+    ...init.adv,
+    ...(initialFilters?.systemStatus ? { systemStatus: initialFilters.systemStatus } : {}),
+  };
 
   // Advanced filters (draft = what's in the panel, applied = active)
   const [panelOpen, setPanelOpen] = useState(false);
-  const [draft, setDraft] = useState<AdvancedFilters>(init.adv);
-  const [applied, setApplied] = useState<AdvancedFilters>(init.adv);
+  const [draft, setDraft] = useState<AdvancedFilters>(initAdv);
+  const [applied, setApplied] = useState<AdvancedFilters>(initAdv);
 
   // Dynamic options
   const [events, setEvents] = useState<Event[]>([]);
@@ -340,6 +357,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     if (adv.temperature) query = query.eq('lead_temperature', adv.temperature);
     if (adv.state) query = query.eq('state', adv.state);
     if (adv.application) query = query.ilike('application', `%${adv.application}%`);
+    if (adv.systemStatus) query = query.eq('system_status', adv.systemStatus);
     const effectiveStatus = statusFilt || adv.leadStatus;
     if (effectiveStatus) query = query.eq('lead_status', effectiveStatus);
     if (adv.dateFrom) query = query.gte('created_at', new Date(adv.dateFrom).toISOString());
@@ -535,6 +553,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode }: LeadsPageP
     applied.temperature ? { label: `Temp: ${applied.temperature}`, key: 'temperature' } : null,
     applied.state ? { label: `State: ${applied.state}`, key: 'state' } : null,
     applied.application ? { label: `App: ${applied.application}`, key: 'application' } : null,
+    applied.systemStatus ? { label: `System: ${applied.systemStatus.replace(/_/g, ' ')}`, key: 'systemStatus' } : null,
     applied.dateFrom ? { label: `From: ${applied.dateFrom}`, key: 'dateFrom' } : null,
     applied.dateTo ? { label: `To: ${applied.dateTo}`, key: 'dateTo' } : null,
   ].filter(Boolean) as { label: string; key: keyof AdvancedFilters }[];

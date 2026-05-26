@@ -2,8 +2,10 @@ import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './AuthContext';
 import LoginPage from './LoginPage';
 import LeadsPage from './LeadsPage';
+import type { LeadsInitialFilters } from './LeadsPage';
 import LeadDetailPage from './LeadDetailPage';
 import DashboardPage from './DashboardPage';
+import type { DashboardFilter } from './DashboardPage';
 import TemplatesPage from './TemplatesPage';
 import EventsPage from './EventsPage';
 import SystemNotificationsPage from './SystemNotificationsPage';
@@ -211,6 +213,7 @@ function Layout() {
   const [tab, setTab] = useState<Tab>(isAdmin ? 'dashboard' : 'capture');
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(initialLeadId);
   const [leadsEventFilter, setLeadsEventFilter] = useState<string | undefined>(undefined);
+  const [leadsInitialFilters, setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
   const [followUpModalId, setFollowUpModalId] = useState<string | null>(initialFollowUpId);
   const [moreDrawerOpen, setMoreDrawerOpen] = useState(false);
 
@@ -247,6 +250,7 @@ function Layout() {
     url.search = '';
     window.history.pushState({}, '', url.toString());
     setLeadsEventFilter(undefined);
+    setLeadsInitialFilters(undefined);
   }
 
   function handleCloseFollowUpModal() {
@@ -258,10 +262,21 @@ function Layout() {
 
   function handleViewLeads(eventCode: string) {
     setLeadsEventFilter(eventCode);
+    setLeadsInitialFilters(undefined);
     setTab('leads');
     setSelectedLeadId(null);
     const url = new URL(window.location.href);
     url.searchParams.delete('lead');
+    window.history.pushState({}, '', url.toString());
+  }
+
+  function handleNavigateFromDashboard(filter: DashboardFilter) {
+    setLeadsEventFilter(undefined);
+    setLeadsInitialFilters(filter);
+    setTab('leads');
+    setSelectedLeadId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
     window.history.pushState({}, '', url.toString());
   }
 
@@ -361,16 +376,17 @@ function Layout() {
       {/* ── Page content ── */}
       {/* pb-mobile-nav adds clearance for fixed bottom nav on mobile */}
       <main className="pb-mobile-nav md:pb-0">
-        {tab === 'dashboard' && isAdmin && !selectedLeadId && <DashboardPage />}
+        {tab === 'dashboard' && isAdmin && !selectedLeadId && <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} />}
         {tab === 'events'    && isAdmin && !selectedLeadId && <EventsPage onViewLeads={handleViewLeads} />}
         {tab === 'templates' && isAdmin && !selectedLeadId && <TemplatesPage />}
         {tab === 'notifications' && isAdmin && !selectedLeadId && <SystemNotificationsPage />}
         {tab === 'capture'   && !selectedLeadId && <CaptureLeadPage />}
         {tab === 'leads'     && !selectedLeadId && (
           <LeadsPage
-            key={leadsEventFilter ?? '__all__'}
+            key={[leadsEventFilter ?? '', JSON.stringify(leadsInitialFilters ?? {})].join('|')}
             onSelectLead={handleSelectLead}
             initialEventCode={leadsEventFilter}
+            initialFilters={leadsInitialFilters}
           />
         )}
         {selectedLeadId && (
