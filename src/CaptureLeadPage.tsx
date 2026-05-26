@@ -10,7 +10,8 @@ import { OfflineBanner } from './capture/OfflineBanner';
 import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
 import { ManualEntryForm } from './capture/ManualEntryForm';
 import { BusinessCardCapture } from './capture/BusinessCardCapture';
-import { Toast } from './capture/CaptureUI';
+import { Toast, DraftRecoveryBanner } from './capture/CaptureUI';
+import type { SaveState } from './capture/useAutosave';
 import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
 import {
   syncUpsertSession,
@@ -64,8 +65,9 @@ export default function CaptureLeadPage() {
   const isOnline = useOnlineStatus({ onReconnect: handleReconnect });
   const [session, actions] = useCaptureSession();
   const form = useManualEntryForm(actions);
-  const [recoveryToast, setRecoveryToast] = useState<string | null>(null);
-  const recoveryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
+  // Pending draft held until user confirms Continue or Discard
+  const [pendingDraft, setPendingDraft] = useState<{ session: typeof session; capturedAt: Date | null } | null>(null);
   const [qrScanning, setQrScanning] = useState(false);
   const [lastScan, setLastScan] = useState<ParsedContact | null>(null);
 
@@ -186,48 +188,70 @@ export default function CaptureLeadPage() {
     }
   }, [isOnline, actions, makeSyncCbs, session.draftData]);
 
-  useAutosave(session);
+  useAutosave(session, { isOnline, onSaveStateChange: setSaveState });
 
   // ── Draft restore on mount ────────────────────────────────────────────────
+  // Draft restore on mount — hold draft in pendingDraft until user decides.
   useEffect(() => {
     loadDraft().then((saved) => {
       if (!saved || saved.sessionStatus === 'IDLE') return;
-
-      if (saved.captureMethod === 'BUSINESS_CARD' && saved.draftData.cardSessionId) {
-        setCardSessionId(saved.draftData.cardSessionId as string);
-      }
 
       const normalised = saved.captureMethod === 'QR'
         ? { ...saved, captureMethod: 'MANUAL' as CaptureMethod }
         : saved;
 
-      actions.restoreSession(normalised);
-      addEntryRef.current('Draft restored from IndexedDB', {
-        method:          normalised.captureMethod,
+      addEntryRef.current('Draft found in IndexedDB — awaiting user decision', {
+        method:           normalised.captureMethod,
         backendSessionId: normalised.sync.backendSessionId,
-        lastSyncedAt:    normalised.sync.lastSyncedAt,
       });
 
-      // Re-sync restored session if online
-      if (normalised.sync.backendSessionId && navigator.onLine) {
-        actions.incrementPendingOps();
-        syncUpsertSession({
-          sessionId:     normalised.sync.backendSessionId,
-          captureMethod: (normalised.captureMethod ?? 'MANUAL') as CaptureMethod,
-          draftData:     normalised.draftData,
-          sessionStatus: normalised.sessionStatus,
-          localDraftKey: 'active_capture_draft',
-          eventId:       selectedEvent?.id ?? null,
-        }, makeSyncCbs()).catch(() => {});
-      }
-
-      setRecoveryToast('Recovered unfinished draft');
-      recoveryTimer.current = setTimeout(() => setRecoveryToast(null), 3200);
+      setPendingDraft({ session: normalised, capturedAt: normalised.updatedAt ?? normalised.createdAt });
     });
-
-    return () => { if (recoveryTimer.current) clearTimeout(recoveryTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // User chose to continue the recovered draft
+  const handleRecoveryContinue = useCallback(() => {
+    if (!pendingDraft) return;
+    const normalised = pendingDraft.session;
+
+    if (normalised.captureMethod === 'BUSINESS_CARD' && normalised.draftData.cardSessionId) {
+      setCardSessionId(normalised.draftData.cardSessionId as string);
+    }
+
+    actions.restoreSession(normalised);
+    setPendingDraft(null);
+    addEntryRef.current('User continued recovered draft', { method: normalised.captureMethod });
+
+    // Re-sync to backend if online
+    if (normalised.sync.backendSessionId && navigator.onLine) {
+      actions.incrementPendingOps();
+      syncUpsertSession({
+        sessionId:     normalised.sync.backendSessionId,
+        captureMethod: (normalised.captureMethod ?? 'MANUAL') as CaptureMethod,
+        draftData:     normalised.draftData,
+        sessionStatus: normalised.sessionStatus,
+        localDraftKey: 'active_capture_draft',
+        eventId:       selectedEvent?.id ?? null,
+      }, makeSyncCbs()).catch(() => {});
+    }
+  }, [pendingDraft, actions, selectedEvent, makeSyncCbs]);
+
+  // User chose to discard the recovered draft
+  const handleRecoveryDiscard = useCallback(async () => {
+    if (!pendingDraft) return;
+    const bsid = pendingDraft.session.sync.backendSessionId;
+    if (bsid && navigator.onLine) {
+      syncAbandonSession(bsid, makeSyncCbs()).catch(() => {});
+    }
+    const cardSid = pendingDraft.session.draftData.cardSessionId as string | undefined;
+    if (cardSid) {
+      await deleteSessionAssets(cardSid);
+    }
+    await clearDraft();
+    setPendingDraft(null);
+    addEntryRef.current('User discarded recovered draft');
+  }, [pendingDraft, makeSyncCbs]);
 
   // ── Method selection ──────────────────────────────────────────────────────
   const handleMethodSelect = useCallback(async (method: CaptureMethod) => {
@@ -543,6 +567,7 @@ export default function CaptureLeadPage() {
           <ManualEntryForm
             session={session}
             isOnline={isOnline}
+            saveState={saveState}
             form={form}
             onBack={handleBackToOptions}
             onDiscard={handleDiscardDraft}
@@ -572,7 +597,14 @@ export default function CaptureLeadPage() {
         )}
       </div>
 
-      <Toast message={recoveryToast} position="top" />
+      {pendingDraft && (
+        <DraftRecoveryBanner
+          draftData={pendingDraft.session.draftData}
+          capturedAt={pendingDraft.capturedAt}
+          onContinue={handleRecoveryContinue}
+          onDiscard={handleRecoveryDiscard}
+        />
+      )}
 
       <CaptureDebugPanel
         session={session}

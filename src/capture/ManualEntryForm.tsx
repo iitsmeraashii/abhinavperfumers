@@ -10,7 +10,8 @@ import { supabase } from '../supabaseClient';
 import type { CaptureSession, DraftData, LeadTemperature, LeadType, ApplicationOption } from './types';
 import { APPLICATION_OPTIONS } from './types';
 import type { UseManualEntryFormReturn } from './useManualEntryForm';
-import { Toast, DiscardDialog } from './CaptureUI';
+import { Toast, DiscardDialog, DraftSaveIndicator } from './CaptureUI';
+import type { SaveState } from './useAutosave';
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
@@ -664,15 +665,16 @@ function CollapsibleSection({
 // ─── Main form ────────────────────────────────────────────────────────────────
 
 interface Props {
-  session:    CaptureSession;
-  isOnline:   boolean;
-  form:       UseManualEntryFormReturn;
-  onBack:     () => void;
-  onDiscard:  () => Promise<void>;
+  session:       CaptureSession;
+  isOnline:      boolean;
+  saveState?:    SaveState;
+  form:          UseManualEntryFormReturn;
+  onBack:        () => void;
+  onDiscard:     () => Promise<void>;
   onSaveAndNext?: () => void;
 }
 
-export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard, onSaveAndNext }: Props) {
+export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
@@ -750,12 +752,7 @@ export function ManualEntryForm({ session, isOnline, form, onBack, onDiscard, on
         <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
           <div className="px-5 pt-5 pb-4 border-b border-stone-100 flex items-center justify-between">
             <SectionHeader title="Contact Details" subtitle="Capture key info first" />
-            {session.sessionStatus === 'DRAFT' && (
-              <span className="flex items-center gap-1 text-[11px] font-medium text-green-700 bg-green-50
-                border border-green-200 rounded-full px-2 py-0.5 shrink-0 self-start">
-                <CheckCircle2 className="w-3 h-3" /> Saved
-              </span>
-            )}
+            <DraftSaveIndicator state={saveState} />
           </div>
 
           <div className="px-5 py-5 space-y-4">
