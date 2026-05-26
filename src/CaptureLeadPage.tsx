@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from './capture/useOnlineStatus';
+import { useEvent } from './EventContext';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
 import { useAutosave } from './capture/useAutosave';
@@ -45,6 +46,7 @@ function genStableId(): string {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function CaptureLeadPage() {
+  const { selectedEvent } = useEvent();
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isFlushing, setIsFlushing] = useState(false);
 
@@ -215,6 +217,7 @@ export default function CaptureLeadPage() {
           draftData:     normalised.draftData,
           sessionStatus: normalised.sessionStatus,
           localDraftKey: 'active_capture_draft',
+          eventId:       selectedEvent?.id ?? null,
         }, makeSyncCbs()).catch(() => {});
       }
 
@@ -241,6 +244,7 @@ export default function CaptureLeadPage() {
         draftData:     {},
         sessionStatus: 'CAPTURING',
         localDraftKey: 'active_capture_draft',
+        eventId:       selectedEvent?.id ?? null,
       }, backendSessionId);
       addEntryRef.current('Session created/queued (QR)', { backendSessionId });
 
@@ -264,6 +268,7 @@ export default function CaptureLeadPage() {
           draftData:     { cardSessionId: sid },
           sessionStatus: 'CAPTURING',
           localDraftKey: 'active_capture_draft',
+          eventId:       selectedEvent?.id ?? null,
         }, bsid);
         addEntryRef.current('Session created/queued (BUSINESS_CARD)', { backendSessionId: bsid });
       }, 0);
@@ -278,10 +283,11 @@ export default function CaptureLeadPage() {
         draftData:     {},
         sessionStatus: 'CAPTURING',
         localDraftKey: 'active_capture_draft',
+        eventId:       selectedEvent?.id ?? null,
       }, backendSessionId);
       addEntryRef.current('Session created/queued (MANUAL)', { backendSessionId });
     }
-  }, [actions, form, syncSessionOp]);
+  }, [actions, form, syncSessionOp, selectedEvent]);
 
   // ── Back / discard ────────────────────────────────────────────────────────
   const handleBackToOptions = useCallback(() => {

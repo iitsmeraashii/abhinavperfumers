@@ -6,14 +6,16 @@ import { supabase } from './supabaseClient';
 
 // Business profile from sales_representatives — separate from the auth identity.
 export interface SalesRep {
-  id:           string;
-  rep_code:     string;
-  name:         string;
-  role:         string;
-  email:        string;
-  auth_user_id: string;
-  login_enabled: boolean;
-  is_active:    boolean;
+  id:               string;
+  rep_code:         string;
+  name:             string;
+  role:             string;
+  email:            string;
+  phone:            string | null;
+  auth_user_id:     string;
+  login_enabled:    boolean;
+  is_active:        boolean;
+  default_event_id: string | null;
 }
 
 // Legacy shape kept identical so all consumers (LeadsPage, DashboardPage, etc.)
@@ -95,7 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const { data, error } = await supabase
         .from('my_rep_profile')
-        .select('id, rep_code, name, role, email, auth_user_id, login_enabled, is_active')
+        .select('id, rep_code, name, role, email, phone, auth_user_id, login_enabled, is_active, default_event_id')
         .maybeSingle();
 
       if (error) {
@@ -121,14 +123,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       setSalesRep({
-        id:            data.id,
-        rep_code:      data.rep_code,
-        name:          data.name,
-        role:          data.role,
-        email:         data.email ?? s.user.email ?? '',
-        auth_user_id:  data.auth_user_id ?? s.user.id,
-        login_enabled: data.login_enabled,
-        is_active:     data.is_active,
+        id:               data.id,
+        rep_code:         data.rep_code,
+        name:             data.name,
+        role:             data.role,
+        email:            data.email ?? s.user.email ?? '',
+        phone:            data.phone ?? null,
+        auth_user_id:     data.auth_user_id ?? s.user.id,
+        login_enabled:    data.login_enabled,
+        is_active:        data.is_active,
+        default_event_id: data.default_event_id ?? null,
       });
     } catch (err) {
       console.error('[AuthContext] loadRepProfile threw', err);

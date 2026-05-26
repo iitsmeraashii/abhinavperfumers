@@ -67,6 +67,7 @@ export interface UpsertSessionPayload {
   draftData:       DraftData;
   sessionStatus:   string;
   localDraftKey?:  string;
+  eventId?:        string | null;
 }
 
 export async function syncUpsertSession(
@@ -83,7 +84,7 @@ export async function syncUpsertSession(
 
     const { userId, repCode } = identity;
     const {
-      sessionId, captureMethod, draftData, sessionStatus, localDraftKey,
+      sessionId, captureMethod, draftData, sessionStatus, localDraftKey, eventId,
     } = payload;
 
     // Build the phones/emails arrays from the single-value draft fields
@@ -105,6 +106,7 @@ export async function syncUpsertSession(
         user_id:          userId,
         // Attach rep identity for reporting and filtering
         sales_rep_code:   repCode,
+        event_id:         eventId ?? null,
         capture_method:   captureMethod,
         session_status:   sessionStatus.toLowerCase(),
         extracted_fields: extractedFields,
