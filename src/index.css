@@ -38,3 +38,7 @@
 .animate-in {
   animation: modal-in 0.18s ease-out both;
 }
+
+/* Hide scrollbar on filter tab row while allowing scroll */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

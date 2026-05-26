@@ -12,14 +12,15 @@ import EventsPage from './EventsPage';
 import SystemNotificationsPage from './SystemNotificationsPage';
 import FollowUpCompleteModal from './FollowUpCompleteModal';
 import CaptureLeadPage from './CaptureLeadPage';
+import LeadQueuePage from './LeadQueuePage';
 import MyAccountPage from './MyAccountPage';
 import {
   LogOut, Loader2,
   LayoutDashboard, List, FileText, CalendarDays, Bell, PlusCircle,
-  MoreHorizontal, X, User, ChevronDown,
+  MoreHorizontal, X, User, ChevronDown, Layers,
 } from 'lucide-react';
 
-type Tab = 'dashboard' | 'leads' | 'capture' | 'templates' | 'events' | 'notifications' | 'account';
+type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'templates' | 'events' | 'notifications' | 'account';
 
 // ─── Mobile bottom nav tabs ───────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ const MOBILE_TABS: MobileTab[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-5 h-5" />, adminOnly: true },
   { id: 'leads',     label: 'Leads',     icon: <List className="w-5 h-5" /> },
   { id: 'capture',   label: 'Capture',   icon: <PlusCircle className="w-5 h-5" />, emphasize: true },
+  { id: 'queue',     label: 'Queue',     icon: <Layers className="w-5 h-5" /> },
   { id: 'events',    label: 'Events',    icon: <CalendarDays className="w-5 h-5" />, adminOnly: true },
 ];
 
@@ -416,6 +418,13 @@ function Layout() {
             >
               <PlusCircle className="w-4 h-4" /> Capture Lead
             </button>
+            <button
+              onClick={() => handleTabChange('queue')}
+              className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                ${tab === 'queue' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+            >
+              <Layers className="w-4 h-4" /> Queue
+            </button>
             {isAdmin && (
               <button
                 onClick={() => handleTabChange('events')}
@@ -491,6 +500,13 @@ function Layout() {
             {tab === 'templates' && isAdmin && !selectedLeadId && <TemplatesPage />}
             {tab === 'notifications' && isAdmin && !selectedLeadId && <SystemNotificationsPage />}
             {tab === 'capture' && !selectedLeadId && <CaptureLeadPage />}
+            {tab === 'queue' && !selectedLeadId && (
+              <LeadQueuePage
+                onCapture={() => handleTabChange('capture')}
+                onContinueDraft={() => handleTabChange('capture')}
+                onViewLead={undefined}
+              />
+            )}
             {tab === 'leads' && !selectedLeadId && (
               <LeadsPage
                 key={[leadsEventFilter ?? '', JSON.stringify(leadsInitialFilters ?? {})].join('|')}
