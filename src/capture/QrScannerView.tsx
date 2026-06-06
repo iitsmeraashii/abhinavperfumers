@@ -3,7 +3,10 @@
 // Global CSS in index.css strips all library-injected chrome.
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { X, RefreshCw, AlertCircle, CheckCircle2, Loader2, QrCode, Link, FileText, Zap, CreditCard as Edit3 } from 'lucide-react';
+import {
+  X, RefreshCw, AlertCircle, CheckCircle2, Loader2,
+  QrCode, Link, FileText, Zap, Edit3,
+} from 'lucide-react';
 import { useQrScanner } from './useQrScanner';
 import type { ParsedContact, QrContentType } from './parseQrPayload';
 
