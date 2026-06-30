@@ -407,6 +407,108 @@ export async function syncUpdateSessionFields(
   }
 }
 
+// ─── Promote capture session → lead_entries ──────────────────────────────────
+// Called when the user presses "Save & Next Lead".
+// Maps draftData into a lead_entries row, inserts it, and marks the
+// capture_session as promoted so it doesn't appear as a pending draft again.
+// Returns { leadId, error } — never throws.
+
+export interface PromoteResult {
+  leadId: string | null;
+  error:  string | null;
+}
+
+export async function promoteSessionToLead(
+  backendSessionId: string,
+  draftData:        DraftData,
+  eventCode:        string | null,
+): Promise<PromoteResult> {
+  try {
+    const identity = await getAuthIdentity();
+    if (!identity?.repCode) {
+      return { leadId: null, error: 'Not authenticated or rep profile unavailable' };
+    }
+    const { userId, repCode } = identity;
+
+    // Build phones — primary field first, then extras from vision extraction
+    const phones: string[] = [];
+    if (draftData.phone?.trim()) phones.push(draftData.phone.trim());
+    if (Array.isArray(draftData.phoneNumbers)) {
+      for (const p of draftData.phoneNumbers as string[]) {
+        const t = String(p ?? '').trim();
+        if (t && !phones.includes(t)) phones.push(t);
+      }
+    }
+
+    // Build emails — same pattern
+    const emails: string[] = [];
+    if (draftData.email?.trim()) emails.push(draftData.email.trim());
+    if (Array.isArray(draftData.emails)) {
+      for (const e of draftData.emails as string[]) {
+        const t = String(e ?? '').trim();
+        if (t && !emails.includes(t)) emails.push(t);
+      }
+    }
+
+    const leadId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0;
+          return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+        });
+
+    const now = new Date().toISOString();
+
+    const { error: insertError } = await supabase
+      .from('lead_entries')
+      .insert({
+        id:                      leadId,
+        client_name:             draftData.clientName?.trim()      || null,
+        company:                 draftData.company?.trim()         || null,
+        designation:             draftData.designation?.trim()     || null,
+        phones:                  phones.length   ? phones   : null,
+        emails:                  emails.length   ? emails   : null,
+        notes:                   draftData.notes?.trim()           || null,
+        lead_temperature:        draftData.leadTemperature         || null,
+        lead_type:               draftData.leadType                || 'NEW',
+        previous_associated_rep: draftData.previousRepCode?.trim() || null,
+        // application is text[] in capture_sessions but text in lead_entries — join
+        application:             Array.isArray(draftData.application) && (draftData.application as string[]).length
+                                   ? (draftData.application as string[]).join(', ')
+                                   : null,
+        price_range:             draftData.priceRange?.trim()      || null,
+        quick_keywords:          Array.isArray(draftData.quickKeywords)  && (draftData.quickKeywords  as string[]).length ? draftData.quickKeywords  as string[] : null,
+        target_market:           Array.isArray(draftData.targetMarket)   && (draftData.targetMarket   as string[]).length ? draftData.targetMarket   as string[] : null,
+        certification:           Array.isArray(draftData.certification)  && (draftData.certification  as string[]).length ? draftData.certification  as string[] : null,
+        benchmark:               Array.isArray(draftData.benchmark)      && (draftData.benchmark      as string[]).length ? draftData.benchmark      as string[] : null,
+        sales_rep_code:          repCode,
+        event_code:              eventCode || null,
+        lead_status:             'NEW',
+        system_status:           'CREATED',
+        created_at:              now,
+        updated_at:              now,
+      });
+
+    if (insertError) {
+      console.warn('[captureBackendSync] promoteSessionToLead insert failed:', insertError.message);
+      return { leadId: null, error: insertError.message };
+    }
+
+    // Mark the capture session as promoted so it won't be treated as a pending draft
+    await supabase
+      .from('capture_sessions')
+      .update({ promoted_lead_id: leadId, session_status: 'promoted' })
+      .eq('id', backendSessionId)
+      .eq('user_id', userId);
+
+    return { leadId, error: null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('[captureBackendSync] promoteSessionToLead failed:', msg);
+    return { leadId: null, error: msg };
+  }
+}
+
 // ─── Session abandon ──────────────────────────────────────────────────────────
 
 export async function syncAbandonSession(

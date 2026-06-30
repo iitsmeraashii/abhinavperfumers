@@ -20,6 +20,7 @@ import {
   syncUpsertQrExtraction,
   syncUpdateSessionFields,
   syncAbandonSession,
+  promoteSessionToLead,
 } from './capture/captureBackendSync';
 import {
   enqueueOp,
@@ -51,6 +52,7 @@ export default function CaptureLeadPage() {
   const { selectedEvent } = useEvent();
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isFlushing, setIsFlushing] = useState(false);
+  const [promotionToast, setPromotionToast] = useState<{ message: string; isError: boolean } | null>(null);
 
   // Flush the offline queue and update pending count badge
   const handleReconnect = useCallback(async () => {
@@ -342,35 +344,58 @@ export default function CaptureLeadPage() {
   }, [actions, form, cardSessionId, isOnline, makeSyncCbs]);
 
   // ── Save & start next lead (rapid capture) ───────────────────────────
-  const handleSaveAndNext = useCallback(async () => {
-    // Persist the current session to completed_leads BEFORE resetting
+  // Returns { error } on failure so ManualEntryForm can keep the form visible.
+  const handleSaveAndNext = useCallback(async (): Promise<{ error?: string } | void> => {
     const s    = sessionRef.current;
     const bsid = s.sync.backendSessionId;
-    if (s.sessionStatus !== 'IDLE' && bsid) {
-      const lead = buildCompletedLead(
-        bsid,
-        s.captureMethod,
-        s.draftData,
-        bsid,
-        selectedEvent?.id ?? null,
-        selectedEvent?.name ?? null,
-      );
-      if (s.sync.pendingOps > 0 || s.sync.status === 'syncing') {
-        lead.status = 'pending_sync';
-      } else if (s.sync.status === 'synced') {
-        lead.status = 'synced';
-        lead.syncedAt = s.sync.lastSyncedAt;
-      }
-      await saveCompletedLead(lead);
-      addEntryRef.current('Save & Next — lead saved to completed_leads', { id: bsid, status: lead.status });
+
+    if (s.sessionStatus === 'IDLE' || !bsid) {
+      // Nothing to save — just reset
+      form.handleReset();
+      actions.resetSession();
+      return;
     }
+
+    // 1. Promote to lead_entries (the authoritative record in Supabase)
+    addEntryRef.current('Save & Next — promoting session to lead_entry', { bsid });
+    const { leadId, error } = await promoteSessionToLead(
+      bsid,
+      s.draftData,
+      selectedEvent?.event_code ?? null,
+    );
+
+    if (error || !leadId) {
+      // Don't reset — let the user retry or save as draft
+      const isRls = error?.includes('row-level security') || error?.includes('policy') || error?.includes('permission');
+      const msg = isRls
+        ? 'Permission error: INSERT policy missing on lead_entries. Ask your admin to apply the database policy.'
+        : `Failed to save lead: ${error ?? 'unknown error'}`;
+      setPromotionToast({ message: msg, isError: true });
+      setTimeout(() => setPromotionToast(null), 8000);
+      addEntryRef.current('Save & Next — promotion failed', error ?? 'unknown');
+      return { error: error ?? 'Promotion failed' };
+    }
+
+    // 2. Save locally so the Queue page reflects the new lead immediately
+    const lead = buildCompletedLead(
+      bsid, s.captureMethod, s.draftData, bsid,
+      selectedEvent?.id ?? null, selectedEvent?.name ?? null,
+    );
+    lead.status   = 'synced';
+    lead.syncedAt = new Date().toISOString();
+    await saveCompletedLead(lead);
+
+    addEntryRef.current('Save & Next — lead promoted', { leadId });
+    setPromotionToast({ message: 'Lead saved to your list!', isError: false });
+    setTimeout(() => setPromotionToast(null), 3000);
+
+    // 3. Reset for the next capture
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
     setCardSessionId('');
     setCardAssets({ front: null, back: null });
     setLastOcrResult(null);
-    addEntryRef.current('Save & Next — session reset for new capture');
   }, [actions, form, selectedEvent]);
 
   // ── QR scan complete ──────────────────────────────────────────────────────
@@ -663,6 +688,13 @@ export default function CaptureLeadPage() {
         ocrDiagnostics={ocrDiagnostics}
         log={log}
         onClearLog={clearLog}
+      />
+
+      {/* Promotion result toast — shown above the bottom nav */}
+      <Toast
+        message={promotionToast?.message ?? null}
+        isError={promotionToast?.isError ?? false}
+        position="top"
       />
     </div>
   );

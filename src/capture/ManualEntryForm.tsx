@@ -4,7 +4,7 @@ import {
   CheckCircle2, Wifi, WifiOff, Trash2, ChevronDown, ChevronRight,
   Mic, Square, Camera, X, Image as ImageIcon,
   Flame, Thermometer, Snowflake,
-  Plus, Minus, ArrowRight,
+  Plus, Minus, ArrowRight, Loader2,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import type { CaptureSession, DraftData, LeadTemperature, LeadType, ApplicationOption } from './types';
@@ -671,7 +671,7 @@ interface Props {
   form:          UseManualEntryFormReturn;
   onBack:        () => void;
   onDiscard:     () => Promise<void>;
-  onSaveAndNext?: () => void;
+  onSaveAndNext?: () => Promise<{ error?: string } | void>;
 }
 
 export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext }: Props) {
@@ -681,6 +681,9 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   } = form;
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Suppress the "Lead saved" draft toast while promotion is in flight so it
+  // doesn't appear alongside a promotion error toast from the parent.
+  const [promotionActive, setPromotionActive] = useState(false);
 
   const d = session.draftData;
   const clientName      = String(d.clientName ?? '');
@@ -707,9 +710,16 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const handleSaveAndNext = useCallback(async () => {
     setSaving(true);
     const ok = await handleSaveDraft(session);
-    setSaving(false);
-    if (ok && onSaveAndNext) {
-      setTimeout(() => onSaveAndNext(), 400);
+    if (!ok) { setSaving(false); return; }
+    setPromotionActive(true); // hide the "Lead saved" draft toast
+    if (onSaveAndNext) {
+      const result = await onSaveAndNext();
+      setPromotionActive(false);
+      setSaving(false);
+      void result;
+    } else {
+      setPromotionActive(false);
+      setSaving(false);
     }
   }, [handleSaveDraft, session, onSaveAndNext]);
 
@@ -969,13 +979,22 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
               hover:bg-stone-800 active:bg-stone-950 active:scale-[0.98]
               transition-all duration-150 disabled:opacity-50"
           >
-            Save &amp; Next Lead
-            <ArrowRight className="w-4 h-4" />
+            {saving ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Saving…
+              </>
+            ) : (
+              <>
+                Save &amp; Next Lead
+                <ArrowRight className="w-4 h-4" />
+              </>
+            )}
           </button>
         </div>
       </div>
 
-      <Toast message={toastMessage} isError={toastIsError} position="bottom" />
+      <Toast message={promotionActive ? null : toastMessage} isError={toastIsError} position="bottom" />
 
       {showDiscardDialog && (
         <DiscardDialog
