@@ -651,6 +651,7 @@ export default function CaptureLeadPage() {
             onComplete={handleCardComplete}
             onBack={handleBackToOptions}
             onAssetsChanged={handleCardAssetsChanged}
+            onDraftPatch={actions.patchDraft}
             onOcrResult={handleOcrResult}
             onOcrStateChange={(s) => setOcrDebug(s as typeof ocrDebug)}
             onOcrDiagnostics={setOcrDiagnostics}

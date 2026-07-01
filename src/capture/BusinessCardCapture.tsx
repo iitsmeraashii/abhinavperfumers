@@ -12,7 +12,7 @@ import {
 import { createPortal } from 'react-dom';
 import { saveAsset, deleteAsset, getSessionAssets } from './captureAssetStorage';
 import { useVisionExtraction } from './useVisionExtraction';
-import type { BusinessCardAsset, CardSide, CaptureSession, OcrResult, VisionResult } from './types';
+import type { BusinessCardAsset, CardSide, CaptureSession, DraftData, OcrResult, VisionResult } from './types';
 import type { VisionState } from './useVisionExtraction';
 import { Toast } from './CaptureUI';
 
@@ -31,6 +31,7 @@ interface Props {
   onComplete: (frontAssetId: string, backAssetId: string | null, ocrResult: OcrResult | null, visionResult: VisionResult | null) => void;
   onBack: () => void;
   onAssetsChanged?: (front: BusinessCardAsset | null, back: BusinessCardAsset | null) => void;
+  onDraftPatch?: (patch: Partial<DraftData>) => void;
   onVisionResult?: (result: VisionResult) => void;
   onOcrResult?: (result: OcrResult) => void;
   onOcrStateChange?: (state: { status: string; progress: number; progressLabel: string; error: string | null }) => void;
@@ -566,7 +567,7 @@ function ChipInput({ label, icon: Icon, values, confidence, onAdd, onRemove, inp
 
 export function BusinessCardCapture({
   session, sessionId, isOnline = true, onComplete, onBack, onAssetsChanged,
-  onVisionResult, onOcrResult, onOcrStateChange, onOcrDiagnostics: _ignored,
+  onDraftPatch, onVisionResult, onOcrResult, onOcrStateChange, onOcrDiagnostics: _ignored,
   onDebugLog,
 }: Props) {
   const [front, setFront] = useState<CardState>({ asset: null, status: 'empty' });
@@ -576,16 +577,28 @@ export function BusinessCardCapture({
   const [toast, setToast] = useState<{ msg: string; isError?: boolean } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [editedName,    setEditedName]    = useState('');
-  const [editedCompany, setEditedCompany] = useState('');
-  const [editedDesig,   setEditedDesig]   = useState('');
-  const [editedPhones,  setEditedPhones]  = useState<string[]>([]);
-  const [editedEmails,  setEditedEmails]  = useState<string[]>([]);
-  const [editedWebsite, setEditedWebsite] = useState('');
-  const [editedAddress, setEditedAddress] = useState('');
-  const [editedNotes,   setEditedNotes]   = useState('');
-  const [showExtraFields, setShowExtraFields] = useState(false);
+  // showExtraFields is UI-only — initialise from draft so restored sessions expand correctly
+  const [showExtraFields, setShowExtraFields] = useState(
+    () => !!(session.draftData.website || session.draftData.address),
+  );
+  // lastVisionResult is display-only (confidence badge colours); not part of shared state
   const [lastVisionResult, setLastVisionResult] = useState<VisionResult | null>(null);
+
+  // ── All extracted / edited field values are derived from session.draftData ──
+  // Writes go through onDraftPatch → actions.patchDraft (same pattern as ManualEntryForm).
+  const d = session.draftData;
+  const editedName    = String(d.clientName  ?? '');
+  const editedCompany = String(d.company     ?? '');
+  const editedDesig   = String(d.designation ?? '');
+  const editedPhones: string[] = Array.isArray(d.phoneNumbers) && (d.phoneNumbers as string[]).length
+    ? d.phoneNumbers as string[]
+    : d.phone ? [String(d.phone)] : [];
+  const editedEmails: string[] = Array.isArray(d.emails) && (d.emails as string[]).length
+    ? d.emails as string[]
+    : d.email ? [String(d.email)] : [];
+  const editedWebsite = String(d.website ?? '');
+  const editedAddress = String(d.address  ?? '');
+  const editedNotes   = String(d.notes    ?? '');
 
   const { visionState, runExtraction, cancelExtraction, resetExtraction } = useVisionExtraction();
 
@@ -608,7 +621,7 @@ export function BusinessCardCapture({
     toastTimer.current = setTimeout(() => setToast(null), 3000);
   }
 
-  // Restore assets on mount (draft recovery)
+  // Restore assets on mount (draft recovery) — field values are already in session.draftData
   useEffect(() => {
     async function restore() {
       const d = session.draftData;
@@ -622,16 +635,6 @@ export function BusinessCardCapture({
         showToast('Business card images restored');
         onAssetsChanged?.(frontAsset, backAsset);
       }
-      if (d.clientName)  setEditedName(String(d.clientName));
-      if (d.company)     setEditedCompany(String(d.company));
-      if (d.designation) setEditedDesig(String(d.designation));
-      if (d.phoneNumbers && Array.isArray(d.phoneNumbers)) setEditedPhones(d.phoneNumbers as string[]);
-      else if (d.phone)  setEditedPhones([String(d.phone)]);
-      if (d.emails && Array.isArray(d.emails)) setEditedEmails(d.emails as string[]);
-      else if (d.email)  setEditedEmails([String(d.email)]);
-      if (d.website) { setEditedWebsite(String(d.website)); setShowExtraFields(true); }
-      if (d.address) { setEditedAddress(String(d.address)); setShowExtraFields(true); }
-      if (d.notes)   setEditedNotes(String(d.notes));
     }
     restore();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -645,14 +648,20 @@ export function BusinessCardCapture({
 
   function applyVisionResult(result: VisionResult) {
     const f = result.fields;
-    setEditedName(f.fullName || '');
-    setEditedCompany(f.company || '');
-    setEditedDesig(f.designation || '');
-    setEditedPhones(f.phoneNumbers.length > 0 ? f.phoneNumbers : []);
-    setEditedEmails(f.emails.length > 0 ? f.emails : []);
-    setEditedWebsite(f.website || '');
-    setEditedAddress(f.address || '');
-    setEditedNotes(f.notes || '');
+
+    // Write extracted fields directly to the shared draft so they're immediately
+    // visible in ManualEntryForm without waiting for the user to click Continue.
+    const patch: Partial<DraftData> = {};
+    if (f.fullName)            patch.clientName  = f.fullName;
+    if (f.company)             patch.company     = f.company;
+    if (f.designation)         patch.designation = f.designation;
+    if (f.phoneNumbers.length) { patch.phoneNumbers = f.phoneNumbers; patch.phone = f.phoneNumbers[0]; }
+    if (f.emails.length)       { patch.emails = f.emails; patch.email = f.emails[0]; }
+    if (f.website)             patch.website = f.website;
+    if (f.address)             patch.address = f.address;
+    if (f.notes)               patch.notes   = f.notes;
+    if (Object.keys(patch).length) onDraftPatch?.(patch);
+
     if (f.website || f.address) setShowExtraFields(true);
     setLastVisionResult(result);
     onVisionResult?.(result);
@@ -879,26 +888,38 @@ export function BusinessCardCapture({
           <div className="px-5 py-4 space-y-4">
             <ConfidenceField label="Full Name" icon={({ className }: { className?: string }) => <span className={className}>👤</span>}
               value={editedName} confidence={fc?.fullName}
-              onChange={setEditedName} placeholder="e.g. Rahul Sharma" />
+              onChange={v => onDraftPatch?.({ clientName: v })} placeholder="e.g. Rahul Sharma" />
 
             <ConfidenceField label="Company" icon={({ className }: { className?: string }) => <span className={className}>🏢</span>}
               value={editedCompany} confidence={fc?.company}
-              onChange={setEditedCompany} placeholder="e.g. Acme Retail Pvt Ltd" />
+              onChange={v => onDraftPatch?.({ company: v })} placeholder="e.g. Acme Retail Pvt Ltd" />
 
             <ConfidenceField label="Designation" icon={({ className }: { className?: string }) => <span className={className}>💼</span>}
               value={editedDesig} confidence={fc?.designation}
-              onChange={setEditedDesig} placeholder="e.g. Purchase Manager" />
+              onChange={v => onDraftPatch?.({ designation: v })} placeholder="e.g. Purchase Manager" />
 
             <ChipInput label="Phone Numbers" icon={Phone}
               values={editedPhones} confidence={fc?.phoneNumbers}
-              onAdd={v => setEditedPhones(p => [...p, v])}
-              onRemove={i => setEditedPhones(p => p.filter((_, j) => j !== i))}
+              onAdd={v => {
+                const next = [...editedPhones, v];
+                onDraftPatch?.({ phoneNumbers: next, phone: next[0] });
+              }}
+              onRemove={i => {
+                const next = editedPhones.filter((_, j) => j !== i);
+                onDraftPatch?.({ phoneNumbers: next, phone: next[0] ?? undefined });
+              }}
               inputType="tel" placeholder="+91 98765 43210" />
 
             <ChipInput label="Email Addresses" icon={Mail}
               values={editedEmails} confidence={fc?.emails}
-              onAdd={v => setEditedEmails(p => [...p, v])}
-              onRemove={i => setEditedEmails(p => p.filter((_, j) => j !== i))}
+              onAdd={v => {
+                const next = [...editedEmails, v];
+                onDraftPatch?.({ emails: next, email: next[0] });
+              }}
+              onRemove={i => {
+                const next = editedEmails.filter((_, j) => j !== i);
+                onDraftPatch?.({ emails: next, email: next[0] ?? undefined });
+              }}
               inputType="email" placeholder="name@company.com" />
 
             {!showExtraFields ? (
@@ -912,15 +933,15 @@ export function BusinessCardCapture({
               <>
                 <ConfidenceField label="Website" icon={Globe}
                   value={editedWebsite} confidence={fc?.website}
-                  onChange={setEditedWebsite} placeholder="https://company.com" />
+                  onChange={v => onDraftPatch?.({ website: v })} placeholder="https://company.com" />
                 <ConfidenceField label="Address" icon={MapPin}
                   value={editedAddress} confidence={fc?.address}
-                  onChange={setEditedAddress} placeholder="City, State" />
+                  onChange={v => onDraftPatch?.({ address: v })} placeholder="City, State" />
                 <div className="flex flex-col gap-1.5">
                   <label className="text-[13px] font-medium text-stone-600">Notes</label>
                   <textarea
                     value={editedNotes}
-                    onChange={e => setEditedNotes(e.target.value)}
+                    onChange={e => onDraftPatch?.({ notes: e.target.value })}
                     placeholder="e.g. Interested in oud range, follow up next week…"
                     rows={3}
                     className="w-full rounded-xl border border-stone-200 px-4 py-3.5 text-base
