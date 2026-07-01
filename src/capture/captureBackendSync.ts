@@ -468,6 +468,8 @@ export async function promoteSessionToLead(
         designation:             draftData.designation?.trim()     || null,
         phones:                  phones.length   ? phones   : null,
         emails:                  emails.length   ? emails   : null,
+        address:                 draftData.address?.trim()         || null,
+        website:                 draftData.website?.trim()         || null,
         notes:                   draftData.notes?.trim()           || null,
         lead_temperature:        draftData.leadTemperature         || null,
         lead_type:               draftData.leadType                || 'NEW',

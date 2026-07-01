@@ -11,7 +11,7 @@ import { saveDraft, clearDraft } from './captureDraftStorage';
 export type FormField =
   | 'clientName' | 'company' | 'phone' | 'email' | 'designation'
   | 'notes' | 'leadTemperature' | 'leadType' | 'previousRepCode'
-  | 'priceRange' | 'voiceNoteTranscript';
+  | 'priceRange' | 'voiceNoteTranscript' | 'website' | 'address';
 
 // Relaxed validation: saveable if ANY meaningful data exists.
 function validate(data: DraftData): ManualEntryErrors {

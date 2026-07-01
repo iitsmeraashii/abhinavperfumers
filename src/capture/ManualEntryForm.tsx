@@ -5,6 +5,7 @@ import {
   Mic, Square, Camera, X, Image as ImageIcon,
   Flame, Thermometer, Snowflake,
   Plus, Minus, ArrowRight, Loader2,
+  Globe, MapPin,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import type { CaptureSession, DraftData, LeadTemperature, LeadType, ApplicationOption } from './types';
@@ -704,6 +705,8 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const notesImage      = d.notesImageDataUrl as string | undefined;
   const voiceDuration   = d.voiceNoteDurationMs as number | undefined;
   const voiceTranscript = d.voiceNoteTranscript as string | undefined;
+  const website         = String(d.website ?? '');
+  const address         = String(d.address  ?? '');
 
   const hasDraftData = !!(clientName || company || phone || notes || notesImage);
 
@@ -846,6 +849,39 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
                   autoComplete="organization-title"
                   value={designation}
                   onChange={e => handleChange('designation', e.target.value)}
+                  className={`${inputCls()} pl-10`}
+                />
+              </div>
+            </div>
+
+            {/* Website */}
+            <div>
+              <FieldLabel label="Website" optional />
+              <div className="relative">
+                <Globe className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
+                <input
+                  type="url"
+                  inputMode="url"
+                  placeholder="https://company.com"
+                  autoComplete="url"
+                  value={website}
+                  onChange={e => handleChange('website', e.target.value)}
+                  className={`${inputCls()} pl-10`}
+                />
+              </div>
+            </div>
+
+            {/* Address */}
+            <div>
+              <FieldLabel label="Address" optional />
+              <div className="relative">
+                <MapPin className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
+                <input
+                  type="text"
+                  placeholder="e.g. Mumbai, Maharashtra"
+                  autoComplete="street-address"
+                  value={address}
+                  onChange={e => handleChange('address', e.target.value)}
                   className={`${inputCls()} pl-10`}
                 />
               </div>

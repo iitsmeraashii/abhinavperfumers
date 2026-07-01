@@ -1,0 +1,1 @@
+ALTER TABLE lead_entries ADD COLUMN IF NOT EXISTS website text;
