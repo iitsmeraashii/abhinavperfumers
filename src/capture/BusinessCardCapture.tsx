@@ -504,8 +504,7 @@ function ChipInput({ label, icon: Icon, values, confidence, onAdd, onRemove, inp
 
   function commit() {
     const v = inputVal.trim();
-    if (v && !values.includes(v)) { onAdd(v); setInputVal(''); }
-    else setInputVal('');
+    if (v) { onAdd(v); setInputVal(''); }
   }
 
   const borderCls =
@@ -901,7 +900,7 @@ export function BusinessCardCapture({
             <ChipInput label="Phone Numbers" icon={Phone}
               values={editedPhones} confidence={fc?.phoneNumbers}
               onAdd={v => {
-                const next = [...editedPhones, v];
+                const next = [v, ...editedPhones.filter(p => p !== v)];
                 onDraftPatch?.({ phoneNumbers: next, phone: next[0] });
               }}
               onRemove={i => {
@@ -913,7 +912,7 @@ export function BusinessCardCapture({
             <ChipInput label="Email Addresses" icon={Mail}
               values={editedEmails} confidence={fc?.emails}
               onAdd={v => {
-                const next = [...editedEmails, v];
+                const next = [v, ...editedEmails.filter(e => e !== v)];
                 onDraftPatch?.({ emails: next, email: next[0] });
               }}
               onRemove={i => {
