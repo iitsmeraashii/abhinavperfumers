@@ -11,6 +11,7 @@
 // frontend before any network call, which makes every upsert safe to replay.
 
 import { supabase } from '../supabaseClient';
+import { deriveState } from './deriveState';
 import type {
   BackendSyncState,
   BusinessCardAsset,
@@ -470,6 +471,7 @@ export async function promoteSessionToLead(
         emails:                  emails.length   ? emails   : null,
         address:                 draftData.address?.trim()         || null,
         website:                 draftData.website?.trim()         || null,
+        state:                   deriveState(draftData.address?.trim() ?? ''),
         notes:                   draftData.notes?.trim()           || null,
         lead_temperature:        draftData.leadTemperature         || null,
         lead_type:               draftData.leadType                || 'NEW',
