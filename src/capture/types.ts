@@ -127,6 +127,8 @@ export interface ManualEntryFields {
   email:        string;
   designation:  string;
   notes:        string;
+  website:      string;
+  address:      string;
 }
 
 export interface ManualEntryErrors {

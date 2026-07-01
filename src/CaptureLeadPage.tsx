@@ -411,6 +411,8 @@ export default function CaptureLeadPage() {
       email:       String(f.email       ?? '').trim() || undefined,
       designation: String(f.designation ?? '').trim() || undefined,
       notes:       String(f.notes       ?? '').trim() || undefined,
+      website:     String(f.website     ?? '').trim() || undefined,
+      address:     String(f.address     ?? '').trim() || undefined,
       rawQr:       parsed.raw,
     };
     const draft = Object.fromEntries(

@@ -166,16 +166,25 @@ function parseVCard(text: string): Partial<ManualEntryFields> | null {
   const email = get(/^EMAIL[^:]*:(.+)$/im);
   const title = get(/^TITLE[^:]*:(.+)$/im);
   const note  = get(/^NOTE[^:]*:(.+)$/im);
+  const url   = get(/^URL[^:]*:(.+)$/im);
+
+  // ADR format: ;;street;city;region;postalCode;country — join non-empty parts
+  const adrRaw = get(/^ADR[^:]*:(.+)$/im);
+  const address = adrRaw
+    ? adrRaw.split(';').map(s => s.trim()).filter(Boolean).join(', ')
+    : '';
 
   if (!name && !org && !tel && !email) return null;
 
   return {
-    clientName:  name  || undefined,
-    company:     org   || undefined,
-    phone:       tel   || undefined,
-    email:       email || undefined,
-    designation: title || undefined,
-    notes:       note  || undefined,
+    clientName:  name    || undefined,
+    company:     org     || undefined,
+    phone:       tel     || undefined,
+    email:       email   || undefined,
+    designation: title   || undefined,
+    notes:       note    || undefined,
+    website:     url     || undefined,
+    address:     address || undefined,
   };
 }
 
@@ -200,6 +209,8 @@ function parseMeCard(text: string): Partial<ManualEntryFields> | null {
   const tel   = get('TEL');
   const email = get('EMAIL');
   const note  = get('NOTE');
+  const url   = get('URL');
+  const adr   = get('ADR');
 
   if (!name && !org && !tel && !email) return null;
 
@@ -209,6 +220,8 @@ function parseMeCard(text: string): Partial<ManualEntryFields> | null {
     phone:       tel   || undefined,
     email:       email || undefined,
     notes:       note  || undefined,
+    website:     url   || undefined,
+    address:     adr   || undefined,
   };
 }
 
@@ -216,7 +229,7 @@ function parseMeCard(text: string): Partial<ManualEntryFields> | null {
 
 function parseUrl(text: string): Partial<ManualEntryFields> | null {
   if (!/^https?:\/\//i.test(text.trim())) return null;
-  return { notes: text.trim() };
+  return { website: text.trim() };
 }
 
 // ─── Plain-text heuristics (original simple path) ─────────────────────────────
@@ -238,8 +251,8 @@ function parsePlainText(text: string): Partial<ManualEntryFields> | null {
       fields.email = line;
       continue;
     }
-    if (/^https?:\/\//i.test(line)) {
-      fields.notes = (fields.notes ? fields.notes + '\n' : '') + line;
+    if (!fields.website && /^https?:\/\//i.test(line)) {
+      fields.website = line;
       continue;
     }
   }
@@ -299,6 +312,14 @@ export function parseExhibitionText(text: string): HeuristicResult | null {
     if (!fields.email && RE_EMAIL.test(line)) {
       fields.email = line;
       inferredFields.push('email');
+      consumed.add(i);
+      continue;
+    }
+
+    // Website
+    if (!fields.website && /^https?:\/\//i.test(line)) {
+      fields.website = line;
+      inferredFields.push('website');
       consumed.add(i);
       continue;
     }
