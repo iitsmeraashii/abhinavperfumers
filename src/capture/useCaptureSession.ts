@@ -2,18 +2,21 @@ import { useState, useCallback, useRef } from 'react';
 import type {
   BackendSyncState,
   CaptureMethod,
+  CaptureProfile,
   CaptureSession,
   DraftData,
   SessionStatus,
   SyncStatus,
 } from './types';
 import { INITIAL_SYNC_STATE } from './types';
+import { DEFAULT_CAPTURE_PROFILE } from './captureProfile';
 
 // ─── Idle session ─────────────────────────────────────────────────────────────
 
 const IDLE_SESSION: CaptureSession = {
   captureMethod:     null,
   sessionStatus:     'IDLE',
+  captureProfile:    DEFAULT_CAPTURE_PROFILE,
   createdAt:         null,
   updatedAt:         null,
   draftData:         {},
@@ -32,6 +35,8 @@ export interface CaptureSessionActions {
   setStatus:             (status: SessionStatus) => void;
   patchDraft:            (patch: Partial<DraftData>) => void;
   resetSession:          () => void;
+  /** Switch the active Capture Profile. Has no effect on the current session state. */
+  setCaptureProfile:     (profile: CaptureProfile) => void;
   // Sync state management — called by CaptureLeadPage after backend ops complete
   patchSync:             (patch: Partial<BackendSyncState>) => void;
   setSyncStatus:         (status: SyncStatus, error?: string) => void;
@@ -63,9 +68,10 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
   const startCapture = useCallback((method: CaptureMethod): string => {
     const now = new Date();
     const backendSessionId = genStableId();
-    setSession({
+    setSession(prev => ({
       captureMethod:     method,
       sessionStatus:     'CAPTURING',
+      captureProfile:    prev.captureProfile,
       createdAt:         now,
       updatedAt:         now,
       draftData:         {},
@@ -75,7 +81,7 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
         backendSessionId,
         status: 'syncing',
       },
-    });
+    }));
     return backendSessionId;
   }, []);
 
@@ -86,6 +92,7 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
       return {
         captureMethod:     method,
         sessionStatus:     'CAPTURING',
+        captureProfile:    prev.captureProfile,
         createdAt:         prev.createdAt ?? now,
         updatedAt:         now,
         draftData:         draft,
@@ -162,6 +169,10 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
     }));
   }, []);
 
+  const setCaptureProfile = useCallback((profile: CaptureProfile) => {
+    setSession(prev => ({ ...prev, captureProfile: profile }));
+  }, []);
+
   const actions: CaptureSessionActions = {
     startCapture,
     startCaptureWithDraft,
@@ -169,6 +180,7 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
     setStatus,
     patchDraft,
     resetSession,
+    setCaptureProfile,
     patchSync,
     setSyncStatus,
     incrementPendingOps,

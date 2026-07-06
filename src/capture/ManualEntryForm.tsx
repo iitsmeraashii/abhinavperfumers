@@ -117,33 +117,83 @@ function VoiceNoteRecorder({
   durationMs,
   transcript,
   onUpdate,
+  onBlobReady,
 }: {
   durationMs?: number;
   transcript?: string;
   onUpdate: (patch: Partial<DraftData>) => void;
+  onBlobReady?: (blob: Blob, durationMs: number, mimeType: string) => void;
 }) {
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed]     = useState(durationMs ?? 0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef   = useRef<Blob[]>([]);
+  const streamRef   = useRef<MediaStream | null>(null);
+  const elapsedRef  = useRef(0);
 
-  function handleStart() {
-    setRecording(true);
-    setElapsed(0);
-    timerRef.current = setInterval(() => {
-      setElapsed(prev => prev + 1000);
-    }, 1000);
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      recorderRef.current?.stop();
+      streamRef.current?.getTracks().forEach(t => t.stop());
+    };
+  }, []);
+
+  async function handleStart() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      chunksRef.current = [];
+      elapsedRef.current = 0;
+
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')
+          ? 'audio/ogg;codecs=opus'
+          : 'audio/mp4';
+
+      const recorder = new MediaRecorder(stream, { mimeType });
+      recorderRef.current = recorder;
+
+      recorder.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: mimeType });
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+        const ms = elapsedRef.current;
+        onUpdate({ voiceNoteDurationMs: ms, voiceNoteTranscript: '' });
+        onBlobReady?.(blob, ms, mimeType);
+      };
+
+      recorder.start();
+      setRecording(true);
+      setElapsed(0);
+      timerRef.current = setInterval(() => {
+        elapsedRef.current += 1000;
+        setElapsed(prev => prev + 1000);
+      }, 1000);
+    } catch {
+      // microphone permission denied or unavailable — silently ignore
+    }
   }
 
   function handleStop() {
-    setRecording(false);
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    onUpdate({ voiceNoteDurationMs: elapsed, voiceNoteTranscript: transcript ?? '' });
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    setRecording(false);
   }
 
   function handleClear() {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
     setRecording(false);
     setElapsed(0);
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    elapsedRef.current = 0;
     onUpdate({ voiceNoteDurationMs: undefined, voiceNoteTranscript: undefined });
   }
 
@@ -673,9 +723,10 @@ interface Props {
   onBack:        () => void;
   onDiscard:     () => Promise<void>;
   onSaveAndNext?: () => Promise<{ error?: string } | void>;
+  onVoiceNoteRecorded?: (blob: Blob, durationMs: number, mimeType: string) => void;
 }
 
-export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext }: Props) {
+export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onVoiceNoteRecorded }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
@@ -918,6 +969,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
               durationMs={voiceDuration}
               transcript={voiceTranscript}
               onUpdate={handlePatchDraft}
+              onBlobReady={onVoiceNoteRecorded}
             />
 
             {/* Notes image */}

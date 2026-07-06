@@ -16,11 +16,8 @@ import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
 import {
   syncUpsertSession,
   syncUpsertAsset,
-  syncUpsertOcrExtraction,
-  syncUpsertQrExtraction,
   syncUpdateSessionFields,
   syncAbandonSession,
-  promoteSessionToLead,
 } from './capture/captureBackendSync';
 import {
   enqueueOp,
@@ -28,6 +25,16 @@ import {
   getPendingCount,
 } from './capture/captureOfflineQueue';
 import { saveCompletedLead, buildCompletedLead } from './capture/completedLeadsStorage';
+import {
+  registerCardEvidence,
+  registerVoiceNoteEvidence,
+  notifySessionReset,
+  handleVisionExtraction,
+  handleOcrExtraction,
+  handleQrExtraction,
+  processCaptureSession,
+} from './capture/captureProcessingEngine';
+import type { ExtractionSyncCallbacks, ProcessingContext } from './capture/captureProcessingEngine';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
@@ -35,16 +42,6 @@ import type { ParsedContact } from './capture/parseQrPayload';
 const QrScannerView = lazy(() =>
   import('./capture/QrScannerView').then(m => ({ default: m.QrScannerView })),
 );
-
-// ─── Stable ID generator ──────────────────────────────────────────────────────
-
-function genStableId(): string {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
-  });
-}
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
@@ -87,6 +84,14 @@ export default function CaptureLeadPage() {
   }>({ status: 'idle', progress: 0, progressLabel: '', error: null });
   const [ocrDiagnostics, setOcrDiagnostics] = useState<OcrPipelineDiagnostics | null>(null);
 
+  // Stable reference so BusinessCardCapture's useEffect dep on this prop doesn't cycle.
+  const handleOcrStateChange = useCallback(
+    (s: { status: string; progress: number; progressLabel: string; error: string | null }) => {
+      setOcrDebug(s as typeof ocrDebug);
+    },
+    [],
+  );
+
   // Stable refs
   const addEntryRef = useRef(addEntry);
   addEntryRef.current = addEntry;
@@ -118,6 +123,30 @@ export default function CaptureLeadPage() {
     },
   }), [actions]);
 
+  // Extraction sync callbacks — passed to engine extraction event handlers so the
+  // engine can drive React state updates without importing React.
+  const makeExtractionSyncCbs = useCallback((): ExtractionSyncCallbacks => ({
+    onBeforeOnlineSync: () => actions.incrementPendingOps(),
+    onSyncing:          () => actions.setSyncStatus('syncing'),
+    onSynced:           (patch: Partial<BackendSyncState>) => {
+      actions.patchSync({ ...patch, status: 'synced' });
+      actions.decrementPendingOps();
+    },
+    onSyncError:        (err: string) => {
+      actions.setSyncStatus('error', err);
+      actions.decrementPendingOps();
+      addEntryRef.current('Backend sync error', err, 'warn');
+    },
+    onOffline:          () => {
+      actions.setSyncStatus('offline');
+      actions.decrementPendingOps();
+    },
+    onOfflineQueued:    () => {
+      actions.setSyncStatus('offline');
+      setPendingSyncCount(n => n + 1);
+    },
+  }), [actions]);
+
   // Upsert session — online: immediate; offline: queue
   const syncSessionOp = useCallback(async (
     payload: Parameters<typeof syncUpsertSession>[0],
@@ -146,34 +175,6 @@ export default function CaptureLeadPage() {
       actions.setSyncStatus('offline');
       setPendingSyncCount(n => n + 1);
       addEntryRef.current('Asset queued for offline sync', { assetId: payload.asset.id });
-    }
-  }, [isOnline, actions, makeSyncCbs]);
-
-  // Upsert OCR extraction — online: immediate; offline: queue
-  const syncOcrOp = useCallback(async (
-    payload: Parameters<typeof syncUpsertOcrExtraction>[0],
-  ) => {
-    if (isOnline) {
-      actions.incrementPendingOps();
-      syncUpsertOcrExtraction(payload, makeSyncCbs()).catch(() => {});
-    } else {
-      await enqueueOp('upsert_ocr_extraction', payload.backendSessionId, payload);
-      actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
-    }
-  }, [isOnline, actions, makeSyncCbs]);
-
-  // Upsert QR extraction — online: immediate; offline: queue
-  const syncQrOp = useCallback(async (
-    payload: Parameters<typeof syncUpsertQrExtraction>[0],
-  ) => {
-    if (isOnline) {
-      actions.incrementPendingOps();
-      syncUpsertQrExtraction(payload, makeSyncCbs()).catch(() => {});
-    } else {
-      await enqueueOp('upsert_qr_extraction', payload.backendSessionId, payload);
-      actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
     }
   }, [isOnline, actions, makeSyncCbs]);
 
@@ -350,53 +351,62 @@ export default function CaptureLeadPage() {
     const bsid = s.sync.backendSessionId;
 
     if (s.sessionStatus === 'IDLE' || !bsid) {
-      // Nothing to save — just reset
       form.handleReset();
       actions.resetSession();
       return;
     }
 
-    // 1. Promote to lead_entries (the authoritative record in Supabase)
     addEntryRef.current('Save & Next — promoting session to lead_entry', { bsid });
-    const { leadId, error } = await promoteSessionToLead(
-      bsid,
-      s.draftData,
-      selectedEvent?.event_code ?? null,
-    );
 
-    if (error || !leadId) {
-      // Don't reset — let the user retry or save as draft
-      const isRls = error?.includes('row-level security') || error?.includes('policy') || error?.includes('permission');
-      const msg = isRls
+    const ctx: ProcessingContext = {
+      session:          s,
+      backendSessionId: bsid,
+      eventCode:        selectedEvent?.event_code ?? null,
+      completedLeadId:  bsid,
+      eventId:          selectedEvent?.id ?? null,
+      eventName:        selectedEvent?.name ?? null,
+      isOnline,
+    };
+
+    const result = await processCaptureSession(ctx);
+
+    if (result.outcome === 'failed') {
+      const err = result.error ?? '';
+      const isPermError = err.includes('row-level security')
+        || err.includes('policy')
+        || err.includes('permission');
+      const msg = isPermError
         ? 'Permission error: INSERT policy missing on lead_entries. Ask your admin to apply the database policy.'
-        : `Failed to save lead: ${error ?? 'unknown error'}`;
+        : `Failed to save lead: ${err}`;
       setPromotionToast({ message: msg, isError: true });
       setTimeout(() => setPromotionToast(null), 8000);
-      addEntryRef.current('Save & Next — promotion failed', error ?? 'unknown');
-      return { error: error ?? 'Promotion failed' };
+      addEntryRef.current('Save & Next — promotion failed (non-retryable)', err);
+      return { error: err };
     }
 
-    // 2. Save locally so the Queue page reflects the new lead immediately
-    const lead = buildCompletedLead(
-      bsid, s.captureMethod, s.draftData, bsid,
-      selectedEvent?.id ?? null, selectedEvent?.name ?? null,
-    );
-    lead.status   = 'synced';
-    lead.syncedAt = new Date().toISOString();
-    await saveCompletedLead(lead);
+    if (result.outcome === 'queued') {
+      if (!isOnline) actions.setSyncStatus('offline');
+      setPendingSyncCount(n => n + 1);
+      const msg = isOnline
+        ? 'Lead saved — will sync when reconnected'
+        : 'Lead saved — will sync when back online';
+      addEntryRef.current('Save & Next — promotion queued', { bsid, online: isOnline });
+      setPromotionToast({ message: msg, isError: false });
+      setTimeout(() => setPromotionToast(null), 4000);
+    } else {
+      addEntryRef.current('Save & Next — lead promoted', { leadId: result.leadId });
+      setPromotionToast({ message: 'Lead saved to your list!', isError: false });
+      setTimeout(() => setPromotionToast(null), 3000);
+    }
 
-    addEntryRef.current('Save & Next — lead promoted', { leadId });
-    setPromotionToast({ message: 'Lead saved to your list!', isError: false });
-    setTimeout(() => setPromotionToast(null), 3000);
-
-    // 3. Reset for the next capture
     form.handleReset();
     actions.resetSession();
     setQrScanning(false);
     setCardSessionId('');
     setCardAssets({ front: null, back: null });
     setLastOcrResult(null);
-  }, [actions, form, selectedEvent]);
+    notifySessionReset();
+  }, [actions, form, selectedEvent, isOnline]);
 
   // ── QR scan complete ──────────────────────────────────────────────────────
   const handleQrScanned = useCallback(async (parsed: ParsedContact) => {
@@ -428,13 +438,12 @@ export default function CaptureLeadPage() {
       const bsid = sessionRef.current.sync.backendSessionId;
       if (!bsid) return;
 
-      const extractionId = genStableId();
-
-      await syncQrOp({
-        extractionId,
-        backendSessionId: bsid,
+      await handleQrExtraction({
         parsed,
+        backendSessionId: bsid,
         durationMs: Date.now() - scanStart,
+        isOnline,
+        syncCbs: makeExtractionSyncCbs(),
       });
 
       await syncFieldsOp(bsid, draft);
@@ -447,9 +456,9 @@ export default function CaptureLeadPage() {
       lead.status = isOnline ? 'pending_sync' : 'local_only';
       await saveCompletedLead(lead);
 
-      addEntryRef.current('QR extraction queued/synced', { extractionId, bsid });
+      addEntryRef.current('QR extraction queued/synced', { bsid });
     }, 0);
-  }, [actions, form, syncQrOp, syncFieldsOp, selectedEvent, isOnline]);
+  }, [actions, form, handleQrExtraction, makeExtractionSyncCbs, syncFieldsOp, selectedEvent, isOnline]);
 
   // ── Business card assets changed ─────────────────────────────────────────
   const handleCardAssetsChanged = useCallback(async (
@@ -464,12 +473,27 @@ export default function CaptureLeadPage() {
     addEntryRef.current('Business card assets updated', { frontId: front?.id, backId: back?.id });
 
     const bsid = sessionRef.current.sync.backendSessionId;
-    const asset = front ?? back;
-    if (!bsid || !asset) return;
+    if (!bsid) return;
 
-    await syncAssetOp({ backendSessionId: bsid, asset });
-    addEntryRef.current('Asset queued/synced', { localAssetId: asset.id });
+    // Sync EVERY present asset so both front and back get their own capture_assets row.
+    // The upsert is idempotent (conflict on capture_session_id + local_asset_id), so
+    // re-syncing an asset that already has a row is harmless.
+    for (const asset of [front, back]) {
+      if (asset) await syncAssetOp({ backendSessionId: bsid, asset });
+    }
+    addEntryRef.current('Assets queued/synced', { frontId: front?.id, backId: back?.id });
+
+    // Register image bytes with the Processing Engine's Evidence Stage.
+    // The engine delegates to evidenceManager, which owns upload decisions.
+    registerCardEvidence(bsid, { front, back });
   }, [actions, syncAssetOp]);
+
+  // ── Voice note recorded ───────────────────────────────────────────────────
+  const handleVoiceNoteRecorded = useCallback((blob: Blob, durationMs: number, mimeType: string) => {
+    const bsid = sessionRef.current.sync.backendSessionId;
+    if (!bsid) return;
+    registerVoiceNoteEvidence(bsid, blob, durationMs, mimeType);
+  }, []);
 
   // ── OCR result received ───────────────────────────────────────────────────
   const handleOcrResult = useCallback(async (result: OcrResult) => {
@@ -487,16 +511,41 @@ export default function CaptureLeadPage() {
     const bsid = sessionRef.current.sync.backendSessionId;
     if (!bsid) return;
 
-    const backendAssetId   = sessionRef.current.sync.backendAssetIds[result.assetId] ?? null;
-    const extractionId     = genStableId();
+    const backendAssetId = sessionRef.current.sync.backendAssetIds[result.assetId] ?? null;
 
-    await syncOcrOp({
-      extractionId,
+    await handleOcrExtraction({
+      result,
       backendSessionId: bsid,
       backendAssetId,
-      ocrResult:        result,
+      isOnline,
+      syncCbs: makeExtractionSyncCbs(),
     });
-  }, [actions, syncOcrOp]);
+  }, [actions, isOnline, makeExtractionSyncCbs]);
+
+  // ── Vision extraction result received ─────────────────────────────────────
+  // Called for both openai_vision and tesseract_fallback.
+  // The engine guards: only openai_vision writes an extraction_results row.
+  // The fallback case is covered by handleOcrResult via the legacyOcr shim in applyVisionResult.
+  const handleVisionResult = useCallback(async (result: import('./capture/types').VisionResult) => {
+    addEntryRef.current('Vision extraction completed', {
+      source:      result.source,
+      confidence:  result.fields.confidence,
+      durationMs:  result.durationMs,
+    });
+
+    const bsid = sessionRef.current.sync.backendSessionId;
+    if (!bsid) return;
+
+    const backendAssetId = sessionRef.current.sync.backendAssetIds[result.assetId] ?? null;
+
+    await handleVisionExtraction({
+      result,
+      backendSessionId: bsid,
+      backendAssetId,
+      isOnline,
+      syncCbs: makeExtractionSyncCbs(),
+    });
+  }, [isOnline, makeExtractionSyncCbs]);
 
   // ── Card capture complete (Continue pressed) ──────────────────────────────
   const handleCardComplete = useCallback(async (
@@ -526,8 +575,9 @@ export default function CaptureLeadPage() {
         emails:           f.emails.length > 0 ? f.emails : undefined,
         website:          f.website     || undefined,
         address:          f.address     || undefined,
-        visionRawText:    f.rawText     || undefined,
-        extractionSource: visionResult.source,
+        visionRawText:        f.rawText     || undefined,
+        extractionSource:     visionResult.source,
+        extractionConfidence: f.confidence,
       };
     } else {
       const ocr = ocrResult ?? lastOcrResult;
@@ -642,6 +692,7 @@ export default function CaptureLeadPage() {
             onBack={handleBackToOptions}
             onDiscard={handleDiscardDraft}
             onSaveAndNext={handleSaveAndNext}
+            onVoiceNoteRecorded={handleVoiceNoteRecorded}
           />
         )}
 
@@ -654,8 +705,9 @@ export default function CaptureLeadPage() {
             onBack={handleBackToOptions}
             onAssetsChanged={handleCardAssetsChanged}
             onDraftPatch={actions.patchDraft}
+            onVisionResult={handleVisionResult}
             onOcrResult={handleOcrResult}
-            onOcrStateChange={(s) => setOcrDebug(s as typeof ocrDebug)}
+            onOcrStateChange={handleOcrStateChange}
             onOcrDiagnostics={setOcrDiagnostics}
             onDebugLog={(step, detail, level) => addEntry(step, detail, level)}
           />

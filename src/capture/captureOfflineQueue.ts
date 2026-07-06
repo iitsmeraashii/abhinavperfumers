@@ -15,12 +15,16 @@ import {
   syncUpsertOcrExtraction,
   syncUpsertQrExtraction,
   syncUpdateSessionFields,
+  syncUpsertVisionExtraction,
+  syncPromoteSession,
 } from './captureBackendSync';
 import type {
   UpsertSessionPayload,
   UpsertAssetPayload,
   UpsertOcrExtractionPayload,
   UpsertQrExtractionPayload,
+  UpsertVisionExtractionPayload,
+  PromoteSessionPayload,
   SyncCallbacks,
 } from './captureBackendSync';
 import type { DraftData } from './types';
@@ -32,7 +36,9 @@ export type PendingOpType =
   | 'upsert_asset'
   | 'upsert_ocr_extraction'
   | 'upsert_qr_extraction'
-  | 'update_session_fields';
+  | 'upsert_vision_extraction'
+  | 'update_session_fields'
+  | 'promote_session';
 
 export interface PendingOp {
   id:           string;        // stable op ID (frontend-generated)
@@ -148,12 +154,18 @@ async function executeOp(op: PendingOp): Promise<void> {
     case 'upsert_qr_extraction':
       await syncUpsertQrExtraction(op.payload as UpsertQrExtractionPayload, cbs);
       break;
+    case 'upsert_vision_extraction':
+      await syncUpsertVisionExtraction(op.payload as UpsertVisionExtractionPayload, cbs);
+      break;
     case 'update_session_fields':
       await syncUpdateSessionFields(
         (op.payload as { sessionId: string; draftData: DraftData }).sessionId,
         (op.payload as { sessionId: string; draftData: DraftData }).draftData,
         cbs,
       );
+      break;
+    case 'promote_session':
+      await syncPromoteSession(op.payload as PromoteSessionPayload, cbs);
       break;
     default:
       // Unknown op type — drop silently

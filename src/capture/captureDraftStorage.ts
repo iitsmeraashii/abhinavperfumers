@@ -5,6 +5,7 @@
 import { dbGet, dbPut, dbDelete } from './db';
 import type { CaptureSession } from './types';
 import { INITIAL_SYNC_STATE } from './types';
+import { DEFAULT_CAPTURE_PROFILE } from './captureProfile';
 
 const STORE = 'drafts';
 const DRAFT_KEY = 'active_capture_draft';
@@ -15,6 +16,7 @@ export interface PersistedDraft {
   id:                   string;
   captureMethod:        CaptureSession['captureMethod'];
   sessionStatus:        CaptureSession['sessionStatus'];
+  captureProfile:       CaptureSession['captureProfile'];
   draftData:            CaptureSession['draftData'];
   hasUnsavedChanges:    boolean;
   createdAt:            string | null;
@@ -31,6 +33,7 @@ function toRecord(session: CaptureSession): PersistedDraft {
     id:                   DRAFT_KEY,
     captureMethod:        session.captureMethod,
     sessionStatus:        session.sessionStatus,
+    captureProfile:       session.captureProfile,
     draftData:            session.draftData,
     hasUnsavedChanges:    session.hasUnsavedChanges,
     createdAt:            session.createdAt?.toISOString() ?? null,
@@ -46,6 +49,8 @@ function fromRecord(record: PersistedDraft): CaptureSession {
   return {
     captureMethod:     record.captureMethod,
     sessionStatus:     record.sessionStatus,
+    // Fall back to default for drafts saved before captureProfile was introduced
+    captureProfile:    record.captureProfile ?? DEFAULT_CAPTURE_PROFILE,
     draftData:         record.draftData ?? {},
     hasUnsavedChanges: record.hasUnsavedChanges ?? false,
     createdAt:         record.createdAt ? new Date(record.createdAt) : null,

@@ -1,5 +1,7 @@
 // ─── Capture method / status ──────────────────────────────────────────────────
 
+export type { CaptureProfile } from './captureProfile';
+
 export type CaptureMethod = 'BUSINESS_CARD' | 'QR' | 'MANUAL';
 
 export type SessionStatus = 'IDLE' | 'CAPTURING' | 'DRAFT' | 'READY_FOR_REVIEW';
@@ -113,10 +115,12 @@ export interface DraftData {
   cardFrontAssetId?:  string;
   cardBackAssetId?:   string;
   // Extraction metadata
-  ocrRawText?:        string;
-  visionRawText?:     string;
-  extractionSource?:  string;
-  rawQr?:             string;
+  ocrRawText?:          string;
+  visionRawText?:       string;
+  extractionSource?:    string;
+  /** Overall AI extraction confidence (0–1 float). Set from VisionResult.fields.confidence. */
+  extractionConfidence?: number;
+  rawQr?:               string;
   [key: string]: unknown;
 }
 
@@ -170,6 +174,7 @@ export const INITIAL_SYNC_STATE: BackendSyncState = {
 export interface CaptureSession {
   captureMethod:    CaptureMethod | null;
   sessionStatus:    SessionStatus;
+  captureProfile:   CaptureProfile;
   createdAt:        Date | null;
   updatedAt:        Date | null;
   draftData:        DraftData;
@@ -213,14 +218,17 @@ export interface DbCaptureAsset {
   side?:            string | null;
   local_asset_id:   string;
   storage_path?:    string | null;
+  storage_provider?: string | null;
+  storage_bucket?:   string | null;
+  storage_upload_status?: string | null;
+  storage_uploaded_at?:   string | null;
   original_width:   number;
   original_height:  number;
   stored_width:     number;
   stored_height:    number;
   size_bytes:       number;
   mime_type:        string;
-  processing_state: string;
-  processing_error?: string | null;
+  processing_status: string;
   created_at:       string;
   updated_at:       string;
 }

@@ -11,13 +11,15 @@
 // frontend before any network call, which makes every upsert safe to replay.
 
 import { supabase } from '../supabaseClient';
-import { deriveState } from './deriveState';
+import { getAuthIdentity } from './captureAuth';
+import { executePromotion } from './capturePromotionService';
 import type {
   BackendSyncState,
   BusinessCardAsset,
   CaptureMethod,
   DraftData,
   OcrResult,
+  VisionResult,
 } from './types';
 import type { ParsedContact } from './parseQrPayload';
 
@@ -36,28 +38,6 @@ export interface SyncCallbacks {
 
 function online(): boolean {
   return typeof navigator !== 'undefined' ? navigator.onLine : true;
-}
-
-interface AuthIdentity {
-  userId:  string;
-  repCode: string | null;
-}
-
-// Returns the authenticated user's ID and their rep_code from the rep profile.
-// rep_code may be null if the profile row hasn't loaded yet — that's fine,
-// the column is nullable in capture_sessions.
-async function getAuthIdentity(): Promise<AuthIdentity | null> {
-  const { data } = await supabase.auth.getUser();
-  const userId = data.user?.id;
-  if (!userId) return null;
-
-  // Read rep_code from the RLS-filtered view — this is a cheap indexed lookup
-  const { data: profile } = await supabase
-    .from('my_rep_profile')
-    .select('rep_code')
-    .maybeSingle();
-
-  return { userId, repCode: profile?.rep_code ?? null };
 }
 
 // ─── Session upsert ───────────────────────────────────────────────────────────
@@ -169,16 +149,12 @@ export async function syncUpsertAsset(
 
     const { backendSessionId, asset } = payload;
 
-    // Derive a stable backend asset ID from the local asset ID so upserts
-    // are idempotent — same local asset always maps to the same DB row.
-    // We store this mapping in BackendSyncState.backendAssetIds.
-    const backendAssetId = asset.id; // reuse local ID as PK if it's a UUID,
-    // otherwise the DB generates one and we learn it from the response
-
+    // local_asset_id is the stable frontend identifier ("asset_<ts>_<rand>").
+    // The DB generates the UUID primary key; (capture_session_id, local_asset_id)
+    // is the unique conflict key that makes each upsert idempotent.
     const { data, error } = await supabase
       .from('capture_assets')
       .upsert({
-        id:                 backendAssetId,
         capture_session_id: backendSessionId,
         user_id:            userId,
         asset_type:         'business_card',
@@ -194,15 +170,14 @@ export async function syncUpsertAsset(
         stored_height:      asset.storedHeight,
         width:              asset.storedWidth,   // legacy column
         height:             asset.storedHeight,  // legacy column
-        processing_state:   'done',
-        processing_status:  'done',  // legacy column
-      }, { onConflict: 'id' })
+        processing_status:  'done',
+      }, { onConflict: 'capture_session_id,local_asset_id' })
       .select('id')
       .maybeSingle();
 
     if (error) throw error;
 
-    const confirmedId = data?.id ?? backendAssetId;
+    const confirmedId = data?.id ?? asset.id;
 
     cbs.onSynced({
       backendAssetIds:  { [asset.id]: confirmedId },
@@ -408,12 +383,165 @@ export async function syncUpdateSessionFields(
   }
 }
 
-// ─── Promote capture session → lead_entries ──────────────────────────────────
-// Called when the user presses "Save & Next Lead".
-// Maps draftData into a lead_entries row, inserts it, and marks the
-// capture_session as promoted so it doesn't appear as a pending draft again.
-// Returns { leadId, error } — never throws.
+// ─── Extraction result upsert — OpenAI Vision ────────────────────────────────
 
+export interface UpsertVisionExtractionPayload {
+  extractionId:     string;   // stable frontend-generated ID
+  backendSessionId: string;
+  backendAssetId:   string | null;
+  visionResult:     VisionResult;
+}
+
+export async function syncUpsertVisionExtraction(
+  payload: UpsertVisionExtractionPayload,
+  cbs: SyncCallbacks,
+): Promise<void> {
+  if (!online()) { cbs.onOffline(); return; }
+
+  cbs.onSyncing();
+
+  try {
+    const identity = await getAuthIdentity();
+    if (!identity) { cbs.onSyncError('Not authenticated'); return; }
+    const { userId } = identity;
+
+    const { extractionId, backendSessionId, backendAssetId, visionResult } = payload;
+    const f = visionResult.fields;
+
+    const confidenceText: 'high' | 'medium' | 'low' =
+      f.confidence >= 0.75 ? 'high' :
+      f.confidence >= 0.45 ? 'medium' : 'low';
+
+    const { error } = await supabase
+      .from('extraction_results')
+      .upsert({
+        id:                 extractionId,
+        capture_session_id: backendSessionId,
+        asset_id:           backendAssetId,
+        user_id:            userId,
+        engine:             'openai_vision',
+        extraction_engine:  'openai_vision',  // legacy column
+        extraction_type:    'vision',          // legacy column
+        raw_text:           f.rawText,
+        // Full structured output including multi-value arrays
+        extracted_json: {
+          fullName:     f.fullName,
+          firstName:    f.firstName,
+          lastName:     f.lastName,
+          company:      f.company,
+          designation:  f.designation,
+          emails:       f.emails,
+          phoneNumbers: f.phoneNumbers,
+          website:      f.website,
+          address:      f.address,
+          notes:        f.notes,
+        },
+        extracted_data: {  // legacy column — flat shape matching lead_entries
+          clientName:  f.fullName       || null,
+          company:     f.company        || null,
+          designation: f.designation    || null,
+          phone:       f.phoneNumbers[0] ?? null,
+          email:       f.emails[0]       ?? null,
+        },
+        confidence:         confidenceText,
+        overall_confidence: f.confidence,
+        duration_ms:        visionResult.durationMs,
+        processing_time_ms: visionResult.durationMs,  // legacy column
+        status:             'done',
+        success:            true,  // legacy column
+        metadata: {
+          source:          visionResult.source,
+          attempt:         visionResult.attempt,
+          fieldConfidence: visionResult.fieldConfidence,
+          completedAt:     visionResult.completedAt,
+        },
+      }, { onConflict: 'id' });
+
+    if (error) throw error;
+
+    cbs.onSynced({
+      backendExtractionIds: { [extractionId]: extractionId },
+      lastSyncedAt:         new Date().toISOString(),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('[captureBackendSync] syncUpsertVisionExtraction failed:', msg);
+    cbs.onSyncError(msg);
+  }
+}
+
+// ─── Session extraction metadata update ──────────────────────────────────────
+// Called after a successful Vision (openai_vision) extraction to persist the
+// engine, confidence score, and status onto the capture_sessions row.
+
+export interface UpdateSessionExtractionMetaPayload {
+  backendSessionId: string;
+  source:           string;   // e.g. 'openai_vision'
+  confidence:       number;   // 0–1 float
+  durationMs:       number;
+}
+
+export async function syncUpdateSessionExtractionMeta(
+  payload: UpdateSessionExtractionMetaPayload,
+  cbs: SyncCallbacks,
+): Promise<void> {
+  if (!online()) { cbs.onOffline(); return; }
+
+  cbs.onSyncing();
+
+  try {
+    const identity = await getAuthIdentity();
+    if (!identity) { cbs.onSyncError('Not authenticated'); return; }
+    const { userId } = identity;
+
+    const { backendSessionId, source, confidence, durationMs } = payload;
+
+    const { error } = await supabase
+      .from('capture_sessions')
+      .update({
+        extraction_source:      source,
+        extraction_status:      'done',
+        extraction_confidence:  confidence,
+        extraction_duration_ms: durationMs,
+      })
+      .eq('id', backendSessionId)
+      .eq('user_id', userId);
+
+    if (error) throw error;
+
+    cbs.onSynced({ lastSyncedAt: new Date().toISOString() });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('[captureBackendSync] syncUpdateSessionExtractionMeta failed:', msg);
+    cbs.onSyncError(msg);
+  }
+}
+
+// ─── Promote capture session → lead_entries ──────────────────────────────────
+// Re-exports the canonical options type from capturePromotionService so callers
+// only need one import. Both the online path and the queue replay use
+// executePromotion from that module — this wrapper adapts it to SyncCallbacks.
+
+export type { PromoteSessionOptions as PromoteSessionPayload } from './capturePromotionService';
+
+export async function syncPromoteSession(
+  payload: import('./capturePromotionService').PromoteSessionOptions,
+  cbs: SyncCallbacks,
+): Promise<void> {
+  if (!online()) { cbs.onOffline(); return; }
+
+  cbs.onSyncing();
+
+  const result = await executePromotion(payload);
+
+  if (result.error) {
+    cbs.onSyncError(result.error);
+  } else {
+    cbs.onSynced({ lastSyncedAt: new Date().toISOString() });
+  }
+}
+
+// Deprecated shim — kept for backward compatibility; prefer executePromotion directly.
 export interface PromoteResult {
   leadId: string | null;
   error:  string | null;
@@ -424,93 +552,16 @@ export async function promoteSessionToLead(
   draftData:        DraftData,
   eventCode:        string | null,
 ): Promise<PromoteResult> {
-  try {
-    const identity = await getAuthIdentity();
-    if (!identity?.repCode) {
-      return { leadId: null, error: 'Not authenticated or rep profile unavailable' };
-    }
-    const { userId, repCode } = identity;
-
-    // Build phones — primary field first, then extras from vision extraction
-    const phones: string[] = [];
-    if (draftData.phone?.trim()) phones.push(draftData.phone.trim());
-    if (Array.isArray(draftData.phoneNumbers)) {
-      for (const p of draftData.phoneNumbers as string[]) {
-        const t = String(p ?? '').trim();
-        if (t && !phones.includes(t)) phones.push(t);
-      }
-    }
-
-    // Build emails — same pattern
-    const emails: string[] = [];
-    if (draftData.email?.trim()) emails.push(draftData.email.trim());
-    if (Array.isArray(draftData.emails)) {
-      for (const e of draftData.emails as string[]) {
-        const t = String(e ?? '').trim();
-        if (t && !emails.includes(t)) emails.push(t);
-      }
-    }
-
-    const leadId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-          const r = (Math.random() * 16) | 0;
-          return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
-        });
-
-    const now = new Date().toISOString();
-
-    const { error: insertError } = await supabase
-      .from('lead_entries')
-      .insert({
-        id:                      leadId,
-        client_name:             draftData.clientName?.trim()      || null,
-        company:                 draftData.company?.trim()         || null,
-        designation:             draftData.designation?.trim()     || null,
-        phones:                  phones.length   ? phones   : null,
-        emails:                  emails.length   ? emails   : null,
-        address:                 draftData.address?.trim()         || null,
-        website:                 draftData.website?.trim()         || null,
-        state:                   deriveState(draftData.address?.trim() ?? ''),
-        notes:                   draftData.notes?.trim()           || null,
-        lead_temperature:        draftData.leadTemperature         || null,
-        lead_type:               draftData.leadType                || 'NEW',
-        previous_associated_rep: draftData.previousRepCode?.trim() || null,
-        // application is text[] in capture_sessions but text in lead_entries — join
-        application:             Array.isArray(draftData.application) && (draftData.application as string[]).length
-                                   ? (draftData.application as string[]).join(', ')
-                                   : null,
-        price_range:             draftData.priceRange?.trim()      || null,
-        quick_keywords:          Array.isArray(draftData.quickKeywords)  && (draftData.quickKeywords  as string[]).length ? draftData.quickKeywords  as string[] : null,
-        target_market:           Array.isArray(draftData.targetMarket)   && (draftData.targetMarket   as string[]).length ? draftData.targetMarket   as string[] : null,
-        certification:           Array.isArray(draftData.certification)  && (draftData.certification  as string[]).length ? draftData.certification  as string[] : null,
-        benchmark:               Array.isArray(draftData.benchmark)      && (draftData.benchmark      as string[]).length ? draftData.benchmark      as string[] : null,
-        sales_rep_code:          repCode,
-        event_code:              eventCode || null,
-        lead_status:             'NEW',
-        system_status:           'CREATED',
-        created_at:              now,
-        updated_at:              now,
-      });
-
-    if (insertError) {
-      console.warn('[captureBackendSync] promoteSessionToLead insert failed:', insertError.message);
-      return { leadId: null, error: insertError.message };
-    }
-
-    // Mark the capture session as promoted so it won't be treated as a pending draft
-    await supabase
-      .from('capture_sessions')
-      .update({ promoted_lead_id: leadId, session_status: 'promoted' })
-      .eq('id', backendSessionId)
-      .eq('user_id', userId);
-
-    return { leadId, error: null };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn('[captureBackendSync] promoteSessionToLead failed:', msg);
-    return { leadId: null, error: msg };
-  }
+  const result = await executePromotion({
+    backendSessionId,
+    draftData,
+    eventCode,
+    completedLeadId: backendSessionId,
+    captureMethod:   null,
+    eventId:         null,
+    eventName:       null,
+  });
+  return { leadId: result.leadId, error: result.error };
 }
 
 // ─── Session abandon ──────────────────────────────────────────────────────────
