@@ -27,6 +27,7 @@ import type {
   PromoteSessionPayload,
   SyncCallbacks,
 } from './captureBackendSync';
+import { executeVoiceNoteUploadOp } from './voiceEvidenceManager';
 import type { DraftData } from './types';
 
 // ─── Op types ─────────────────────────────────────────────────────────────────
@@ -38,7 +39,8 @@ export type PendingOpType =
   | 'upsert_qr_extraction'
   | 'upsert_vision_extraction'
   | 'update_session_fields'
-  | 'promote_session';
+  | 'promote_session'
+  | 'upload_voice_note';
 
 export interface PendingOp {
   id:           string;        // stable op ID (frontend-generated)
@@ -166,6 +168,16 @@ async function executeOp(op: PendingOp): Promise<void> {
       break;
     case 'promote_session':
       await syncPromoteSession(op.payload as PromoteSessionPayload, cbs);
+      break;
+    case 'upload_voice_note':
+      // Upload audio blob then chain transcription inline.
+      // Both steps are idempotent, so retrying the whole op on partial failure is safe.
+      await executeVoiceNoteUploadOp(op.payload as {
+        sessionId:  string;
+        audioBlob:  Blob;
+        mimeType:   string;
+        durationMs: number;
+      });
       break;
     default:
       // Unknown op type — drop silently

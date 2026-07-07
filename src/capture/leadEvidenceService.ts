@@ -298,8 +298,16 @@ async function _buildCollection(
       : null;
 
     const transcript = sessionMeta?.voice_note_transcript ?? null;
+
+    // Map DB transcription_status to the domain TranscriptionStatus type.
+    const dbStatus = asset.transcription_status ?? null;
     const transcriptionStatus: TranscriptionStatus =
-      transcript ? 'done' : 'none';
+      dbStatus === 'ready'          ? 'done'
+      : dbStatus === 'transcribing' ? 'processing'
+      : dbStatus === 'failed'       ? 'failed'
+      : dbStatus === 'uploaded'     ? 'pending'
+      : transcript                  ? 'done'   // legacy rows without status col but with transcript
+      : 'none';
 
     items.push({
       kind:                'voice_memo',

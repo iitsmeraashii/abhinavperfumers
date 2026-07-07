@@ -304,6 +304,8 @@ export async function uploadVoiceNote(
         storage_path:          storagePath,
         storage_upload_status: 'uploaded',
         storage_uploaded_at:   new Date().toISOString(),
+        // Mark as uploaded so the transcription pipeline can proceed.
+        transcription_status:  'uploaded',
       }, { onConflict: 'id' });
 
   } catch (err) {

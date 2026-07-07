@@ -222,6 +222,7 @@ export interface DbCaptureAsset {
   storage_bucket?:   string | null;
   storage_upload_status?: string | null;
   storage_uploaded_at?:   string | null;
+  transcription_status?:  string | null;
   original_width:   number;
   original_height:  number;
   stored_width:     number;
