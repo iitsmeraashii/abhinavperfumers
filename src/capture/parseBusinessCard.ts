@@ -129,6 +129,33 @@ function cleanOcrText(raw: string): string {
     .trim();
 }
 
+// ─── Phone priority sorting ───────────────────────────────────────────────────
+// Mirrors the AI prompt priority: mobile-labelled > mobile > ambiguous > landline.
+// Used by the OCR fallback path — vision AI handles its own ordering.
+
+const RE_MOBILE_LABEL  = /\b(mob(?:ile)?|cell(?:ular)?|m\s*:|whatsapp|wa\b|primary|direct)\b/i;
+const RE_LANDLINE_LABEL = /\b(tel(?:ephone)?|office|off\b|fax|board|ext(?:ension)?|toll[\s-]?free|1800|1860)\b/i;
+
+function phonePriority(phone: string, context: string): number {
+  const digits = phone.replace(/\D/g, '');
+  if (RE_MOBILE_LABEL.test(context))  return 0; // explicitly labelled mobile/WhatsApp
+  if (RE_LANDLINE_LABEL.test(context)) return 3; // explicitly labelled landline/office
+  if (/^(91|\+91)?[6-9]\d{9}$/.test(digits)) return 1; // Indian mobile
+  if (digits.length >= 11 && digits.length <= 13) return 1; // intl mobile
+  return 2; // ambiguous
+}
+
+function sortPhonesByPriority(phones: string[], fullText: string): string[] {
+  if (phones.length <= 1) return phones;
+  return [...phones].sort((a, b) => {
+    const idxA = fullText.indexOf(a.slice(0, 8));
+    const idxB = fullText.indexOf(b.slice(0, 8));
+    const ctxA = idxA >= 0 ? fullText.slice(Math.max(0, idxA - 30), idxA + 40) : '';
+    const ctxB = idxB >= 0 ? fullText.slice(Math.max(0, idxB - 30), idxB + 40) : '';
+    return phonePriority(a, ctxA) - phonePriority(b, ctxB);
+  });
+}
+
 // ─── Main parser ──────────────────────────────────────────────────────────────
 
 export interface BusinessCardParseResult {
@@ -167,11 +194,14 @@ export function parseBusinessCardText(raw: string): BusinessCardParseResult {
     });
   }
 
-  // Phones — scan full text, deduplicate
-  const phoneMatches = [...fullText.matchAll(RE_PHONE)]
-    .map(m => m[0].trim())
-    .filter(hasEnoughDigits)
-    .filter((v, i, arr) => arr.indexOf(v) === i);
+  // Phones — scan full text, deduplicate, then sort so the best primary is first
+  const phoneMatches = sortPhonesByPriority(
+    [...fullText.matchAll(RE_PHONE)]
+      .map(m => m[0].trim())
+      .filter(hasEnoughDigits)
+      .filter((v, i, arr) => arr.indexOf(v) === i),
+    fullText,
+  );
   if (phoneMatches.length > 0) {
     fields.phone = phoneMatches[0];
     inferredFields.push('phone');

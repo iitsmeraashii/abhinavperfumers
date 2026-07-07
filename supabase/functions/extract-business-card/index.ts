@@ -113,6 +113,26 @@ Rules:
 - If uncertain about a field, leave it as empty string or empty array
 - rawText should contain ALL visible text on the card, line by line
 
+Phone number ordering — CRITICAL:
+The first entry in phoneNumbers MUST be the best primary contact number for WhatsApp/mobile use.
+Apply this priority order when sorting phoneNumbers:
+1. HIGHEST PRIORITY — Any number that is visually emphasised on the card:
+   circled, underlined, starred (*), ticked (✓), highlighted, or annotated with
+   "mobile", "mob", "m:", "cell", "whatsapp", "wa", "primary", "direct" (case-insensitive).
+   Place this number first regardless of type.
+2. SECOND — Mobile / cell numbers that are NOT emphasised:
+   - Indian mobile: 10 digits starting with 6, 7, 8, or 9 (with or without +91 / 91 prefix)
+   - International mobile: country code followed by a 9-10 digit mobile-range number
+   - Numbers labelled "mob", "cell", "m:" even without emphasis
+3. THIRD — Numbers with no clear type classification (ambiguous length or format)
+4. LAST — Landline / office numbers:
+   - Indian landline: area code (2-4 digits) + 6-8 digit number, often shown with STD code in parentheses
+   - Numbers labelled "tel", "office", "off", "fax", "direct", "board", "ext"
+   - Numbers starting with 1800, 1860 (toll-free)
+
+Within each priority tier, preserve the original card order.
+If only one number exists, place it first regardless of type.
+
 Return ONLY valid JSON matching this exact schema:
 {
   "fullName": "",
