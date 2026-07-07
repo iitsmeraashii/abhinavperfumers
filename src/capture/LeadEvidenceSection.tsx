@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Image as ImageIcon, Mic, X, ChevronLeft, ChevronRight,
   ZoomIn, ZoomOut, RotateCcw, Play, Pause, Volume2,
-  Loader2, CheckCircle2, AlertCircle, FileImage,
+  Loader2, CheckCircle2, AlertCircle, FileImage, Clock,
 } from 'lucide-react';
 import {
   fetchEvidence,
@@ -251,6 +251,22 @@ function AudioPlayer({ src }: { src: string }) {
 
 // ─── Evidence Cards ───────────────────────────────────────────────────────────
 
+function fmtDateTime(iso: string) {
+  return new Date(iso).toLocaleString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function CardTimestamp({ iso }: { iso: string }) {
+  return (
+    <span className="flex items-center gap-1 text-[11px] text-stone-400 font-normal">
+      <Clock className="w-3 h-3 flex-shrink-0" />
+      {fmtDateTime(iso)}
+    </span>
+  );
+}
+
 function BusinessCardEvidenceCard({
   evidence,
   onOpenLightbox,
@@ -269,7 +285,7 @@ function BusinessCardEvidenceCard({
           <FileImage className="w-4 h-4 text-stone-500" />
           <h4 className="text-sm font-semibold text-stone-700">Business Card</h4>
         </div>
-        {/* reserved for future actions */}
+        <CardTimestamp iso={evidence.createdAt} />
       </div>
 
       <div className="p-4">
@@ -327,7 +343,7 @@ function ImageNoteEvidenceCard({
           <ImageIcon className="w-4 h-4 text-stone-500" />
           <h4 className="text-sm font-semibold text-stone-700">Notes Image</h4>
         </div>
-        {/* reserved for future actions */}
+        <CardTimestamp iso={evidence.createdAt} />
       </div>
 
       <div className="p-4">
@@ -366,10 +382,6 @@ function VoiceMemoEvidenceCard({ evidence }: { evidence: VoiceMemoEvidence }) {
     return `${m}:${sec.toString().padStart(2, '0')}`;
   }
 
-  function fmtDate(iso: string) {
-    return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-  }
-
   const duration = fmtDuration(evidence.durationMs);
 
   return (
@@ -379,19 +391,16 @@ function VoiceMemoEvidenceCard({ evidence }: { evidence: VoiceMemoEvidence }) {
           <Mic className="w-4 h-4 text-stone-500" />
           <h4 className="text-sm font-semibold text-stone-700">Voice Memo</h4>
         </div>
-        {/* reserved for future actions */}
+        <CardTimestamp iso={evidence.createdAt} />
       </div>
 
       <div className="p-4 space-y-3">
-        {/* Meta row */}
-        <div className="flex items-center gap-3 text-xs text-stone-400">
-          {duration && (
-            <span className="flex items-center gap-1 font-mono font-medium text-stone-600 bg-stone-100 px-2 py-0.5 rounded-md">
-              {duration}
-            </span>
-          )}
-          <span>{fmtDate(evidence.createdAt)}</span>
-        </div>
+        {/* Meta row — duration only (timestamp is in the header) */}
+        {duration && (
+          <span className="inline-flex items-center gap-1 font-mono font-medium text-stone-600 bg-stone-100 px-2 py-0.5 rounded-md text-xs">
+            {duration}
+          </span>
+        )}
 
         {/* Audio player */}
         {evidence.audioUrl ? (
