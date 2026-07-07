@@ -134,21 +134,12 @@ class CaptureEvidenceManager {
   // ── Private upload helpers ─────────────────────────────────────────────────
 
   private async _uploadBusinessCard(asset: BusinessCardAsset): Promise<void> {
-    const TAG = '[evidenceManager:diag]';
-    console.log(TAG, '_uploadBusinessCard called', { assetId: asset.id, sessionId: asset.sessionId, online: navigator.onLine });
-    if (!navigator.onLine) { console.log(TAG, 'SKIP — offline'); return; }
-    const result = await uploadBusinessCardAsset(asset).catch(err => {
-      console.warn(TAG, 'uploadBusinessCardAsset threw:', err);
-      return null;
-    });
-    console.log(TAG, 'uploadBusinessCardAsset result:', result);
+    if (!navigator.onLine) return;
+    const result = await uploadBusinessCardAsset(asset).catch(() => null);
     if (result?.uploaded && !result.metadataWritten) {
-      console.warn(TAG, 'PARTIAL — file uploaded but metadata write failed. Queuing for reconciliation at Save & Next.');
+      // File reached Storage but the metadata UPDATE failed.
       // Queue for retry at Save & Next so the row is eventually consistent.
       this._pendingReconciliation.push(asset);
-    }
-    if (!result?.uploaded) {
-      console.warn(TAG, 'UPLOAD DID NOT COMPLETE — file not in Storage');
     }
   }
 }

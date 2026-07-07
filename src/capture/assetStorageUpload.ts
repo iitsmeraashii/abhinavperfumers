@@ -68,47 +68,29 @@ const UPLOAD_FAIL: BusinessCardUploadResult = {
 export async function uploadBusinessCardAsset(
   asset: BusinessCardAsset,
 ): Promise<BusinessCardUploadResult> {
-  const TAG = '[assetStorageUpload:diag]';
-  console.log(TAG, 'START uploadBusinessCardAsset', { assetId: asset.id, sessionId: asset.sessionId, side: asset.side, online: navigator.onLine });
-
-  if (!navigator.onLine) {
-    console.log(TAG, 'ABORT — offline');
-    return UPLOAD_FAIL;
-  }
+  if (!navigator.onLine) return UPLOAD_FAIL;
 
   try {
     const userId = await getAuthUserId();
-    console.log(TAG, 'userId resolved:', userId);
-    if (!userId) {
-      console.warn(TAG, 'ABORT — no userId (not authenticated)');
-      return UPLOAD_FAIL;
-    }
+    if (!userId) return UPLOAD_FAIL;
 
     const storagePath = `${userId}/${asset.id}.jpg`;
     const blob = dataUrlToBlob(asset.dataUrl);
-    console.log(TAG, '1. PRE-STORAGE-UPLOAD', { storagePath, blobSize: blob.size, bucket: BUCKET });
 
-    const storageResult = await supabase.storage
+    const { error: uploadError } = await supabase.storage
       .from(BUCKET)
       .upload(storagePath, blob, { contentType: 'image/jpeg', upsert: true });
 
-    console.log(TAG, '2. STORAGE-UPLOAD-RESPONSE', {
-      data: storageResult.data,
-      error: storageResult.error ? { message: storageResult.error.message, status: (storageResult.error as any).statusCode ?? (storageResult.error as any).status } : null,
-    });
-
-    if (storageResult.error) {
-      console.warn(TAG, 'ABORT — storage upload failed:', storageResult.error.message);
+    if (uploadError) {
+      console.warn('[assetStorageUpload] business card upload failed:', uploadError.message);
       return UPLOAD_FAIL;
     }
 
-    console.log(TAG, '3. STORAGE PATH written:', storagePath);
     const metadataWritten = await _writeAssetStorageMeta(asset, userId, storagePath);
-    console.log(TAG, 'RESULT', { uploaded: true, metadataWritten, storagePath });
     return { uploaded: true, metadataWritten, storagePath };
 
   } catch (err) {
-    console.warn(TAG, 'UNCAUGHT ERROR:', err);
+    console.warn('[assetStorageUpload] uploadBusinessCardAsset error:', err);
     return UPLOAD_FAIL;
   }
 }
@@ -117,9 +99,9 @@ export async function uploadBusinessCardAsset(
  * Writes storage_* columns to an existing capture_assets row via a targeted
  * UPDATE. Does NOT touch dimension columns — those are owned by syncUpsertAsset.
  *
- * UPDATE (not upsert) because by the time this runs, syncUpsertAsset will have
- * already created the row. Using UPDATE means zeroed dimensions can never
- * overwrite correct values, and a missing row is an explicit detectable failure.
+ * UPDATE (not upsert) because syncUpsertAsset always creates the row before this
+ * runs. Using UPDATE means zeroed dimensions can never overwrite correct values,
+ * and a missing row is an explicit detectable failure (returns false).
  *
  * Returns true when the UPDATE succeeded (row found and updated).
  */
@@ -128,49 +110,31 @@ async function _writeAssetStorageMeta(
   userId: string,
   storagePath: string,
 ): Promise<boolean> {
-  const TAG = '[assetStorageUpload:diag]';
-
-  const payload = {
-    storage_provider:      'SUPABASE',
-    storage_bucket:        BUCKET,
-    storage_path:          storagePath,
-    storage_upload_status: 'uploaded',
-    storage_uploaded_at:   new Date().toISOString(),
-  };
-  const filter = { capture_session_id: asset.sessionId, local_asset_id: asset.id, user_id: userId };
-
-  console.log(TAG, '4. PRE-METADATA-UPDATE — UPDATE path (not upsert)', { filter, payload });
-
-  const updateResult = await supabase
+  const { data, error } = await supabase
     .from('capture_assets')
-    .update(payload)
+    .update({
+      storage_provider:      'SUPABASE',
+      storage_bucket:        BUCKET,
+      storage_path:          storagePath,
+      storage_upload_status: 'uploaded',
+      storage_uploaded_at:   new Date().toISOString(),
+    })
     .eq('capture_session_id', asset.sessionId)
     .eq('local_asset_id', asset.id)
     .eq('user_id', userId)
-    .select('id, capture_session_id, local_asset_id, storage_path, storage_upload_status');
+    .select('id');
 
-  console.log(TAG, '5. METADATA-UPDATE-RESPONSE', {
-    data:        updateResult.data,
-    error:       updateResult.error ? { message: updateResult.error.message, code: updateResult.error.code, details: updateResult.error.details, hint: updateResult.error.hint } : null,
-    rowsAffected: Array.isArray(updateResult.data) ? updateResult.data.length : 'unknown (no .select)',
-    status:      (updateResult as any).status,
-    statusText:  (updateResult as any).statusText,
-  });
-
-  if (updateResult.error) {
-    console.warn(TAG, '6. METADATA UPDATE FAILED — error:', updateResult.error.message);
+  if (error) {
+    console.warn('[assetStorageUpload] storage metadata UPDATE failed:', error.message);
     return false;
   }
 
-  const rows = Array.isArray(updateResult.data) ? updateResult.data.length : -1;
-  console.log(TAG, '7. ROWS AFFECTED by UPDATE:', rows, rows === 0 ? '← ZERO ROWS — row did not exist yet or filter mismatch' : '← row updated');
-
+  const rows = Array.isArray(data) ? data.length : 0;
   if (rows === 0) {
-    console.warn(TAG, '8. UPDATE matched zero rows. Likely causes: (a) syncUpsertAsset has not run yet (race), (b) asset.sessionId / asset.id mismatch, (c) RLS user_id mismatch');
-    console.log(TAG, '   asset.sessionId:', asset.sessionId, '| asset.id:', asset.id, '| userId:', userId);
+    console.warn('[assetStorageUpload] storage metadata UPDATE matched zero rows — row may not exist yet');
+    return false;
   }
-
-  return rows > 0;
+  return true;
 }
 
 /**
@@ -181,17 +145,12 @@ async function _writeAssetStorageMeta(
 export async function reconcileAssetStorageMetadata(
   asset: BusinessCardAsset,
 ): Promise<boolean> {
-  const TAG = '[assetStorageUpload:diag]';
-  console.log(TAG, 'reconcileAssetStorageMetadata called', { assetId: asset.id, sessionId: asset.sessionId, online: navigator.onLine });
-  if (!navigator.onLine) { console.log(TAG, 'reconcile — offline, skipping'); return false; }
+  if (!navigator.onLine) return false;
   try {
     const userId = await getAuthUserId();
-    if (!userId) { console.warn(TAG, 'reconcile — no userId'); return false; }
+    if (!userId) return false;
     const storagePath = `${userId}/${asset.id}.jpg`;
-    console.log(TAG, 'reconcile — retrying _writeAssetStorageMeta', { storagePath });
-    const ok = await _writeAssetStorageMeta(asset, userId, storagePath);
-    console.log(TAG, 'reconcile — result:', ok);
-    return ok;
+    return await _writeAssetStorageMeta(asset, userId, storagePath);
   } catch (err) {
     console.warn('[assetStorageUpload] reconcileAssetStorageMetadata error:', err);
     return false;
@@ -239,7 +198,6 @@ export async function uploadNotesImage(
 
     const assetId = existing?.id ?? crypto.randomUUID();
 
-    // Upsert the capture_assets row
     await supabase
       .from('capture_assets')
       .upsert({

@@ -277,29 +277,29 @@ export default function CaptureLeadPage() {
       addEntryRef.current('Session created/queued (QR)', { backendSessionId });
 
     } else if (method === 'BUSINESS_CARD') {
-      const sid = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      setCardSessionId(sid);
       setCardAssets({ front: null, back: null });
       setOcrDebug({ status: 'idle', progress: 0, progressLabel: '', error: null });
       setLastOcrResult(null);
 
-      addEntryRef.current('Business card capture session started', { cardSessionId: sid });
-      actions.startCaptureWithDraft('BUSINESS_CARD', { cardSessionId: sid });
+      const backendSessionId = actions.startCapture('BUSINESS_CARD');
+      setCardSessionId(backendSessionId);
       setQrScanning(false);
 
-      setTimeout(async () => {
-        const bsid = sessionRef.current.sync.backendSessionId;
-        if (!bsid) return;
-        await syncSessionOp({
-          sessionId:     bsid,
-          captureMethod: 'BUSINESS_CARD',
-          draftData:     { cardSessionId: sid },
-          sessionStatus: 'CAPTURING',
-          localDraftKey: 'active_capture_draft',
-          eventId:       selectedEvent?.id ?? null,
-        }, bsid);
-        addEntryRef.current('Session created/queued (BUSINESS_CARD)', { backendSessionId: bsid });
-      }, 0);
+      // Store the backend UUID as cardSessionId in the draft so IndexedDB asset
+      // lookups (restore, discard) always use the same identifier as the DB row.
+      actions.patchDraft({ cardSessionId: backendSessionId });
+
+      addEntryRef.current('Business card capture session started', { backendSessionId });
+
+      await syncSessionOp({
+        sessionId:     backendSessionId,
+        captureMethod: 'BUSINESS_CARD',
+        draftData:     { cardSessionId: backendSessionId },
+        sessionStatus: 'CAPTURING',
+        localDraftKey: 'active_capture_draft',
+        eventId:       selectedEvent?.id ?? null,
+      }, backendSessionId);
+      addEntryRef.current('Session created/queued (BUSINESS_CARD)', { backendSessionId });
 
     } else {
       const backendSessionId = actions.startCapture(method);
