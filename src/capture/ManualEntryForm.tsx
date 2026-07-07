@@ -4,7 +4,7 @@ import {
   CheckCircle2, Wifi, WifiOff, Trash2, ChevronDown, ChevronRight,
   Mic, Square, Camera, X, Image as ImageIcon,
   Flame, Thermometer, Snowflake,
-  Plus, Minus, ArrowRight, Loader2,
+  Plus, Minus, ArrowRight, Loader2, AlertCircle,
   Globe, MapPin,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
@@ -111,18 +111,113 @@ function LeadTemperaturePicker({ value, onChange }: { value?: LeadTemperature; o
   );
 }
 
-// ─── Voice note UI (local state only) ─────────────────────────────────────────
+// ─── Voice note UI ────────────────────────────────────────────────────────────
+
+export type VoiceTranscriptionStatus =
+  | 'none'         // no recording yet
+  | 'pending'      // recorded, waiting for upload/transcription to start
+  | 'transcribing' // edge function is running Whisper
+  | 'ready'        // transcript is available
+  | 'failed';      // transcription failed — recording is NOT lost
+
+function VoiceTranscriptBlock({
+  status,
+  transcript,
+  onTranscriptChange,
+  onRetry,
+}: {
+  status: VoiceTranscriptionStatus;
+  transcript: string;
+  onTranscriptChange: (value: string) => void;
+  onRetry?: () => void;
+}) {
+  if (status === 'none') return null;
+
+  if (status === 'pending') {
+    return (
+      <div className="mt-3">
+        <div className="flex items-center gap-1.5 mb-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-stone-300" />
+          <span className="text-[11px] font-semibold text-stone-400 uppercase tracking-wide">AI Transcript</span>
+        </div>
+        <div className="flex items-center gap-2.5 px-4 py-3 bg-stone-50 rounded-xl border border-stone-200">
+          <Loader2 className="w-3.5 h-3.5 text-stone-400 animate-spin flex-shrink-0" />
+          <span className="text-sm text-stone-400">Preparing transcription…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'transcribing') {
+    return (
+      <div className="mt-3">
+        <div className="flex items-center gap-1.5 mb-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+          <span className="text-[11px] font-semibold text-stone-400 uppercase tracking-wide">AI Transcript</span>
+        </div>
+        <div className="flex items-center gap-2.5 px-4 py-3 bg-amber-50 rounded-xl border border-amber-200">
+          <Loader2 className="w-3.5 h-3.5 text-amber-500 animate-spin flex-shrink-0" />
+          <span className="text-sm text-amber-700">Generating transcript…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'failed') {
+    return (
+      <div className="mt-3">
+        <div className="flex items-center gap-1.5 mb-1.5">
+          <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
+          <span className="text-[11px] font-semibold text-amber-600 uppercase tracking-wide">AI Transcript</span>
+        </div>
+        <div className="flex items-center justify-between px-4 py-3 bg-amber-50 rounded-xl border border-amber-200">
+          <span className="text-sm text-amber-700">Couldn't generate transcript.</span>
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="ml-3 text-xs font-semibold text-amber-700 hover:text-amber-900 underline underline-offset-2 transition-colors"
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // status === 'ready'
+  return (
+    <div className="mt-3">
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
+        <span className="text-[11px] font-semibold text-green-600 uppercase tracking-wide">AI Transcript</span>
+      </div>
+      <textarea
+        rows={3}
+        value={transcript}
+        onChange={e => onTranscriptChange(e.target.value)}
+        placeholder="Transcript will appear here…"
+        className={`${inputCls()} resize-none text-sm leading-relaxed`}
+      />
+    </div>
+  );
+}
 
 function VoiceNoteRecorder({
   durationMs,
   transcript,
+  transcriptionStatus,
   onUpdate,
   onBlobReady,
+  onRetryTranscription,
 }: {
   durationMs?: number;
   transcript?: string;
+  transcriptionStatus?: VoiceTranscriptionStatus;
   onUpdate: (patch: Partial<DraftData>) => void;
   onBlobReady?: (blob: Blob, durationMs: number, mimeType: string) => void;
+  onRetryTranscription?: () => void;
 }) {
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed]     = useState(durationMs ?? 0);
@@ -205,6 +300,11 @@ function VoiceNoteRecorder({
   }
 
   const hasRecording = (durationMs ?? 0) > 0 && !recording;
+  const effectiveStatus: VoiceTranscriptionStatus =
+    !hasRecording             ? 'none'
+    : transcriptionStatus     ? transcriptionStatus
+    : transcript              ? 'ready'
+    : 'pending';
 
   return (
     <div>
@@ -231,8 +331,18 @@ function VoiceNoteRecorder({
           </>
         ) : hasRecording ? (
           <>
-            <div className="w-14 h-14 rounded-full bg-stone-100 flex items-center justify-center">
-              <Mic className="w-5 h-5 text-stone-500" />
+            <div className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${
+              effectiveStatus === 'ready'        ? 'bg-green-50'
+              : effectiveStatus === 'failed'     ? 'bg-amber-50'
+              : effectiveStatus === 'transcribing' ? 'bg-amber-50'
+              : 'bg-stone-100'
+            }`}>
+              <Mic className={`w-5 h-5 ${
+                effectiveStatus === 'ready'          ? 'text-green-600'
+                : effectiveStatus === 'failed'       ? 'text-amber-500'
+                : effectiveStatus === 'transcribing' ? 'text-amber-500'
+                : 'text-stone-500'
+              }`} />
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-stone-700">Voice note recorded</p>
@@ -263,15 +373,13 @@ function VoiceNoteRecorder({
           </>
         )}
       </div>
-      {hasRecording && (
-        <textarea
-          placeholder="Transcript preview (type or auto-fill later)…"
-          rows={2}
-          value={transcript ?? ''}
-          onChange={e => onUpdate({ voiceNoteTranscript: e.target.value })}
-          className={`${inputCls()} mt-3 resize-none text-sm leading-relaxed`}
-        />
-      )}
+
+      <VoiceTranscriptBlock
+        status={effectiveStatus}
+        transcript={transcript ?? ''}
+        onTranscriptChange={value => onUpdate({ voiceNoteTranscript: value })}
+        onRetry={onRetryTranscription}
+      />
     </div>
   );
 }
@@ -760,6 +868,79 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const address         = String(d.address  ?? '');
 
   const hasDraftData = !!(clientName || company || phone || notes || notesImage);
+  const backendSessionId = session.sync.backendSessionId;
+
+  // Track polled transcription status separately from draft data so we can
+  // auto-populate the transcript the first time it arrives without overwriting
+  // edits the user made afterward.
+  const [polledTranscriptionStatus, setPolledTranscriptionStatus] = useState<
+    null | 'transcribing' | 'ready' | 'failed'
+  >(null);
+  // Ref always holds the latest transcript so the async poll callback can
+  // read it without being listed as an effect dependency.
+  const voiceTranscriptRef = useRef(voiceTranscript);
+  voiceTranscriptRef.current = voiceTranscript;
+
+  // Reset polled status whenever the recording is cleared.
+  useEffect(() => {
+    if (!voiceDuration) setPolledTranscriptionStatus(null);
+  }, [voiceDuration]);
+
+  // Poll DB every 3 s while transcription is in-flight.
+  useEffect(() => {
+    if (!backendSessionId || (voiceDuration ?? 0) <= 0) return;
+    if (polledTranscriptionStatus === 'ready' || polledTranscriptionStatus === 'failed') return;
+
+    let cancelled = false;
+
+    async function poll() {
+      const { data: asset } = await supabase
+        .from('capture_assets')
+        .select('transcription_status')
+        .eq('capture_session_id', backendSessionId)
+        .eq('asset_type', 'voice_note')
+        .maybeSingle();
+
+      if (cancelled) return;
+      const status = (asset as { transcription_status?: string | null } | null)
+        ?.transcription_status ?? null;
+
+      if (status === 'ready') {
+        // Fetch transcript and auto-populate only if user hasn't typed anything.
+        const { data: sessionRow } = await supabase
+          .from('capture_sessions')
+          .select('voice_note_transcript')
+          .eq('id', backendSessionId)
+          .maybeSingle();
+
+        if (!cancelled) {
+          const transcript = (sessionRow as { voice_note_transcript?: string | null } | null)
+            ?.voice_note_transcript ?? null;
+          if (transcript && !voiceTranscriptRef.current) {
+            handlePatchDraft({ voiceNoteTranscript: transcript });
+          }
+          setPolledTranscriptionStatus('ready');
+        }
+      } else if (status === 'failed') {
+        if (!cancelled) setPolledTranscriptionStatus('failed');
+      } else if (status === 'transcribing') {
+        if (!cancelled) setPolledTranscriptionStatus('transcribing');
+      }
+    }
+
+    void poll();
+    const id = setInterval(() => { void poll(); }, 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendSessionId, voiceDuration, polledTranscriptionStatus]);
+
+  const computedTranscriptionStatus: VoiceTranscriptionStatus = (() => {
+    if ((voiceDuration ?? 0) <= 0) return 'none';
+    if (polledTranscriptionStatus === 'transcribing') return 'transcribing';
+    if (polledTranscriptionStatus === 'ready' || voiceTranscript) return 'ready';
+    if (polledTranscriptionStatus === 'failed') return 'failed';
+    return 'pending';
+  })();
 
   const handleSaveAndNext = useCallback(async () => {
     setSaving(true);
@@ -968,8 +1149,14 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
             <VoiceNoteRecorder
               durationMs={voiceDuration}
               transcript={voiceTranscript}
+              transcriptionStatus={computedTranscriptionStatus}
               onUpdate={handlePatchDraft}
               onBlobReady={onVoiceNoteRecorded}
+              onRetryTranscription={
+                backendSessionId && polledTranscriptionStatus === 'failed'
+                  ? () => setPolledTranscriptionStatus(null)
+                  : undefined
+              }
             />
 
             {/* Notes image */}
