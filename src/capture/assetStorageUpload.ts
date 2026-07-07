@@ -1,8 +1,10 @@
 // Evidence storage upload — uploads captured assets to Supabase Storage.
 //
 // Design:
-//   - Fire-and-forget: all exports are void, never throw to caller
-//   - Offline-safe: immediate no-op when offline; capture_assets row stays 'pending'
+//   - uploadBusinessCardAsset returns BusinessCardUploadResult so the caller
+//     can detect partial success (file in Storage, metadata write failed)
+//   - reconcileAssetStorageMetadata retries the metadata write without re-uploading
+//   - Offline-safe: immediate failure result when offline
 //   - Idempotent: re-uploading the same asset path is harmless (upsert: true)
 //   - Isolated: no React state, no capture session lifecycle knowledge
 //
@@ -38,20 +40,39 @@ async function getAuthUserId(): Promise<string | null> {
 }
 
 // ─── Business Card upload ─────────────────────────────────────────────────────
-// Uploads a business card image (front or back) to Supabase Storage and
-// updates the capture_assets row with the storage path and upload status.
-//
-// Path: lead-evidence/{userId}/{assetId}.jpg
-// No-op when offline or unauthenticated.
 
+export interface BusinessCardUploadResult {
+  /** True when the file bytes were written to Supabase Storage. */
+  uploaded:        boolean;
+  /** True when the capture_assets row was updated with storage_* metadata. */
+  metadataWritten: boolean;
+  /** Storage path that was written, or null on upload failure. */
+  storagePath:     string | null;
+}
+
+const UPLOAD_FAIL: BusinessCardUploadResult = {
+  uploaded: false, metadataWritten: false, storagePath: null,
+};
+
+/**
+ * Uploads a business card image to Supabase Storage and writes storage metadata
+ * to the capture_assets row via a targeted UPDATE (storage_* columns only —
+ * dimensions are never touched here; they belong to syncUpsertAsset).
+ *
+ * Returns a typed result so the caller can detect partial success and schedule
+ * a reconciliation retry.
+ *
+ * Path: lead-evidence/{userId}/{assetId}.jpg
+ * Returns UPLOAD_FAIL when offline or unauthenticated.
+ */
 export async function uploadBusinessCardAsset(
   asset: BusinessCardAsset,
-): Promise<void> {
-  if (!navigator.onLine) return;
+): Promise<BusinessCardUploadResult> {
+  if (!navigator.onLine) return UPLOAD_FAIL;
 
   try {
     const userId = await getAuthUserId();
-    if (!userId) return;
+    if (!userId) return UPLOAD_FAIL;
 
     const storagePath = `${userId}/${asset.id}.jpg`;
     const blob = dataUrlToBlob(asset.dataUrl);
@@ -62,42 +83,70 @@ export async function uploadBusinessCardAsset(
 
     if (uploadError) {
       console.warn('[assetStorageUpload] business card upload failed:', uploadError.message);
-      return;
+      return UPLOAD_FAIL;
     }
 
-    // Upsert the capture_assets row with storage metadata.
-    // Using upsert (not update) so this succeeds even when the DB row hasn't been
-    // created yet by syncUpsertAsset — resolving the upload / DB-row race condition.
-    // syncUpsertAsset will later upsert the same row with correct dimensions;
-    // columns not in that payload (storage_*) are left untouched.
-    await supabase
-      .from('capture_assets')
-      .upsert({
-        capture_session_id:    asset.sessionId,
-        user_id:               userId,
-        asset_type:            'business_card',
-        side:                  asset.side,
-        asset_side:            asset.side,
-        local_asset_id:        asset.id,
-        mime_type:             'image/jpeg',
-        size_bytes:            0,
-        file_size:             0,
-        original_width:        0,
-        original_height:       0,
-        stored_width:          0,
-        stored_height:         0,
-        width:                 0,
-        height:                0,
-        processing_status:     'done',
-        storage_provider:      'SUPABASE',
-        storage_bucket:        BUCKET,
-        storage_path:          storagePath,
-        storage_upload_status: 'uploaded',
-        storage_uploaded_at:   new Date().toISOString(),
-      }, { onConflict: 'capture_session_id,local_asset_id' });
+    const metadataWritten = await _writeAssetStorageMeta(asset, userId, storagePath);
+    return { uploaded: true, metadataWritten, storagePath };
 
   } catch (err) {
     console.warn('[assetStorageUpload] uploadBusinessCardAsset error:', err);
+    return UPLOAD_FAIL;
+  }
+}
+
+/**
+ * Writes storage_* columns to an existing capture_assets row via a targeted
+ * UPDATE. Does NOT touch dimension columns — those are owned by syncUpsertAsset.
+ *
+ * UPDATE (not upsert) because by the time this runs, syncUpsertAsset will have
+ * already created the row. Using UPDATE means zeroed dimensions can never
+ * overwrite correct values, and a missing row is an explicit detectable failure.
+ *
+ * Returns true when the UPDATE succeeded (row found and updated).
+ */
+async function _writeAssetStorageMeta(
+  asset: BusinessCardAsset,
+  userId: string,
+  storagePath: string,
+): Promise<boolean> {
+  const { error } = await supabase
+    .from('capture_assets')
+    .update({
+      storage_provider:      'SUPABASE',
+      storage_bucket:        BUCKET,
+      storage_path:          storagePath,
+      storage_upload_status: 'uploaded',
+      storage_uploaded_at:   new Date().toISOString(),
+    })
+    .eq('capture_session_id', asset.sessionId)
+    .eq('local_asset_id', asset.id)
+    .eq('user_id', userId);
+
+  if (error) {
+    console.warn('[assetStorageUpload] storage metadata UPDATE failed:', error.message);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Retries only the metadata write for an asset whose file was already uploaded.
+ * Safe to call repeatedly — only writes storage_* fields, never uploads again.
+ * Returns true when the metadata row is confirmed written.
+ */
+export async function reconcileAssetStorageMetadata(
+  asset: BusinessCardAsset,
+): Promise<boolean> {
+  if (!navigator.onLine) return false;
+  try {
+    const userId = await getAuthUserId();
+    if (!userId) return false;
+    const storagePath = `${userId}/${asset.id}.jpg`;
+    return await _writeAssetStorageMeta(asset, userId, storagePath);
+  } catch (err) {
+    console.warn('[assetStorageUpload] reconcileAssetStorageMetadata error:', err);
+    return false;
   }
 }
 

@@ -29,6 +29,7 @@ import {
   uploadBusinessCardAsset,
   uploadNotesImage,
   uploadVoiceNote,
+  reconcileAssetStorageMetadata,
 } from './assetStorageUpload';
 
 // ─── Evidence model ───────────────────────────────────────────────────────────
@@ -69,6 +70,8 @@ export type CaptureEvidence = BusinessCardEvidence | NotesImageEvidence | VoiceN
 class CaptureEvidenceManager {
   private _pendingNotes: { sessionId: string; dataUrl: string } | null = null;
   private _pendingVoice: { sessionId: string; audioBlob: Blob; mimeType: string } | null = null;
+  // Assets whose file was uploaded but metadata write failed — retried at onSaveAndNext.
+  private _pendingReconciliation: BusinessCardAsset[] = [];
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -76,7 +79,7 @@ class CaptureEvidenceManager {
     switch (evidence.type) {
       case 'business_card_front':
       case 'business_card_back':
-        this._uploadBusinessCard(evidence.asset);
+        void this._uploadBusinessCard(evidence.asset);
         break;
 
       case 'notes_image':
@@ -111,18 +114,33 @@ class CaptureEvidenceManager {
       this._pendingVoice = null;
       uploadVoiceNote(sessionId, audioBlob, mimeType).catch(() => {});
     }
+
+    if (this._pendingReconciliation.length > 0) {
+      const toReconcile = this._pendingReconciliation.splice(0);
+      for (const asset of toReconcile) {
+        reconcileAssetStorageMetadata(asset).then(ok => {
+          if (!ok) console.warn('[evidenceManager] reconciliation still failing for asset', asset.id);
+        }).catch(() => {});
+      }
+    }
   }
 
   onSessionReset(): void {
     this._pendingNotes = null;
     this._pendingVoice = null;
+    this._pendingReconciliation = [];
   }
 
   // ── Private upload helpers ─────────────────────────────────────────────────
 
-  private _uploadBusinessCard(asset: BusinessCardAsset): void {
+  private async _uploadBusinessCard(asset: BusinessCardAsset): Promise<void> {
     if (!navigator.onLine) return;
-    uploadBusinessCardAsset(asset).catch(() => {});
+    const result = await uploadBusinessCardAsset(asset).catch(() => null);
+    if (result?.uploaded && !result.metadataWritten) {
+      // File reached Storage but the metadata UPDATE failed.
+      // Queue for retry at Save & Next so the row is eventually consistent.
+      this._pendingReconciliation.push(asset);
+    }
   }
 }
 
