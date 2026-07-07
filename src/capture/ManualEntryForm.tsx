@@ -300,11 +300,11 @@ function VoiceNoteRecorder({
   }
 
   const hasRecording = (durationMs ?? 0) > 0 && !recording;
+  // Use the authoritative status from the parent (polled from DB).
+  // Fall back to 'none' when not recording and no explicit status provided.
   const effectiveStatus: VoiceTranscriptionStatus =
-    !hasRecording             ? 'none'
-    : transcriptionStatus     ? transcriptionStatus
-    : transcript              ? 'ready'
-    : 'pending';
+    !hasRecording ? 'none'
+    : (transcriptionStatus ?? 'pending');
 
   return (
     <div>
@@ -870,30 +870,45 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const hasDraftData = !!(clientName || company || phone || notes || notesImage);
   const backendSessionId = session.sync.backendSessionId;
 
-  // Track polled transcription status separately from draft data so we can
-  // auto-populate the transcript the first time it arrives without overwriting
-  // edits the user made afterward.
+  // Authoritative transcription state derived solely from capture_assets.transcription_status.
+  // Uses 'none' as initial value so the transcript block is hidden until we
+  // know there is actually a recording in progress.
   const [polledTranscriptionStatus, setPolledTranscriptionStatus] = useState<
-    null | 'transcribing' | 'ready' | 'failed'
-  >(null);
-  // Ref always holds the latest transcript so the async poll callback can
-  // read it without being listed as an effect dependency.
-  const voiceTranscriptRef = useRef(voiceTranscript);
-  voiceTranscriptRef.current = voiceTranscript;
+    VoiceTranscriptionStatus
+  >('none');
 
-  // Reset polled status whenever the recording is cleared.
+  // Refs let async poll callbacks read current values without appearing in
+  // effect dependencies (prevents the effect from tearing down mid-poll).
+  const polledStatusRef      = useRef<VoiceTranscriptionStatus>('none');
+  const voiceTranscriptRef   = useRef(voiceTranscript);
+  const handlePatchDraftRef  = useRef(handlePatchDraft);
+  polledStatusRef.current     = polledTranscriptionStatus;
+  voiceTranscriptRef.current  = voiceTranscript;
+  handlePatchDraftRef.current = handlePatchDraft;
+
+  // Reset to 'none' whenever the recording is cleared.
   useEffect(() => {
-    if (!voiceDuration) setPolledTranscriptionStatus(null);
+    if (!voiceDuration) setPolledTranscriptionStatus('none');
   }, [voiceDuration]);
 
-  // Poll DB every 3 s while transcription is in-flight.
+  // Poll capture_assets.transcription_status — the sole source of truth.
+  // Uses recursive setTimeout (not setInterval) so concurrent polls cannot
+  // overlap and cause the `!mounted` guard to block state transitions.
+  // Does NOT include polledTranscriptionStatus in deps — uses polledStatusRef
+  // instead to avoid tearing down the effect on every state change.
   useEffect(() => {
     if (!backendSessionId || (voiceDuration ?? 0) <= 0) return;
-    if (polledTranscriptionStatus === 'ready' || polledTranscriptionStatus === 'failed') return;
 
-    let cancelled = false;
+    let mounted = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
     async function poll() {
+      if (!mounted) return;
+
+      // Stop once a terminal state is confirmed.
+      const current = polledStatusRef.current;
+      if (current === 'ready' || current === 'failed') return;
+
       const { data: asset } = await supabase
         .from('capture_assets')
         .select('transcription_status')
@@ -901,46 +916,62 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
         .eq('asset_type', 'voice_note')
         .maybeSingle();
 
-      if (cancelled) return;
-      const status = (asset as { transcription_status?: string | null } | null)
+      if (!mounted) return;
+
+      const dbStatus = (asset as { transcription_status?: string | null } | null)
         ?.transcription_status ?? null;
 
-      if (status === 'ready') {
-        // Fetch transcript and auto-populate only if user hasn't typed anything.
+      if (dbStatus === 'ready') {
+        // Fetch the transcript now that the asset is ready.
         const { data: sessionRow } = await supabase
           .from('capture_sessions')
           .select('voice_note_transcript')
           .eq('id', backendSessionId)
           .maybeSingle();
 
-        if (!cancelled) {
-          const transcript = (sessionRow as { voice_note_transcript?: string | null } | null)
-            ?.voice_note_transcript ?? null;
-          if (transcript && !voiceTranscriptRef.current) {
-            handlePatchDraft({ voiceNoteTranscript: transcript });
-          }
-          setPolledTranscriptionStatus('ready');
+        if (!mounted) return;
+
+        const transcript = (sessionRow as { voice_note_transcript?: string | null } | null)
+          ?.voice_note_transcript ?? null;
+
+        // Auto-populate only on the first arrival — never overwrite user edits.
+        if (transcript && !voiceTranscriptRef.current) {
+          handlePatchDraftRef.current({ voiceNoteTranscript: transcript });
         }
-      } else if (status === 'failed') {
-        if (!cancelled) setPolledTranscriptionStatus('failed');
-      } else if (status === 'transcribing') {
-        if (!cancelled) setPolledTranscriptionStatus('transcribing');
+
+        setPolledTranscriptionStatus('ready');
+        return; // terminal — stop polling
       }
+
+      if (dbStatus === 'failed') {
+        setPolledTranscriptionStatus('failed');
+        return; // terminal — stop polling
+      }
+
+      // Non-terminal: reflect current DB state and schedule next poll.
+      if (dbStatus === 'transcribing') {
+        setPolledTranscriptionStatus('transcribing');
+      } else {
+        // null (no row yet) or 'uploaded' both mean we are waiting for transcription to start.
+        setPolledTranscriptionStatus('pending');
+      }
+
+      timer = setTimeout(() => { void poll(); }, 3000);
     }
 
-    void poll();
-    const id = setInterval(() => { void poll(); }, 3000);
-    return () => { cancelled = true; clearInterval(id); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendSessionId, voiceDuration, polledTranscriptionStatus]);
+    // Small initial delay to allow the upload to begin before the first query.
+    timer = setTimeout(() => { void poll(); }, 800);
 
-  const computedTranscriptionStatus: VoiceTranscriptionStatus = (() => {
-    if ((voiceDuration ?? 0) <= 0) return 'none';
-    if (polledTranscriptionStatus === 'transcribing') return 'transcribing';
-    if (polledTranscriptionStatus === 'ready' || voiceTranscript) return 'ready';
-    if (polledTranscriptionStatus === 'failed') return 'failed';
-    return 'pending';
-  })();
+    return () => {
+      mounted = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [backendSessionId, voiceDuration]);
+
+  // Derive the status shown in the UI directly from the polled DB state.
+  // Never infer status from the transcript draft field.
+  const computedTranscriptionStatus: VoiceTranscriptionStatus =
+    (voiceDuration ?? 0) <= 0 ? 'none' : polledTranscriptionStatus;
 
   const handleSaveAndNext = useCallback(async () => {
     setSaving(true);
