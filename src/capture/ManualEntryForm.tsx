@@ -4,7 +4,7 @@ import {
   CheckCircle2, Wifi, WifiOff, Trash2, ChevronDown, ChevronRight,
   Mic, Square, Camera, X, Image as ImageIcon,
   Flame, Thermometer, Snowflake,
-  Plus, Minus, ArrowRight, Loader2, AlertCircle,
+  Plus, ArrowRight, Loader2, AlertCircle,
   Globe, MapPin,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
@@ -13,6 +13,7 @@ import { APPLICATION_OPTIONS } from './types';
 import type { UseManualEntryFormReturn } from './useManualEntryForm';
 import { Toast, DiscardDialog, DraftSaveIndicator } from './CaptureUI';
 import type { SaveState } from './useAutosave';
+import { TagInput } from '../components/TagInput';
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
@@ -683,56 +684,10 @@ function PreviousRepSelect({
 // ─── Quick keywords input ─────────────────────────────────────────────────────
 
 function KeywordsInput({ values, onChange }: { values: string[]; onChange: (v: string[]) => void }) {
-  const [input, setInput] = useState('');
-
-  function add() {
-    const trimmed = input.trim();
-    if (!trimmed || values.includes(trimmed)) return;
-    onChange([...values, trimmed]);
-    setInput('');
-  }
-
-  function remove(tag: string) {
-    onChange(values.filter(v => v !== tag));
-  }
-
   return (
     <div>
       <FieldLabel label="Quick Keywords" optional />
-      <div className="flex gap-2">
-        <input
-          type="text"
-          placeholder="Add keyword…"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
-          className={`${inputCls()} flex-1 text-sm`}
-        />
-        <button
-          type="button"
-          onClick={add}
-          className="flex items-center justify-center w-12 rounded-xl bg-stone-900 text-white
-            hover:bg-stone-800 active:scale-95 transition-all shrink-0"
-          aria-label="Add keyword"
-        >
-          <Plus className="w-4 h-4" />
-        </button>
-      </div>
-      {values.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mt-2">
-          {values.map(kw => (
-            <span
-              key={kw}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-stone-100 text-sm text-stone-700"
-            >
-              {kw}
-              <button type="button" onClick={() => remove(kw)} className="text-stone-400 hover:text-stone-700">
-                <X className="w-3 h-3" />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
+      <TagInput value={values} onChange={onChange} placeholder="Add keyword…" />
     </div>
   );
 }
@@ -745,48 +700,10 @@ function TagArrayInput({ label, values, onChange, placeholder }: {
   onChange: (v: string[]) => void;
   placeholder: string;
 }) {
-  const [input, setInput] = useState('');
-  function add() {
-    const t = input.trim();
-    if (!t || values.includes(t)) return;
-    onChange([...values, t]);
-    setInput('');
-  }
-  function remove(tag: string) { onChange(values.filter(v => v !== tag)); }
-
   return (
     <div>
       <FieldLabel label={label} optional />
-      <div className="flex gap-2">
-        <input
-          type="text"
-          placeholder={placeholder}
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
-          className={`${inputCls()} flex-1 text-sm`}
-        />
-        <button
-          type="button" onClick={add}
-          className="flex items-center justify-center w-12 rounded-xl bg-stone-100 text-stone-600
-            hover:bg-stone-200 active:scale-95 transition-all shrink-0"
-          aria-label={`Add ${label.toLowerCase()}`}
-        >
-          <Plus className="w-4 h-4" />
-        </button>
-      </div>
-      {values.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mt-2">
-          {values.map(v => (
-            <span key={v} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-stone-100 text-sm text-stone-700">
-              {v}
-              <button type="button" onClick={() => remove(v)} className="text-stone-400 hover:text-stone-700">
-                <Minus className="w-3 h-3" />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
+      <TagInput value={values} onChange={onChange} placeholder={placeholder} />
     </div>
   );
 }

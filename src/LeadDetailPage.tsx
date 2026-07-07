@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { LeadEvidenceSection } from './capture/LeadEvidenceSection';
 import { formatDateTime, formatDate } from './utils/dateFormat';
+import { TagInput } from './components/TagInput';
+import { TagList, parseTagString, serializeTagArray } from './components/TagList';
 
 interface LeadDetail {
   id: string;
@@ -62,7 +64,10 @@ interface EditDraft {
   application: string;
   price_range: string;
   lead_temperature: string;
-  quick_keywords: string;
+  quick_keywords: string[];
+  target_market: string[];
+  certification: string[];
+  benchmark: string[];
 }
 
 interface LeadNote {
@@ -161,6 +166,36 @@ function Row({ icon, label, value }: { icon: React.ReactNode; label: string; val
   );
 }
 
+function TagRow({ icon, label, values }: { icon: React.ReactNode; label: string; values: string[] }) {
+  return (
+    <div className="flex items-start gap-3 py-2.5 border-b border-stone-100 last:border-0">
+      <span className="mt-0.5 text-stone-400 flex-shrink-0">{icon}</span>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-stone-400 mb-1">{label}</p>
+        <TagList values={values} />
+      </div>
+    </div>
+  );
+}
+
+function TagEditRow({ icon, label, value, onChange, placeholder }: {
+  icon: React.ReactNode;
+  label: string;
+  value: string[];
+  onChange: (v: string[]) => void;
+  placeholder?: string;
+}) {
+  return (
+    <div className="flex items-start gap-3 py-2.5 border-b border-stone-100 last:border-0">
+      <span className="mt-3 text-stone-400 flex-shrink-0">{icon}</span>
+      <div className="min-w-0 flex-1">
+        <label className="text-xs text-stone-400 mb-1 block">{label}</label>
+        <TagInput value={value} onChange={onChange} placeholder={placeholder ?? `Add ${label.toLowerCase()}…`} />
+      </div>
+    </div>
+  );
+}
+
 interface EditRowProps {
   icon: React.ReactNode;
   label: string;
@@ -233,7 +268,10 @@ function makeDraft(lead: LeadDetail): EditDraft {
     application: lead.application ?? '',
     price_range: lead.price_range ?? '',
     lead_temperature: lead.lead_temperature ?? '',
-    quick_keywords: lead.quick_keywords ?? '',
+    quick_keywords: parseTagString(lead.quick_keywords),
+    target_market: parseTagString(lead.target_market),
+    certification: parseTagString(lead.certification),
+    benchmark: parseTagString(lead.benchmark),
   };
 }
 
@@ -376,9 +414,9 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
     setSaveError('');
   }
 
-  function patchDraft(key: keyof EditDraft, value: string) {
+  function patchDraft(key: keyof EditDraft, value: string | string[]) {
     setDraft(prev => prev ? { ...prev, [key]: value } : prev);
-    if (errors[key]) setErrors(prev => ({ ...prev, [key]: '' }));
+    if (errors[key as keyof typeof errors]) setErrors(prev => ({ ...prev, [key]: '' }));
   }
 
   function validate(d: EditDraft): boolean {
@@ -487,7 +525,10 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
       application: draft.application.trim() || null,
       price_range: draft.price_range.trim() || null,
       lead_temperature: draft.lead_temperature || null,
-      quick_keywords: draft.quick_keywords.trim() || null,
+      quick_keywords: serializeTagArray(draft.quick_keywords),
+      target_market: serializeTagArray(draft.target_market),
+      certification: serializeTagArray(draft.certification),
+      benchmark: serializeTagArray(draft.benchmark),
       updated_at: new Date().toISOString(),
     };
 
@@ -780,17 +821,25 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
                   onChange={v => patchDraft('application', v)} />
                 <EditRow icon={<BarChart2 className="w-3.5 h-3.5" />} label="Price Range" value={draft.price_range}
                   onChange={v => patchDraft('price_range', v)} />
+                <TagEditRow icon={<Building2 className="w-3.5 h-3.5" />} label="Target Market"
+                  value={draft.target_market} onChange={v => patchDraft('target_market', v)}
+                  placeholder="e.g. Luxury, Mass Market…" />
+                <TagEditRow icon={<Award className="w-3.5 h-3.5" />} label="Certification"
+                  value={draft.certification} onChange={v => patchDraft('certification', v)}
+                  placeholder="e.g. IFRA, ISO 9001…" />
+                <TagEditRow icon={<BarChart2 className="w-3.5 h-3.5" />} label="Benchmark"
+                  value={draft.benchmark} onChange={v => patchDraft('benchmark', v)}
+                  placeholder="e.g. Competitor product name…" />
               </>
             ) : (
               <>
                 <Row icon={<Tag className="w-3.5 h-3.5" />} label="Application" value={val(lead.application)} />
                 <Row icon={<BarChart2 className="w-3.5 h-3.5" />} label="Price Range" value={val(lead.price_range)} />
+                <TagRow icon={<Building2 className="w-3.5 h-3.5" />} label="Target Market" values={parseTagString(lead.target_market)} />
+                <TagRow icon={<Award className="w-3.5 h-3.5" />} label="Certification" values={parseTagString(lead.certification)} />
+                <TagRow icon={<BarChart2 className="w-3.5 h-3.5" />} label="Benchmark" values={parseTagString(lead.benchmark)} />
               </>
             )}
-            {/* Read-only fields always visible */}
-            <Row icon={<Building2 className="w-3.5 h-3.5" />} label="Target Market" value={val(lead.target_market)} />
-            <Row icon={<Award className="w-3.5 h-3.5" />} label="Certification" value={val(lead.certification)} />
-            <Row icon={<BarChart2 className="w-3.5 h-3.5" />} label="Benchmark" value={val(lead.benchmark)} />
           </Card>
         </div>
 
@@ -833,13 +882,14 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
                     { label: 'Cold', value: 'Cold' },
                   ]}
                 />
-                <EditRow icon={<Hash className="w-3.5 h-3.5" />} label="Keywords" value={draft.quick_keywords}
-                  onChange={v => patchDraft('quick_keywords', v)} />
+                <TagEditRow icon={<Hash className="w-3.5 h-3.5" />} label="Keywords"
+                  value={draft.quick_keywords} onChange={v => patchDraft('quick_keywords', v)}
+                  placeholder="Add keyword…" />
               </>
             ) : (
               <>
                 <Row icon={<Thermometer className="w-3.5 h-3.5" />} label="Temperature" value={val(lead.lead_temperature)} />
-                <Row icon={<Hash className="w-3.5 h-3.5" />} label="Keywords" value={val(lead.quick_keywords)} />
+                <TagRow icon={<Hash className="w-3.5 h-3.5" />} label="Keywords" values={parseTagString(lead.quick_keywords)} />
               </>
             )}
           </Card>
