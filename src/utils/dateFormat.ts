@@ -2,13 +2,23 @@
 //
 // All functions resolve the user's browser timezone at call time via
 // Intl.DateTimeFormat().resolvedOptions().timeZone — no hardcoded timezone.
-// This means a rep in Mumbai sees IST, a rep in Dubai sees GST, etc.
 //
-// Convention:
-//   formatDateTime  — "07 Jul 2026, 02:35 PM"   (date + time, used for DB timestamps)
-//   formatDate      — "07 Jul 2026"              (date only, used for event dates / follow-up dates)
-//   formatTime      — "02:35 PM"                 (time only, used for intra-day displays)
-//   formatDateLong  — "7 July 2026"              (long form, used in detail cards)
+// IMPORTANT — UTC normalisation:
+// Supabase PostgREST returns `timestamp` (without time zone) columns as bare
+// ISO strings like "2026-07-07T08:51:24.913" with NO timezone suffix.
+// JavaScript's Date constructor treats bare ISO strings as LOCAL time, which
+// means new Date("2026-07-07T08:51:24.913") in IST gives 08:51 IST — wrong.
+// The correct interpretation is UTC (Postgres stores all timestamps in UTC).
+// toUtc() appends "Z" when no timezone offset is present, forcing UTC parse.
+
+function toUtc(iso: string): string {
+  // Already has a timezone indicator — leave it alone.
+  if (/[Zz]$/.test(iso) || /[+-]\d{2}:\d{2}$/.test(iso) || /[+-]\d{4}$/.test(iso)) {
+    return iso;
+  }
+  // Replace the space separator Postgres sometimes uses, then append Z.
+  return iso.replace(' ', 'T') + 'Z';
+}
 
 function localTz(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -21,7 +31,7 @@ function localTz(): string {
  */
 export function formatDateTime(iso: string | null | undefined): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleString('en-IN', {
+  return new Date(toUtc(iso)).toLocaleString('en-IN', {
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
     timeZone: localTz(),
@@ -33,7 +43,7 @@ export function formatDateTime(iso: string | null | undefined): string | null {
  */
 export function formatDateTimeWithSeconds(iso: string | null | undefined): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleString('en-IN', {
+  return new Date(toUtc(iso)).toLocaleString('en-IN', {
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
     timeZone: localTz(),
@@ -42,13 +52,15 @@ export function formatDateTimeWithSeconds(iso: string | null | undefined): strin
 
 /**
  * Date only (no time). Safe to call with a plain date string like "2026-07-07"
- * — appends T00:00:00 so it isn't misinterpreted as UTC midnight.
+ * — plain date strings are treated as UTC midnight (no Z appended) to avoid
+ * timezone-day-shift on YYYY-MM-DD values that represent calendar dates.
  */
 export function formatDate(d: string | null | undefined): string | null {
   if (!d) return null;
-  // If the value is already a full ISO timestamp, use it directly.
-  // If it's a plain date string (YYYY-MM-DD), anchor at local midnight.
-  const iso = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00` : d;
+  // Plain date-only string: interpret as a calendar date in the user's local TZ.
+  // Appending T00:00:00 (no Z) makes JS parse it as local midnight, which is
+  // correct for event dates, follow-up dates, etc. that have no time component.
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00` : toUtc(d);
   return new Date(iso).toLocaleDateString('en-IN', {
     day: '2-digit', month: 'short', year: 'numeric',
     timeZone: localTz(),
@@ -60,7 +72,7 @@ export function formatDate(d: string | null | undefined): string | null {
  */
 export function formatDateLong(d: string | null | undefined): string | null {
   if (!d) return null;
-  const iso = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00` : d;
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00` : toUtc(d);
   return new Date(iso).toLocaleDateString('en-IN', {
     day: 'numeric', month: 'long', year: 'numeric',
     timeZone: localTz(),
@@ -72,7 +84,7 @@ export function formatDateLong(d: string | null | undefined): string | null {
  */
 export function formatDateShort(d: string | null | undefined): string | null {
   if (!d) return null;
-  const iso = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00` : d;
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00` : toUtc(d);
   return new Date(iso).toLocaleDateString('en-IN', {
     day: 'numeric', month: 'short', year: 'numeric',
     timeZone: localTz(),
