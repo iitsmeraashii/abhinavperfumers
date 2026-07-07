@@ -98,6 +98,9 @@ interface CaptureSessionMeta {
  *
  * Pass either sessionId (capture flow) or leadId (lead detail view); if both
  * are provided, sessionId takes precedence.
+ *
+ * When a leadId is given, ALL capture_sessions linked to that lead are fetched
+ * (one may be the original capture, others are added via addEvidenceService).
  */
 export async function fetchEvidence(
   params: FetchEvidenceParams,
@@ -106,27 +109,41 @@ export async function fetchEvidence(
   if (!sessionId && !leadId) return EMPTY_COLLECTION;
 
   try {
-    let resolvedSessionId: string | null = sessionId ?? null;
-
-    // When given a leadId, resolve the capture_session that was promoted to it.
-    if (!resolvedSessionId && leadId) {
-      resolvedSessionId = await _resolveSessionIdForLead(leadId);
-      if (!resolvedSessionId) {
-        return { ...EMPTY_COLLECTION, leadId, fetchedAt: new Date().toISOString() };
-      }
+    if (sessionId) {
+      const [assets, sessionMeta] = await Promise.all([
+        _fetchAssets(sessionId),
+        _fetchSessionMeta(sessionId),
+      ]);
+      const items = await _buildCollection(assets, sessionMeta);
+      return {
+        items:     sortEvidenceDescending(items),
+        sessionId,
+        leadId:    leadId ?? null,
+        fetchedAt: new Date().toISOString(),
+      };
     }
 
-    const [assets, sessionMeta] = await Promise.all([
-      _fetchAssets(resolvedSessionId!),
-      _fetchSessionMeta(resolvedSessionId!),
+    // Lead detail path — resolve ALL sessions linked to this lead
+    const sessionIds = await _resolveAllSessionIdsForLead(leadId!);
+    if (sessionIds.length === 0) {
+      return { ...EMPTY_COLLECTION, leadId: leadId!, fetchedAt: new Date().toISOString() };
+    }
+
+    const [assetsPerSession, metasPerSession] = await Promise.all([
+      Promise.all(sessionIds.map(id => _fetchAssets(id))),
+      Promise.all(sessionIds.map(id => _fetchSessionMeta(id))),
     ]);
 
-    const items = await _buildCollection(assets, sessionMeta);
+    const allItems: LeadEvidence[] = [];
+    for (let i = 0; i < sessionIds.length; i++) {
+      const items = await _buildCollection(assetsPerSession[i], metasPerSession[i]);
+      allItems.push(...items);
+    }
 
     return {
-      items:     sortEvidenceDescending(items),
-      sessionId: resolvedSessionId,
-      leadId:    leadId ?? null,
+      items:     sortEvidenceDescending(allItems),
+      sessionId: sessionIds[0] ?? null,
+      leadId:    leadId!,
       fetchedAt: new Date().toISOString(),
     };
   } catch (err) {
@@ -214,18 +231,18 @@ export function groupBusinessCards(
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
-async function _resolveSessionIdForLead(leadId: string): Promise<string | null> {
+async function _resolveAllSessionIdsForLead(leadId: string): Promise<string[]> {
   const { data, error } = await supabase
     .from('capture_sessions')
     .select('id')
     .eq('promoted_lead_id', leadId)
-    .maybeSingle();
+    .order('created_at', { ascending: true });
 
   if (error) {
-    console.warn('[leadEvidenceService] _resolveSessionIdForLead error:', error.message);
-    return null;
+    console.warn('[leadEvidenceService] _resolveAllSessionIdsForLead error:', error.message);
+    return [];
   }
-  return data?.id ?? null;
+  return (data ?? []).map((r: { id: string }) => r.id);
 }
 
 async function _fetchAssets(sessionId: string): Promise<DbCaptureAsset[]> {
