@@ -8,6 +8,7 @@ import {
   AlertCircle, Clock, RefreshCw, Pencil, Check, X as XIcon,
   StickyNote, Plus, Send, ChevronDown, Bell, CheckCircle2, Link2,
 } from 'lucide-react';
+import { LeadEvidenceSection } from './capture/LeadEvidenceSection';
 
 interface LeadDetail {
   id: string;
@@ -1151,6 +1152,9 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
             )}
           </Card>
         )}
+
+        {/* Captured Evidence */}
+        <LeadEvidenceSection leadId={leadId} />
 
         {/* WhatsApp Status */}
         <Card title="WhatsApp Status" icon={<MessageCircle className="w-4 h-4" />}>
