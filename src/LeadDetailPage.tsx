@@ -9,6 +9,7 @@ import {
   StickyNote, Plus, Send, ChevronDown, Bell, CheckCircle2, Link2,
 } from 'lucide-react';
 import { LeadEvidenceSection } from './capture/LeadEvidenceSection';
+import { formatDateTime, formatDate } from './utils/dateFormat';
 
 interface LeadDetail {
   id: string;
@@ -135,18 +136,6 @@ function formatWhatsAppNumber(raw: string): string | null {
   return digits.length >= 7 ? digits : null;
 }
 
-function formatDateTime(iso: string | null) {
-  if (!iso) return null;
-  return new Date(iso).toLocaleString('en-IN', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
-}
-
-function formatDate(d: string | null) {
-  if (!d) return null;
-  return new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-}
 
 function Card({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -1059,7 +1048,7 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
                             </span>
                           )}
                           <span className={`text-xs font-medium ${isOverdue ? 'text-red-600' : isCompleted ? 'text-stone-400' : 'text-stone-600'}`}>
-                            {reminderDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                            {formatDate(reminderDate.toISOString())}
                           </span>
                         </div>
 

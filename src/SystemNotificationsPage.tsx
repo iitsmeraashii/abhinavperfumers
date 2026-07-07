@@ -4,6 +4,7 @@ import {
   AlertCircle, AlertTriangle, Info, Search, X,
   ChevronDown, ChevronUp, Loader2, BellOff, RefreshCw,
 } from 'lucide-react';
+import { formatDateTimeWithSeconds } from './utils/dateFormat';
 
 interface SystemNotification {
   id: string;
@@ -50,10 +51,7 @@ function getConfig(type: string) {
 }
 
 function formatTimestamp(iso: string) {
-  return new Date(iso).toLocaleString('en-IN', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
-  });
+  return formatDateTimeWithSeconds(iso) ?? iso;
 }
 
 function getTimeRangeStart(range: TimeRange): string | null {

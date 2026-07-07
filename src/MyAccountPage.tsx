@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from './AuthContext';
 import { useEvent, type AppEvent } from './EventContext';
+import { formatDateShort, formatDateLong } from './utils/dateFormat';
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
 
@@ -189,7 +190,7 @@ function EventSelect({
                   <p className={`text-xs truncate mt-0.5 ${isSel ? 'text-stone-300' : 'text-stone-400'}`}>
                     {ev.event_code}
                     {ev.start_date
-                      ? ` · ${new Date(ev.start_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`
+                      ? ` · ${formatDateShort(ev.start_date)}`
                       : ''}
                   </p>
                 </div>
@@ -215,10 +216,7 @@ function EventSelect({
 
 function EventDetailsCard({ event }: { event: AppEvent }) {
   function fmt(d: string | null) {
-    if (!d) return '—';
-    return new Date(d).toLocaleDateString('en-IN', {
-      day: 'numeric', month: 'long', year: 'numeric',
-    });
+    return formatDateLong(d) ?? '—';
   }
 
   return (

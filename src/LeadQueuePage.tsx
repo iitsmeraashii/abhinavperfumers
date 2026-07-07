@@ -109,7 +109,7 @@ function relativeTime(iso: string): string {
   if (diff < 60_000)      return 'just now';
   if (diff < 3_600_000)   return `${Math.round(diff / 60_000)}m ago`;
   if (diff < 86_400_000)  return `${Math.round(diff / 3_600_000)}h ago`;
-  return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  return new Date(iso).toLocaleDateString(Intl.DateTimeFormat().resolvedOptions().locale, { day: 'numeric', month: 'short', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
 }
 
 function MethodIcon({ method }: { method: QueueItem['captureMethod'] }) {

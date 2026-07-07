@@ -1,5 +1,6 @@
 import { Camera, QrCode, ClipboardList, ArrowLeft, Wifi, WifiOff, Clock } from 'lucide-react';
 import type { CaptureMethod, CaptureSession } from './types';
+import { formatTimeWithSeconds } from '../utils/dateFormat';
 
 const METHOD_META: Record<CaptureMethod, {
   icon: React.ReactNode;
@@ -97,7 +98,7 @@ export function CapturePlaceholder({ session, isOnline, onBack }: Props) {
               <span className="flex items-center gap-1 text-xs text-stone-500">
                 <Clock className="w-3 h-3" />
                 {session.createdAt
-                  ? session.createdAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                  ? formatTimeWithSeconds(session.createdAt)
                   : '—'}
               </span>
             </div>

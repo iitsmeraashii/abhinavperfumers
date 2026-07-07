@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from './supabaseClient';
 import { Bell, CheckCircle2, X, Loader2, AlertCircle, CalendarDays, User, FileText } from 'lucide-react';
+import { formatDate } from './utils/dateFormat';
 
 interface FollowUp {
   id: string;
@@ -60,9 +61,6 @@ export default function FollowUpCompleteModal({ followUpId, onClose }: Props) {
     setCompleting(false);
   }
 
-  function formatDate(iso: string) {
-    return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">

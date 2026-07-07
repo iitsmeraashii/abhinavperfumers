@@ -16,6 +16,7 @@ import {
 } from './leadEvidenceService';
 import { addVoiceMemo, addImageNote } from './addEvidenceService';
 import { transcribeVoiceNote } from './voiceTranscriptionService';
+import { formatDateTime, formatDate } from '../utils/dateFormat';
 
 // ─── Lightbox ─────────────────────────────────────────────────────────────────
 
@@ -208,10 +209,7 @@ function AudioPlayer({ src }: { src: string }) {
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
 function fmtDateTime(iso: string) {
-  return new Date(iso).toLocaleString('en-IN', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
+  return formatDateTime(iso) ?? iso;
 }
 
 function CardTimestamp({ iso }: { iso: string }) {
@@ -719,7 +717,7 @@ function ImageNoteEvidenceCard({
   evidence: ImageNoteEvidence;
   onOpenLightbox: (images: { url: string; label: string }[], index: number) => void;
 }) {
-  const label = `Notes Image · ${new Date(evidence.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`;
+  const label = `Notes Image · ${formatDate(evidence.createdAt) ?? evidence.createdAt}`;
 
   return (
     <div className="bg-white border border-stone-200 rounded-xl overflow-hidden">

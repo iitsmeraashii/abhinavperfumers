@@ -5,6 +5,7 @@ import {
   ChevronLeft, ChevronRight, Loader2, Inbox,
   Search, X, ChevronDown, SlidersHorizontal, Download,
 } from 'lucide-react';
+import { formatDateTime, nowFormatted } from './utils/dateFormat';
 
 interface Lead {
   id: string;
@@ -450,7 +451,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (applied.dateTo) filterLines.push(`Date To: ${applied.dateTo}`);
     if (user.role === 'sales_rep') filterLines.push(`Sales Rep: ${user.rep_code}`);
 
-    const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const now = nowFormatted();
     const commentLines = [
       `# Leads Export`,
       `# Exported At: ${now}`,
@@ -567,7 +568,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
 
   function formatDate(iso: string) {
     if (!iso) return '—';
-    return new Date(iso).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+    return formatDateTime(iso) ?? '—';
   }
 
   // Build the URL for a lead detail link (preserves all current list params)

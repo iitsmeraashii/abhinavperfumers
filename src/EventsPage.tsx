@@ -5,6 +5,7 @@ import {
   X, Save, FileText, Lock, Info, Trash2, Users, TrendingUp,
   ThermometerSun, BarChart2, ArrowRight, Globe, ChevronLeft,
 } from 'lucide-react';
+import { formatDateShort } from './utils/dateFormat';
 
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
@@ -120,8 +121,7 @@ function formChanged(a: FormState, b: FormState) {
 }
 
 function fmt(d: string | null) {
-  if (!d) return '—';
-  return new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  return formatDateShort(d) ?? '—';
 }
 
 function pct(n: number, total: number) {
