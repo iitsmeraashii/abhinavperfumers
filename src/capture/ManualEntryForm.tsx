@@ -1175,6 +1175,17 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
         <SessionStatusBar session={session} isOnline={isOnline} />
       </div>
 
+      {d.qrExtractionEmpty && (
+        <div className="mt-3 max-w-lg mx-auto flex items-start gap-2.5 px-4 py-3 rounded-xl
+          bg-blue-50 border border-blue-200">
+          <AlertCircle className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
+          <p className="text-xs font-medium text-blue-700 leading-relaxed">
+            No contact information was extracted from the QR scan. This lead will be saved
+            with <span className="font-semibold">Requires Review</span> status for verification.
+          </p>
+        </div>
+      )}
+
       {/* ═══ Sticky bottom action bar ═══ */}
       <div
         className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur border-t border-stone-200

@@ -121,6 +121,8 @@ export interface DraftData {
   /** Overall AI extraction confidence (0–1 float). Set from VisionResult.fields.confidence. */
   extractionConfidence?: number;
   rawQr?:               string;
+  /** True when a QR scan produced no extractable contact fields. Set once at scan time, persists through manual edits. */
+  qrExtractionEmpty?:   boolean;
   [key: string]: unknown;
 }
 

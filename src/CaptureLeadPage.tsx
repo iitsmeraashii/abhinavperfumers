@@ -424,6 +424,8 @@ export default function CaptureLeadPage() {
       website:     String(f.website     ?? '').trim() || undefined,
       address:     String(f.address     ?? '').trim() || undefined,
       rawQr:       parsed.raw,
+      qrExtractionEmpty: !f.clientName && !f.company && !f.phone
+        && !f.email && !f.designation && !f.notes && !f.website && !f.address,
     };
     const draft = Object.fromEntries(
       Object.entries(mappedDraft).filter(([, v]) => v !== undefined),

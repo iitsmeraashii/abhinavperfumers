@@ -373,13 +373,15 @@ function executeValidationStage(ctx: ProcessingContext): void {
  * Review Stage — evaluates whether the captured lead requires manual review.
  *
  * Delegates to reviewEngine (CaptureReviewEngine) which applies the configured
- * rule set. Currently one rule: LOW_CONFIDENCE fires when AI extraction
- * confidence falls below ReviewConfig.minimumConfidence (default 50).
+ * rule set:
+ *   - QR_NO_EXTRACTION: fires when a QR scan produced no contact fields.
+ *   - LOW_CONFIDENCE: fires when AI extraction confidence falls below
+ *     ReviewConfig.minimumConfidence (default 50).
  *
  * Confidence is read from draftData.extractionConfidence (0–1 float stored at
  * card capture time). The value is normalised to 0–100 before evaluation.
- * When confidence is absent (manual entry, QR, or not yet propagated), the rule
- * cannot fire and review.required is false.
+ * When confidence is absent (manual entry, QR, or not yet propagated), the
+ * LOW_CONFIDENCE rule cannot fire — but QR_NO_EXTRACTION still can.
  *
  * Non-terminal — writes ctx.review; does not write ctx.result.
  */
@@ -392,7 +394,7 @@ function executeReviewStage(ctx: ProcessingContext): void {
         : rawConfidence          // already 0-100
       : null;
 
-  ctx.review = reviewEngine.evaluate(confidencePercent);
+  ctx.review = reviewEngine.evaluate(ctx.session.draftData, confidencePercent);
 }
 
 /**

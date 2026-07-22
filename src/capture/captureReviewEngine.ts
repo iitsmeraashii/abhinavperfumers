@@ -4,10 +4,14 @@
 // Rules are stateless; configuration is injected at construction time.
 //
 // Current rules:
-//   LOW_CONFIDENCE — fires when AI extraction confidence is below minimumConfidence.
+//   LOW_CONFIDENCE   — fires when AI extraction confidence is below minimumConfidence.
+//   QR_NO_EXTRACTION — fires when a QR scan produced no contact fields, even if
+//                      the rep entered data manually afterward.
 //
 // Future rules (not yet implemented):
 //   MISSING_REQUIRED_FIELDS, AMBIGUOUS_CONTACT, etc.
+
+import type { DraftData } from './types';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -23,7 +27,8 @@ export const DEFAULT_REVIEW_CONFIG: ReviewConfig = {
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export enum ReviewReason {
-  LOW_CONFIDENCE = 'LOW_CONFIDENCE',
+  LOW_CONFIDENCE   = 'LOW_CONFIDENCE',
+  QR_NO_EXTRACTION = 'QR_NO_EXTRACTION',
 }
 
 export interface ReviewResult {
@@ -50,11 +55,24 @@ class CaptureReviewEngine {
   /**
    * Evaluate review rules for a capture session.
    *
-   * @param extractionConfidence  AI extraction confidence on a 0–100 scale,
-   *                              or null if no AI extraction occurred.
+   * @param data                 Full DraftData — needed for QR_NO_EXTRACTION rule.
+   * @param extractionConfidence AI extraction confidence on a 0–100 scale,
+   *                             or null if no AI extraction occurred.
    * @returns ReviewResult — always non-null; required=false when no rule fires.
    */
-  evaluate(extractionConfidence: number | null): ReviewResult {
+  evaluate(data: DraftData, extractionConfidence: number | null): ReviewResult {
+    // Rule: QR_NO_EXTRACTION
+    // Fires when a QR scan was captured but produced no extractable contact
+    // fields. The rep may have entered data manually — the lead is still
+    // flagged REQUIRES_REVIEW so an admin can verify the raw QR payload.
+    if (data.qrExtractionEmpty) {
+      return {
+        required:   true,
+        reason:     ReviewReason.QR_NO_EXTRACTION,
+        confidence: null,
+      };
+    }
+
     // Rule: LOW_CONFIDENCE
     // Fires only when AI extraction confidence is known and below the minimum.
     // When confidence is null (manual entry, QR, or confidence not yet
