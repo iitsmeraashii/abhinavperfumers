@@ -1,15 +1,18 @@
 // Capture Validation Engine — single source of truth for capture promotion eligibility.
 //
-// A capture is valid if it contains at least one piece of meaningful data:
+// A capture is valid ONLY if it contains at least one contact identifier:
 //
-//   Contact Information:
-//     clientName, company, phone, email, address, website
+//   Required identifiers (at least one):
+//     clientName, company, phone
 //
-//   Notes:
-//     text notes
+//   Supplementary data (not sufficient on their own):
+//     email, address, website, notes, voice note, notes image,
+//     business card photo, QR code payload
 //
-//   Evidence:
-//     business card (front or back asset ID), QR code, voice note, notes image
+// Evidence (a scanned QR, a card photo) is NOT enough by itself — extraction
+// may have failed or not completed, leaving the lead with no identifiable
+// contact. The rep must have at least a name, company, or phone number to
+// save a lead in CRM mode.
 //
 // This module has no React dependency — it operates on DraftData only.
 // Integrate via validationEngine singleton; do not duplicate rules elsewhere.
@@ -33,31 +36,18 @@ export interface ValidationResult {
 
 export class CaptureValidationEngine {
   validate(data: DraftData): ValidationResult {
-    const hasContact =
-      !!String(data.clientName ?? '').trim() ||
-      !!String(data.company    ?? '').trim() ||
-      !!String(data.phone      ?? '').trim() ||
-      !!String(data.email      ?? '').trim() ||
-      !!String(data.address    ?? '').trim() ||
-      !!String(data.website    ?? '').trim();
+    const hasName    = !!String(data.clientName ?? '').trim();
+    const hasCompany = !!String(data.company    ?? '').trim();
+    const hasPhone   = !!String(data.phone      ?? '').trim();
 
-    const hasNotes = !!String(data.notes ?? '').trim();
-
-    const hasEvidence =
-      !!data.cardFrontAssetId      ||   // business card front
-      !!data.cardBackAssetId       ||   // business card back
-      !!data.rawQr                 ||   // QR code
-      (data.voiceNoteDurationMs != null && data.voiceNoteDurationMs > 0) ||  // voice note
-      !!data.notesImageDataUrl;         // notes image
-
-    if (hasContact || hasNotes || hasEvidence) {
+    if (hasName || hasCompany || hasPhone) {
       return { valid: true };
     }
 
     return {
       valid: false,
       error: {
-        message: 'Add at least a name, phone, company, or note before saving',
+        message: 'At least one identifier is required — enter a name, company, or phone number to save this lead',
       },
     };
   }

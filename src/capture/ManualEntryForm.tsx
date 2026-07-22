@@ -785,6 +785,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const address         = String(d.address  ?? '');
 
   const hasDraftData = !!(clientName || company || phone || notes || notesImage);
+  const hasIdentifier = !!(clientName.trim() || company.trim() || phone.trim());
   const backendSessionId = session.sync.backendSessionId;
 
   // Authoritative transcription state derived solely from capture_assets.transcription_status.
@@ -1180,6 +1181,11 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
           px-4 pt-3 md:relative md:mt-6 md:border-t-0 md:bg-transparent md:backdrop-blur-none md:px-0 md:pt-0"
         style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}
       >
+        {!hasIdentifier && (
+          <p className="max-w-lg mx-auto mb-2 text-center text-xs font-medium text-amber-600">
+            Enter at least a name, company, or phone number to save this lead
+          </p>
+        )}
         <div className="max-w-lg mx-auto flex gap-3">
           <button
             type="button"
@@ -1196,11 +1202,11 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
           <button
             type="button"
             onClick={handleSaveAndNext}
-            disabled={saving}
+            disabled={saving || !hasIdentifier}
             className="flex-[2] flex items-center justify-center gap-2 py-3.5 rounded-xl
               bg-stone-900 text-white text-sm font-semibold shadow-sm
               hover:bg-stone-800 active:bg-stone-950 active:scale-[0.98]
-              transition-all duration-150 disabled:opacity-50"
+              transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {saving ? (
               <>
