@@ -35,6 +35,7 @@ import {
   processCaptureSession,
 } from './capture/captureProcessingEngine';
 import type { ExtractionSyncCallbacks, ProcessingContext } from './capture/captureProcessingEngine';
+import { profileEngine } from './capture/captureProfileEngine';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
@@ -227,6 +228,7 @@ export default function CaptureLeadPage() {
     }
 
     actions.restoreSession(normalised);
+    profileEngine.resolve(normalised.captureProfile);
     setPendingDraft(null);
     addEntryRef.current('User continued recovered draft', { method: normalised.captureMethod });
 
@@ -263,6 +265,7 @@ export default function CaptureLeadPage() {
   // ── Method selection ──────────────────────────────────────────────────────
   const handleMethodSelect = useCallback(async (method: CaptureMethod) => {
     form.handleReset();
+    profileEngine.resolve(sessionRef.current.captureProfile);
 
     if (method === 'QR') {
       addEntryRef.current('QR scanner opened');
@@ -328,6 +331,7 @@ export default function CaptureLeadPage() {
     }
     form.handleReset();
     actions.resetSession();
+    profileEngine.reset();
     setQrScanning(false);
   }, [actions, form, isOnline, makeSyncCbs]);
 
@@ -344,6 +348,7 @@ export default function CaptureLeadPage() {
     await clearDraft();
     form.handleReset();
     actions.resetSession();
+    profileEngine.reset();
     setQrScanning(false);
   }, [actions, form, cardSessionId, isOnline, makeSyncCbs]);
 
@@ -404,6 +409,7 @@ export default function CaptureLeadPage() {
 
     form.handleReset();
     actions.resetSession();
+    profileEngine.reset();
     setQrScanning(false);
     setCardSessionId('');
     setCardAssets({ front: null, back: null });

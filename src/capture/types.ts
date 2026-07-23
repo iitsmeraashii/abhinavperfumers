@@ -1,6 +1,7 @@
 // ─── Capture method / status ──────────────────────────────────────────────────
 
-export type { CaptureProfile } from './captureProfile';
+import type { CaptureProfile } from './captureProfile';
+export type { CaptureProfile };
 
 export type CaptureMethod = 'BUSINESS_CARD' | 'QR' | 'MANUAL';
 

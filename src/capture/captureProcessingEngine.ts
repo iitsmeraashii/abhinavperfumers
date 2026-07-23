@@ -33,9 +33,7 @@
 
 import { evidenceManager }            from './captureEvidenceManager';
 import { extractionCoordinator }       from './captureExtractionCoordinator';
-import { reviewEngine }                from './captureReviewEngine';
 import type { ReviewResult }           from './captureReviewEngine';
-import { validationEngine }            from './captureValidationEngine';
 import {
   syncUpsertVisionExtraction,
   syncUpsertOcrExtraction,
@@ -45,10 +43,10 @@ import {
 import type { SyncCallbacks }          from './captureBackendSync';
 import { enqueueOp }                   from './captureOfflineQueue';
 import { executePromotion }            from './capturePromotionService';
-import type { PromoteSessionOptions }  from './capturePromotionService';
+import { profileEngine }               from './captureProfileEngine';
+import type { CaptureProfileStrategies } from './profileStrategies';
 import { buildCompletedLead, saveCompletedLead } from './completedLeadsStorage';
 import type {
-  BackendSyncState,
   BusinessCardAsset,
   CaptureSession,
   OcrResult,
@@ -350,16 +348,16 @@ function executeExtractionStage(ctx: ProcessingContext): void {
 /**
  * Validation Stage — gates promotion on data completeness.
  *
- * Delegates to validationEngine (CaptureValidationEngine) which is the single
- * source of truth for what constitutes a promotable capture. If validation fails,
- * writes ctx.result immediately so processCaptureSession can return early —
- * Review and Promotion stages do not execute.
+ * Delegates to the active profile's ValidationStrategy, which in turn calls
+ * the shared CaptureValidationEngine. If validation fails, writes ctx.result
+ * immediately so processCaptureSession can return early — Review and
+ * Promotion stages do not execute.
  *
  * Terminal when invalid — writes ctx.result with outcome 'failed'.
  * Non-terminal when valid — does not write ctx.result.
  */
-function executeValidationStage(ctx: ProcessingContext): void {
-  const result = validationEngine.validate(ctx.session.draftData);
+function executeValidationStage(ctx: ProcessingContext, strategies: CaptureProfileStrategies): void {
+  const result = strategies.validation.validate(ctx.session.draftData);
   if (!result.valid) {
     ctx.result = {
       outcome: 'failed',
@@ -372,8 +370,8 @@ function executeValidationStage(ctx: ProcessingContext): void {
 /**
  * Review Stage — evaluates whether the captured lead requires manual review.
  *
- * Delegates to reviewEngine (CaptureReviewEngine) which applies the configured
- * rule set:
+ * Delegates to the active profile's ReviewStrategy, which in turn calls the
+ * shared CaptureReviewEngine. The engine applies the configured rule set:
  *   - QR_NO_EXTRACTION: fires when a QR scan produced no contact fields.
  *   - LOW_CONFIDENCE: fires when AI extraction confidence falls below
  *     ReviewConfig.minimumConfidence (default 50).
@@ -385,7 +383,7 @@ function executeValidationStage(ctx: ProcessingContext): void {
  *
  * Non-terminal — writes ctx.review; does not write ctx.result.
  */
-function executeReviewStage(ctx: ProcessingContext): void {
+function executeReviewStage(ctx: ProcessingContext, strategies: CaptureProfileStrategies): void {
   const rawConfidence = ctx.session.draftData.extractionConfidence;
   const confidencePercent =
     typeof rawConfidence === 'number'
@@ -394,13 +392,15 @@ function executeReviewStage(ctx: ProcessingContext): void {
         : rawConfidence          // already 0-100
       : null;
 
-  ctx.review = reviewEngine.evaluate(ctx.session.draftData, confidencePercent);
+  ctx.review = strategies.review.evaluate(ctx.session.draftData, confidencePercent);
 }
 
 /**
  * Promotion Stage — inserts the lead_entries row and updates the capture session.
  *
- * Owns all promotion branching:
+ * Builds promotion options via the active profile's PromotionStrategy, then
+ * delegates execution to the shared executePromotion service. Owns all
+ * promotion branching:
  *   - Offline: queues a promote_session op (with requiresReview) and returns 'queued'.
  *   - Online retryable error: same — queue and return 'queued'.
  *   - Online non-retryable error: returns 'failed'.
@@ -408,10 +408,10 @@ function executeReviewStage(ctx: ProcessingContext): void {
  *
  * Terminal stage — writes ctx.result. Never throws.
  */
-async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
+async function executePromotionStage(ctx: ProcessingContext, strategies: CaptureProfileStrategies): Promise<void> {
   const { session, backendSessionId, eventCode, eventId, eventName, completedLeadId, isOnline } = ctx;
 
-  const promotionOptions: PromoteSessionOptions = {
+  const promotionOptions = strategies.promotion.buildOptions({
     backendSessionId,
     draftData:      session.draftData,
     eventCode,
@@ -420,7 +420,7 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
     eventId,
     eventName,
     requiresReview: ctx.review?.required ?? false,
-  };
+  });
 
   const _queuePromotion = async (): Promise<void> => {
     const lead = buildCompletedLead(
@@ -464,7 +464,8 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
 /**
  * Single entry point for lead capture processing at Save & Next.
  *
- * Orchestrates pipeline stages in sequence. Each stage enriches the shared
+ * Resolves the active profile's strategies from the ProfileEngine, then
+ * orchestrates pipeline stages in sequence. Each stage enriches the shared
  * ProcessingContext. The terminal stage writes ctx.result, returned to the UI.
  *
  *   1. Evidence Stage    — notes image upload
@@ -476,12 +477,13 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
 export async function processCaptureSession(
   ctx: ProcessingContext,
 ): Promise<ProcessingResult> {
+  const strategies = profileEngine.getStrategies();
   executeEvidenceStage(ctx);
   executeExtractionStage(ctx);
-  executeValidationStage(ctx);
+  executeValidationStage(ctx, strategies);
   if (ctx.result) return ctx.result;   // validation failed — skip Review + Promotion
-  executeReviewStage(ctx);
-  await executePromotionStage(ctx);
+  executeReviewStage(ctx, strategies);
+  await executePromotionStage(ctx, strategies);
   // ctx.result is always set by executePromotionStage
   return ctx.result!;
 }
