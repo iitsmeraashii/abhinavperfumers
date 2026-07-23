@@ -71,6 +71,9 @@ export default function CaptureLeadPage() {
   const [qrScanning, setQrScanning] = useState(false);
   const [lastScan, setLastScan] = useState<ParsedContact | null>(null);
 
+  const qrSectionRef = useRef<HTMLDivElement>(null);
+  const cardSectionRef = useRef<HTMLDivElement>(null);
+
   const { log, addEntry, clearLog } = useDebugLog();
   const [cardSessionId, setCardSessionId] = useState<string>('');
   const [cardAssets, setCardAssets] = useState<{ front: BusinessCardAsset | null; back: BusinessCardAsset | null }>({ front: null, back: null });
@@ -648,6 +651,18 @@ export default function CaptureLeadPage() {
   const showManualForm   = isCapturing && session.captureMethod === 'MANUAL';
   const showBusinessCard = isCapturing && session.captureMethod === 'BUSINESS_CARD';
 
+  useEffect(() => {
+    if (showQrScanner && qrSectionRef.current) {
+      qrSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [showQrScanner]);
+
+  useEffect(() => {
+    if (showBusinessCard && cardSectionRef.current) {
+      cardSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [showBusinessCard]);
+
   return (
     <div className="min-h-[calc(100vh-57px)] bg-stone-50 flex flex-col">
       <OfflineBanner visible={!isOnline} pendingCount={pendingSyncCount} isFlushing={isFlushing} />
@@ -669,6 +684,7 @@ export default function CaptureLeadPage() {
         />
 
         {showQrScanner && (
+          <div ref={qrSectionRef}>
           <Suspense fallback={
             <div className="mt-6 flex items-center justify-center py-16 text-stone-400 text-sm">
               Loading scanner…
@@ -683,6 +699,7 @@ export default function CaptureLeadPage() {
               }}
             />
           </Suspense>
+          </div>
         )}
 
         {showManualForm && (
@@ -699,6 +716,7 @@ export default function CaptureLeadPage() {
         )}
 
         {showBusinessCard && (
+          <div ref={cardSectionRef}>
           <BusinessCardCapture
             session={session}
             sessionId={cardSessionId}
@@ -713,6 +731,7 @@ export default function CaptureLeadPage() {
             onOcrDiagnostics={setOcrDiagnostics}
             onDebugLog={(step, detail, level) => addEntry(step, detail, level)}
           />
+          </div>
         )}
 
         {!isCapturing && (
