@@ -4,8 +4,9 @@ import {
   CheckCircle2, Wifi, WifiOff, Trash2, ChevronDown, ChevronRight,
   Mic, Square, Camera, X, Image as ImageIcon,
   Flame, Thermometer, Snowflake,
-  Plus, ArrowRight, Loader2, AlertCircle,
+  ArrowRight, Loader2, AlertCircle,
   Globe, MapPin,
+  UserPlus, FileText, Layers, Sparkles,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import type { CaptureSession, DraftData, LeadTemperature, LeadType, ApplicationOption } from './types';
@@ -29,11 +30,33 @@ function inputCls(hasError = false) {
   ].join(' ');
 }
 
-function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+const SECTION_STYLES = {
+  contact:    { badge: 'bg-stone-100 text-stone-600', icon: <UserPlus className="w-4 h-4" /> },
+  notes:      { badge: 'bg-stone-100 text-stone-600', icon: <FileText className="w-4 h-4" /> },
+  additional: { badge: 'bg-stone-100 text-stone-600', icon: <Layers className="w-4 h-4" /> },
+} as const;
+
+function SectionHeader({
+  title, subtitle, step, sectionKey,
+}: {
+  title: string;
+  subtitle?: string;
+  step: number;
+  sectionKey: keyof typeof SECTION_STYLES;
+}) {
+  const style = SECTION_STYLES[sectionKey];
   return (
-    <div className="mb-4">
-      <h3 className="text-sm font-semibold text-stone-800">{title}</h3>
-      {subtitle && <p className="text-xs text-stone-400 mt-0.5">{subtitle}</p>}
+    <div className="flex items-center gap-3">
+      <div className={`flex items-center justify-center w-8 h-8 rounded-lg shrink-0 ${style.badge}`}>
+        {style.icon}
+      </div>
+      <div>
+        <h3 className="text-sm font-semibold text-stone-800 leading-tight">
+          <span className="text-stone-400 font-mono text-xs mr-1.5">{step}</span>
+          {title}
+        </h3>
+        {subtitle && <p className="text-xs text-stone-400 mt-0.5">{subtitle}</p>}
+      </div>
     </div>
   );
 }
@@ -78,16 +101,16 @@ function SessionStatusBar({ session, isOnline }: { session: CaptureSession; isOn
 
 // ─── Lead temperature pills ───────────────────────────────────────────────────
 
-const TEMP_OPTIONS: { value: LeadTemperature; label: string; icon: React.ReactNode; color: string; activeColor: string }[] = [
-  { value: 'Hot',  label: 'Hot',  icon: <Flame className="w-4 h-4" />,       color: 'text-stone-500', activeColor: 'bg-red-600 text-white ring-red-200' },
-  { value: 'Warm', label: 'Warm', icon: <Thermometer className="w-4 h-4" />, color: 'text-stone-500', activeColor: 'bg-amber-500 text-white ring-amber-200' },
-  { value: 'Cold', label: 'Cold', icon: <Snowflake className="w-4 h-4" />,   color: 'text-stone-500', activeColor: 'bg-sky-500 text-white ring-sky-200' },
+const TEMP_OPTIONS: { value: LeadTemperature; label: string; icon: React.ReactNode; activeColor: string; inactiveColor: string }[] = [
+  { value: 'Hot',  label: 'Hot',  icon: <Flame className="w-4 h-4" />,       activeColor: 'bg-red-600 text-white ring-red-200',     inactiveColor: 'border-red-200 bg-red-50/40 text-red-600 hover:bg-red-50' },
+  { value: 'Warm', label: 'Warm', icon: <Thermometer className="w-4 h-4" />, activeColor: 'bg-amber-500 text-white ring-amber-200', inactiveColor: 'border-amber-200 bg-amber-50/40 text-amber-600 hover:bg-amber-50' },
+  { value: 'Cold', label: 'Cold', icon: <Snowflake className="w-4 h-4" />,   activeColor: 'bg-sky-500 text-white ring-sky-200',     inactiveColor: 'border-sky-200 bg-sky-50/40 text-sky-600 hover:bg-sky-50' },
 ];
 
 function LeadTemperaturePicker({ value, onChange }: { value?: LeadTemperature; onChange: (v: LeadTemperature) => void }) {
   return (
     <div>
-      <FieldLabel label="Lead Temperature" optional />
+      <FieldLabel label="Lead Temperature" />
       <div className="grid grid-cols-3 gap-2">
         {TEMP_OPTIONS.map(opt => {
           const active = value === opt.value;
@@ -100,7 +123,7 @@ function LeadTemperaturePicker({ value, onChange }: { value?: LeadTemperature; o
                 transition-all duration-150 ring-2 active:scale-[0.97]
                 ${active
                   ? `${opt.activeColor} shadow-sm`
-                  : 'bg-white border border-stone-200 text-stone-600 ring-transparent hover:border-stone-300'}`}
+                  : `border ${opt.inactiveColor} ring-transparent`}`}
             >
               {opt.icon}
               {opt.label}
@@ -555,24 +578,32 @@ function PriceRangeInput({
 
 // ─── Lead type selector ───────────────────────────────────────────────────────
 
+const LEAD_TYPE_OPTIONS: { value: LeadType; label: string; activeColor: string; inactiveColor: string }[] = [
+  { value: 'NEW',      label: 'New',      activeColor: 'bg-emerald-600 text-white ring-emerald-200',     inactiveColor: 'border-emerald-200 bg-emerald-50/40 text-emerald-700 hover:bg-emerald-50' },
+  { value: 'EXISTING', label: 'Existing', activeColor: 'bg-stone-700 text-white ring-stone-300',         inactiveColor: 'border-stone-300 bg-stone-50/60 text-stone-600 hover:bg-stone-100' },
+];
+
 function LeadTypePicker({ value, onChange }: { value?: LeadType; onChange: (v: LeadType) => void }) {
   return (
     <div>
-      <FieldLabel label="Lead Type" optional />
+      <FieldLabel label="Lead Type" />
       <div className="grid grid-cols-2 gap-2">
-        {(['NEW', 'EXISTING'] as const).map(t => {
-          const active = value === t;
+        {LEAD_TYPE_OPTIONS.map(opt => {
+          const active = value === opt.value;
           return (
             <button
-              key={t}
+              key={opt.value}
               type="button"
-              onClick={() => onChange(t)}
-              className={`py-3 rounded-xl text-sm font-semibold transition-all duration-150 active:scale-[0.97]
+              onClick={() => onChange(opt.value)}
+              className={`flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-all duration-150 ring-2 active:scale-[0.97]
                 ${active
-                  ? 'bg-stone-900 text-white shadow-sm'
-                  : 'bg-white border border-stone-200 text-stone-600 hover:border-stone-300'}`}
+                  ? `${opt.activeColor} shadow-sm`
+                  : `border ${opt.inactiveColor} ring-transparent`}`}
             >
-              {t}
+              {opt.value === 'NEW'
+                ? <Sparkles className="w-4 h-4" />
+                : <UserPlus className="w-4 h-4" />}
+              {opt.label}
             </button>
           );
         })}
@@ -712,10 +743,12 @@ function TagArrayInput({ label, values, onChange, placeholder }: {
 
 function CollapsibleSection({
   title,
+  step,
   defaultOpen,
   children,
 }: {
   title: string;
+  step: number;
   defaultOpen?: boolean;
   children: React.ReactNode;
 }) {
@@ -725,10 +758,16 @@ function CollapsibleSection({
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-5 py-4 text-left
+        className="w-full flex items-center gap-3 px-5 py-4 text-left
           hover:bg-stone-50 transition-colors"
       >
-        <span className="text-sm font-semibold text-stone-700">{title}</span>
+        <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-stone-100 text-stone-600">
+          <Layers className="w-4 h-4" />
+        </div>
+        <span className="text-sm font-semibold text-stone-700 flex-1">
+          <span className="text-stone-400 font-mono text-xs mr-1.5">{step}</span>
+          {title}
+        </span>
         {open
           ? <ChevronDown className="w-4 h-4 text-stone-400" />
           : <ChevronRight className="w-4 h-4 text-stone-400" />}
@@ -942,10 +981,33 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
 
       <div className="space-y-4">
 
-        {/* ═══ Section 1 — Priority Details ═══ */}
+        {/* ═══ Section 1 — Lead Classification (highlighted) ═══ */}
+        <div className="bg-amber-50/60 rounded-2xl border border-amber-200/70 shadow-sm overflow-hidden">
+          <div className="px-5 pt-5 pb-4 border-b border-amber-100">
+            <SectionHeader title="Lead Classification" subtitle="Is this a new or existing lead? How hot is it?" step={1} sectionKey="contact" />
+          </div>
+          <div className="px-5 py-5 space-y-4">
+            <LeadTypePicker
+              value={leadType}
+              onChange={v => handlePatchDraft({ leadType: v })}
+            />
+            {leadType === 'EXISTING' && (
+              <PreviousRepSelect
+                value={previousRepCode}
+                onChange={code => handleChange('previousRepCode', code)}
+              />
+            )}
+            <LeadTemperaturePicker
+              value={leadTemperature}
+              onChange={v => handlePatchDraft({ leadTemperature: v })}
+            />
+          </div>
+        </div>
+
+        {/* ═══ Section 2 — Contact Details ═══ */}
         <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
           <div className="px-5 pt-5 pb-4 border-b border-stone-100 flex items-center justify-between">
-            <SectionHeader title="Contact Details" subtitle="Capture key info first" />
+            <SectionHeader title="Contact Details" subtitle="Capture key info first" step={2} sectionKey="contact" />
             <DraftSaveIndicator state={saveState} />
           </div>
 
@@ -1068,18 +1130,13 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
               </div>
             </div>
 
-            {/* Lead Temperature */}
-            <LeadTemperaturePicker
-              value={leadTemperature}
-              onChange={v => handlePatchDraft({ leadTemperature: v })}
-            />
           </div>
         </div>
 
-        {/* ═══ Section 2 — Quick Notes ═══ */}
+        {/* ═══ Section 3 — Quick Notes ═══ */}
         <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
           <div className="px-5 pt-5 pb-4 border-b border-stone-100">
-            <SectionHeader title="Quick Notes" subtitle="Discussion summary, requirements, follow-ups" />
+            <SectionHeader title="Quick Notes" subtitle="Discussion summary, requirements, follow-ups" step={3} sectionKey="notes" />
           </div>
           <div className="px-5 py-5 space-y-5">
             {/* Text notes */}
@@ -1118,19 +1175,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
         </div>
 
         {/* ═══ Section 3 — Additional Details (Collapsible) ═══ */}
-        <CollapsibleSection title="Additional Details (Optional)" defaultOpen={import.meta.env.VITE_ADDITIONAL_DETAILS_OPEN === 'true'}>
-          <LeadTypePicker
-            value={leadType}
-            onChange={v => handlePatchDraft({ leadType: v })}
-          />
-
-          {leadType === 'EXISTING' && (
-            <PreviousRepSelect
-              value={previousRepCode}
-              onChange={code => handleChange('previousRepCode', code)}
-            />
-          )}
-
+        <CollapsibleSection title="Additional Details (Optional)" step={4} defaultOpen={import.meta.env.VITE_ADDITIONAL_DETAILS_OPEN === 'true'}>
           <ApplicationChips
             selected={application}
             onChange={v => handlePatchDraft({ application: v })}
