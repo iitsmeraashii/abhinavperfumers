@@ -66,6 +66,15 @@ class VoiceEvidenceManager {
   ): void {
     if (!audioBlob || audioBlob.size === 0) return;
     this._pending = { sessionId, audioBlob, mimeType, durationMs };
+
+    // When online, upload + transcribe immediately so the user can see the
+    // transcript while still filling out the form. The polling in
+    // ManualEntryForm picks up status transitions from the DB.
+    if (navigator.onLine) {
+      const pending = this._pending;
+      this._pending = null;
+      void this._uploadAndTranscribe(sessionId, pending.audioBlob, pending.mimeType, pending.durationMs);
+    }
   }
 
   /**
