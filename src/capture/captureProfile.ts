@@ -1,18 +1,16 @@
-// Capture Profile — centralized definition of operating behaviour for the
+// Capture Profile — centralized definition of operating profile for the
 // lead capture module.
 //
-// A Capture Profile determines:
-//   - which capture journey to display
-//   - whether the UI waits for AI/OCR processing before presenting results
-//   - future per-profile defaults (e.g. auto-advance, field visibility)
+// A Capture Profile is an identifier that selects a strategy bundle from the
+// Profile Engine. The strategy bundle — NOT this descriptor — determines
+// runtime behaviour (validation rules, review thresholds, upload timing,
+// queue policy, promotion options, etc.).
 //
-// A Capture Profile is NOT network connectivity. Connectivity is a runtime
-// capability that only determines whether background processing executes
-// immediately or waits. Both profiles use the same backend pipeline.
-//
-// Supported profiles:
-//   CRM        — accuracy first; rep reviews extraction results before saving
-//   EXHIBITION — speed first; capture is non-blocking; processing happens later
+// This file contains ONLY presentation metadata: human-readable labels,
+// icons, colours, and help text for a future profile-switcher UI. No
+// property here is read by any runtime code path. Adding a new profile
+// means adding a new union member + descriptor entry here and a new
+// strategy bundle in profileStrategies.ts — nothing else.
 
 // ─── Type ─────────────────────────────────────────────────────────────────────
 
@@ -23,32 +21,42 @@ export type CaptureProfile = 'CRM' | 'EXHIBITION';
 
 export const DEFAULT_CAPTURE_PROFILE: CaptureProfile = 'CRM';
 
-// ─── Profile descriptors ──────────────────────────────────────────────────────
-// Stable metadata about each profile. Future code should read from here rather
-// than switch on the literal string, so behaviour stays co-located with the type.
+// ─── Profile descriptors (presentation only) ──────────────────────────────────
+// Stable display metadata for each profile. Never read at runtime for
+// behavioural decisions — all behaviour lives in the strategy layer
+// (profileStrategies.ts). This metadata exists for future UI surfaces
+// (profile switcher, settings page, help tooltips).
 
 export interface CaptureProfileDescriptor {
-  /** Human-readable label shown in future profile-switcher UI. */
-  label: string;
-  /** One-line purpose description. */
-  purpose: string;
-  /** Whether the UI waits for AI/OCR extraction before showing the review form. */
-  waitForExtraction: boolean;
-  /** Whether the capture journey skips the review form and saves immediately. */
-  skipReview: boolean;
+  /** Unique profile identifier — matches the CaptureProfile union member. */
+  id:          CaptureProfile;
+  /** Human-readable label shown in UI. */
+  displayName: string;
+  /** Short tagline for profile-switcher cards. */
+  tagline:     string;
+  /** Longer description for tooltips / help text. */
+  description: string;
+  /** Lucide icon name for the profile (rendered by the UI layer). */
+  icon:        string;
+  /** Tailwind color token for branding the profile card. */
+  color:       string;
 }
 
 export const CAPTURE_PROFILE_DESCRIPTORS: Record<CaptureProfile, CaptureProfileDescriptor> = {
   CRM: {
-    label:             'CRM',
-    purpose:           'Accuracy first — rep reviews extracted data before saving.',
-    waitForExtraction: true,
-    skipReview:        false,
+    id:          'CRM',
+    displayName: 'CRM',
+    tagline:     'Accuracy first',
+    description: 'Rep reviews extracted data before saving. Ideal for relationship-driven sales where data quality matters most.',
+    icon:        'Contact',
+    color:       'blue',
   },
   EXHIBITION: {
-    label:             'Exhibition',
-    purpose:           'Speed first — capture is non-blocking; processing happens later.',
-    waitForExtraction: false,
-    skipReview:        true,
+    id:          'EXHIBITION',
+    displayName: 'Exhibition',
+    tagline:     'Speed first',
+    description: 'Capture is non-blocking; processing happens later. Ideal for high-traffic trade show booths where throughput is the priority.',
+    icon:        'Zap',
+    color:       'amber',
   },
 };
