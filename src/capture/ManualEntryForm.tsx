@@ -1118,7 +1118,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
         </div>
 
         {/* ═══ Section 3 — Additional Details (Collapsible) ═══ */}
-        <CollapsibleSection title="Additional Details (Optional)">
+        <CollapsibleSection title="Additional Details (Optional)" defaultOpen={import.meta.env.VITE_ADDITIONAL_DETAILS_OPEN === 'true'}>
           <LeadTypePicker
             value={leadType}
             onChange={v => handlePatchDraft({ leadType: v })}
