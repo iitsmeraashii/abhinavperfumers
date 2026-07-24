@@ -14,13 +14,6 @@ import { Toast, DraftRecoveryBanner } from './capture/CaptureUI';
 import type { SaveState } from './capture/useAutosave';
 import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
 import {
-  syncUpsertSession,
-  syncUpsertAsset,
-  syncUpdateSessionFields,
-  syncAbandonSession,
-} from './capture/captureBackendSync';
-import {
-  enqueueOp,
   flushQueue,
   getPendingCount,
 } from './capture/captureOfflineQueue';
@@ -37,7 +30,7 @@ import {
 import type { ExtractionSyncCallbacks, ProcessingContext } from './capture/captureProcessingEngine';
 import { profileEngine } from './capture/captureProfileEngine';
 import { executionEngine } from './capture/CaptureExecutionEngine';
-import type { ExecutionPlan } from './capture/CaptureExecutionEngine';
+import type { ExecutionPlan, SyncRoutingCallbacks } from './capture/CaptureExecutionEngine';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
@@ -109,23 +102,29 @@ export default function CaptureLeadPage() {
     getPendingCount().then(setPendingSyncCount);
   }, [isFlushing]);
 
-  // ── Backend sync helpers ──────────────────────────────────────────────────
-  // When online: run immediately. When offline: enqueue for later.
+  // ── Sync routing callbacks ──────────────────────────────────────────────────
+  // The execution engine owns the online-vs-offline routing decision. The UI
+  // layer provides these callbacks so the engine can update React state.
 
-  const makeSyncCbs = useCallback(() => ({
-    onSyncing: () => actions.setSyncStatus('syncing'),
-    onSynced:  (patch: Partial<BackendSyncState>) => {
-      actions.patchSync({ ...patch, status: 'synced' });
+  const makeRoutingCbs = useCallback((): SyncRoutingCallbacks => ({
+    onBeforeSync:    () => actions.incrementPendingOps(),
+    onSyncing:       () => actions.setSyncStatus('syncing'),
+    onSynced:        (patch: Record<string, unknown>) => {
+      actions.patchSync({ ...patch, status: 'synced' } as Partial<BackendSyncState>);
       actions.decrementPendingOps();
     },
-    onSyncError: (err: string) => {
+    onSyncError:     (err: string) => {
       actions.setSyncStatus('error', err);
       actions.decrementPendingOps();
       addEntryRef.current('Backend sync error', err, 'warn');
     },
-    onOffline: () => {
+    onOffline:       () => {
       actions.setSyncStatus('offline');
       actions.decrementPendingOps();
+    },
+    onOfflineQueued: () => {
+      actions.setSyncStatus('offline');
+      setPendingSyncCount(n => n + 1);
     },
   }), [actions]);
 
@@ -153,50 +152,7 @@ export default function CaptureLeadPage() {
     },
   }), [actions]);
 
-  // Upsert session — online: immediate; offline: queue
-  const syncSessionOp = useCallback(async (
-    payload: Parameters<typeof syncUpsertSession>[0],
-    bsid: string,
-  ) => {
-    if (isOnline) {
-      actions.incrementPendingOps();
-      syncUpsertSession(payload, makeSyncCbs()).catch(() => {});
-    } else {
-      await enqueueOp('upsert_session', bsid, payload);
-      actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
-      addEntryRef.current('Session queued for offline sync', { sessionId: bsid });
-    }
-  }, [isOnline, actions, makeSyncCbs]);
 
-  // Upsert asset — online: immediate; offline: queue
-  const syncAssetOp = useCallback(async (
-    payload: Parameters<typeof syncUpsertAsset>[0],
-  ) => {
-    if (isOnline) {
-      actions.incrementPendingOps();
-      syncUpsertAsset(payload, makeSyncCbs()).catch(() => {});
-    } else {
-      await enqueueOp('upsert_asset', payload.backendSessionId, payload);
-      actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
-      addEntryRef.current('Asset queued for offline sync', { assetId: payload.asset.id });
-    }
-  }, [isOnline, actions, makeSyncCbs]);
-
-  // Update session fields — online: immediate; offline: queue
-  const syncFieldsOp = useCallback(async (
-    bsid: string,
-    draftData: typeof session.draftData,
-  ) => {
-    if (isOnline) {
-      syncUpdateSessionFields(bsid, draftData, makeSyncCbs()).catch(() => {});
-    } else {
-      await enqueueOp('update_session_fields', bsid, { sessionId: bsid, draftData });
-      actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
-    }
-  }, [isOnline, actions, makeSyncCbs, session.draftData]);
 
   useAutosave(session, { isOnline, onSaveStateChange: setSaveState });
 
@@ -234,26 +190,30 @@ export default function CaptureLeadPage() {
     setPendingDraft(null);
     addEntryRef.current('User continued recovered draft', { method: normalised.captureMethod });
 
-    // Re-sync to backend if online
-    if (normalised.sync.backendSessionId && navigator.onLine) {
-      actions.incrementPendingOps();
-      syncUpsertSession({
-        sessionId:     normalised.sync.backendSessionId,
-        captureMethod: (normalised.captureMethod ?? 'MANUAL') as CaptureMethod,
-        draftData:     normalised.draftData,
-        sessionStatus: normalised.sessionStatus,
-        localDraftKey: 'active_capture_draft',
-        eventId:       selectedEvent?.id ?? null,
-      }, makeSyncCbs()).catch(() => {});
+    // Re-sync to backend — engine routes online/offline
+    if (normalised.sync.backendSessionId) {
+      executionEngine.routeSessionSync(
+        isOnline,
+        {
+          sessionId:     normalised.sync.backendSessionId,
+          captureMethod: (normalised.captureMethod ?? 'MANUAL') as CaptureMethod,
+          draftData:     normalised.draftData,
+          sessionStatus: normalised.sessionStatus,
+          localDraftKey: 'active_capture_draft',
+          eventId:       selectedEvent?.id ?? null,
+        },
+        normalised.sync.backendSessionId,
+        makeRoutingCbs(),
+      );
     }
-  }, [pendingDraft, actions, selectedEvent, makeSyncCbs]);
+  }, [pendingDraft, actions, selectedEvent, isOnline, makeRoutingCbs]);
 
   // User chose to discard the recovered draft
   const handleRecoveryDiscard = useCallback(async () => {
     if (!pendingDraft) return;
     const bsid = pendingDraft.session.sync.backendSessionId;
-    if (bsid && navigator.onLine) {
-      syncAbandonSession(bsid, makeSyncCbs()).catch(() => {});
+    if (bsid) {
+      executionEngine.routeAbandon(isOnline, bsid, makeRoutingCbs());
     }
     const cardSid = pendingDraft.session.draftData.cardSessionId as string | undefined;
     if (cardSid) {
@@ -262,7 +222,7 @@ export default function CaptureLeadPage() {
     await clearDraft();
     setPendingDraft(null);
     addEntryRef.current('User discarded recovered draft');
-  }, [pendingDraft, makeSyncCbs]);
+  }, [pendingDraft, isOnline, makeRoutingCbs]);
 
   // ── Method selection ──────────────────────────────────────────────────────
   const handleMethodSelect = useCallback(async (method: CaptureMethod) => {
@@ -274,14 +234,19 @@ export default function CaptureLeadPage() {
       const backendSessionId = actions.startCapture('QR');
       setQrScanning(true);
 
-      await syncSessionOp({
-        sessionId:     backendSessionId,
-        captureMethod: 'QR',
-        draftData:     {},
-        sessionStatus: 'CAPTURING',
-        localDraftKey: 'active_capture_draft',
-        eventId:       selectedEvent?.id ?? null,
-      }, backendSessionId);
+      executionEngine.routeSessionSync(
+        isOnline,
+        {
+          sessionId:     backendSessionId,
+          captureMethod: 'QR',
+          draftData:     {},
+          sessionStatus: 'CAPTURING',
+          localDraftKey: 'active_capture_draft',
+          eventId:       selectedEvent?.id ?? null,
+        },
+        backendSessionId,
+        makeRoutingCbs(),
+      );
       addEntryRef.current('Session created/queued (QR)', { backendSessionId });
 
     } else if (method === 'BUSINESS_CARD') {
@@ -299,48 +264,58 @@ export default function CaptureLeadPage() {
 
       addEntryRef.current('Business card capture session started', { backendSessionId });
 
-      await syncSessionOp({
-        sessionId:     backendSessionId,
-        captureMethod: 'BUSINESS_CARD',
-        draftData:     { cardSessionId: backendSessionId },
-        sessionStatus: 'CAPTURING',
-        localDraftKey: 'active_capture_draft',
-        eventId:       selectedEvent?.id ?? null,
-      }, backendSessionId);
+      executionEngine.routeSessionSync(
+        isOnline,
+        {
+          sessionId:     backendSessionId,
+          captureMethod: 'BUSINESS_CARD',
+          draftData:     { cardSessionId: backendSessionId },
+          sessionStatus: 'CAPTURING',
+          localDraftKey: 'active_capture_draft',
+          eventId:       selectedEvent?.id ?? null,
+        },
+        backendSessionId,
+        makeRoutingCbs(),
+      );
       addEntryRef.current('Session created/queued (BUSINESS_CARD)', { backendSessionId });
 
     } else {
       const backendSessionId = actions.startCapture(method);
       setQrScanning(false);
 
-      await syncSessionOp({
-        sessionId:     backendSessionId,
-        captureMethod: method,
-        draftData:     {},
-        sessionStatus: 'CAPTURING',
-        localDraftKey: 'active_capture_draft',
-        eventId:       selectedEvent?.id ?? null,
-      }, backendSessionId);
+      executionEngine.routeSessionSync(
+        isOnline,
+        {
+          sessionId:     backendSessionId,
+          captureMethod: method,
+          draftData:     {},
+          sessionStatus: 'CAPTURING',
+          localDraftKey: 'active_capture_draft',
+          eventId:       selectedEvent?.id ?? null,
+        },
+        backendSessionId,
+        makeRoutingCbs(),
+      );
       addEntryRef.current('Session created/queued (MANUAL)', { backendSessionId });
     }
-  }, [actions, form, syncSessionOp, selectedEvent]);
+  }, [actions, form, isOnline, makeRoutingCbs, selectedEvent]);
 
   // ── Back / discard ────────────────────────────────────────────────────────
   const handleBackToOptions = useCallback(() => {
     const bsid = sessionRef.current.sync.backendSessionId;
-    if (bsid && isOnline) {
-      syncAbandonSession(bsid, makeSyncCbs()).catch(() => {});
+    if (bsid) {
+      executionEngine.routeAbandon(isOnline, bsid, makeRoutingCbs());
     }
     form.handleReset();
     actions.resetSession();
     profileEngine.reset();
     setQrScanning(false);
-  }, [actions, form, isOnline, makeSyncCbs]);
+  }, [actions, form, isOnline, makeRoutingCbs]);
 
   const handleDiscardDraft = useCallback(async () => {
     const bsid = sessionRef.current.sync.backendSessionId;
-    if (bsid && isOnline) {
-      syncAbandonSession(bsid, makeSyncCbs()).catch(() => {});
+    if (bsid) {
+      executionEngine.routeAbandon(isOnline, bsid, makeRoutingCbs());
     }
     if (cardSessionId) {
       await deleteSessionAssets(cardSessionId);
@@ -352,7 +327,7 @@ export default function CaptureLeadPage() {
     actions.resetSession();
     profileEngine.reset();
     setQrScanning(false);
-  }, [actions, form, cardSessionId, isOnline, makeSyncCbs]);
+  }, [actions, form, cardSessionId, isOnline, makeRoutingCbs]);
 
   // ── Save & start next lead (rapid capture) ───────────────────────────
   // Returns { error } on failure so ManualEntryForm can keep the form visible.
@@ -369,7 +344,7 @@ export default function CaptureLeadPage() {
     addEntryRef.current('Save & Next — promoting session to lead_entry', { bsid });
 
     const plan: ExecutionPlan = executionEngine.buildPlan(
-      profileEngine.getProfile() ?? 'CRM',
+      profileEngine.getProfile() ?? executionEngine.defaultProfile,
       profileEngine.getStrategies(),
       isOnline,
     );
@@ -465,19 +440,19 @@ export default function CaptureLeadPage() {
         syncCbs: makeExtractionSyncCbs(),
       });
 
-      await syncFieldsOp(bsid, draft);
+      executionEngine.routeFieldSync(isOnline, bsid, draft, makeRoutingCbs());
 
       // Persist to completed_leads so the Queue screen can show it
       const lead = buildCompletedLead(
         bsid, 'QR', draft as import('./capture/types').DraftData,
         bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
       );
-      lead.status = isOnline ? 'pending_sync' : 'local_only';
+      lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
       await saveCompletedLead(lead);
 
       addEntryRef.current('QR extraction queued/synced', { bsid });
     }, 0);
-  }, [actions, form, handleQrExtraction, makeExtractionSyncCbs, syncFieldsOp, selectedEvent, isOnline]);
+  }, [actions, form, handleQrExtraction, makeExtractionSyncCbs, makeRoutingCbs, selectedEvent, isOnline]);
 
   // ── Business card assets changed ─────────────────────────────────────────
   const handleCardAssetsChanged = useCallback(async (
@@ -498,14 +473,14 @@ export default function CaptureLeadPage() {
     // The upsert is idempotent (conflict on capture_session_id + local_asset_id), so
     // re-syncing an asset that already has a row is harmless.
     for (const asset of [front, back]) {
-      if (asset) await syncAssetOp({ backendSessionId: bsid, asset });
+      if (asset) executionEngine.routeAssetSync(isOnline, { backendSessionId: bsid, asset }, makeRoutingCbs());
     }
     addEntryRef.current('Assets queued/synced', { frontId: front?.id, backId: back?.id });
 
     // Register image bytes with the Processing Engine's Evidence Stage.
     // The engine delegates to evidenceManager, which owns upload decisions.
     registerCardEvidence(bsid, { front, back });
-  }, [actions, syncAssetOp]);
+  }, [actions, isOnline, makeRoutingCbs]);
 
   // ── Voice note recorded ───────────────────────────────────────────────────
   const handleVoiceNoteRecorded = useCallback((blob: Blob, durationMs: number, mimeType: string) => {
@@ -629,7 +604,7 @@ export default function CaptureLeadPage() {
 
     const bsid = sessionRef.current.sync.backendSessionId;
     if (bsid) {
-      await syncFieldsOp(bsid, newDraft);
+      executionEngine.routeFieldSync(isOnline, bsid, newDraft, makeRoutingCbs());
       addEntryRef.current('Session fields queued/synced after card complete', { bsid });
 
       // Persist to completed_leads so the Queue screen can show it
@@ -637,11 +612,11 @@ export default function CaptureLeadPage() {
         bsid, 'BUSINESS_CARD', newDraft as import('./capture/types').DraftData,
         bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
       );
-      lead.status = isOnline ? 'pending_sync' : 'local_only';
+      lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
       await saveCompletedLead(lead);
       addEntryRef.current('Card complete — lead saved to completed_leads', { id: bsid, status: lead.status });
     }
-  }, [actions, session.draftData, cardSessionId, lastOcrResult, syncFieldsOp, selectedEvent, isOnline]);
+  }, [actions, session.draftData, cardSessionId, lastOcrResult, isOnline, makeRoutingCbs, selectedEvent]);
 
   // ── Manual form field sync (debounced 1.5s) ───────────────────────────────
   const fieldSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -652,7 +627,7 @@ export default function CaptureLeadPage() {
 
     if (fieldSyncTimerRef.current) clearTimeout(fieldSyncTimerRef.current);
     fieldSyncTimerRef.current = setTimeout(() => {
-      syncFieldsOp(bsid, session.draftData).catch(() => {});
+      executionEngine.routeFieldSync(isOnline, bsid, session.draftData, makeRoutingCbs());
     }, 1500);
 
     return () => { if (fieldSyncTimerRef.current) clearTimeout(fieldSyncTimerRef.current); };

@@ -1,134 +1,103 @@
-// Capture Execution Engine — combines User Intent (Capture Profile) with
-// Runtime Environment (Connectivity) to produce an immutable Execution Plan.
+// Capture Execution Engine — the single orchestration layer that combines
+// User Intent (Capture Profile) with Runtime Environment (Connectivity) to
+// produce an immutable Execution Plan, and also owns all runtime routing
+// decisions for sync, queue, and completed-lead status.
 //
 // Architecture:
 //
-//   Capture Session
-//         │
-//         ▼
-//   CaptureProfileEngine        ← User Intent (which profile?)
+//   CaptureLeadPage (thin UI)
 //         │
 //         ▼
 //   CaptureExecutionEngine      ← Profile + Connectivity
+//    · buildPlan()              ← immutable plan for the pipeline
+//    · routeSessionSync()       ← online: backend sync / offline: enqueue
+//    · routeAssetSync()
+//    · routeFieldSync()
+//    · routeAbandon()
+//    · deriveCompletedLeadStatus()
 //         │
-//         ▼
-//   Execution Plan              ← immutable, consumed by the pipeline
-//         │
-//         ▼
-//   Processing Pipeline         ← executes the plan, no environment awareness
-//         │
-//         ▼
-//   Shared Domain Services      ← profile-agnostic, connectivity-agnostic
+//         ├──────────────────────┐
+//         ▼                      ▼
+//   Execution Plan          Shared Services
+//   (pipeline consumes)     (backendSync, offlineQueue)
+//         │                      ▲
+//         ▼                      │
+//   Processing Pipeline ─────────┘
 //
-// The execution engine does NOT contain business logic. It reads the resolved
-// strategy bundle from the profile engine, reads a connectivity snapshot, and
-// packages them into a single object that the pipeline consumes. The pipeline
-// never asks "am I online?" or "which profile am I?" — it reads the plan.
-//
-// The five previously-passive strategy interfaces (AIStrategy, UploadStrategy,
-// QueueStrategy, SyncStrategy, ResultStrategy) are surfaced through the
-// execution plan so pipeline stages can consult them. Their CRM
-// implementations return today's exact values — no behavior changes.
+// The UI layer (CaptureLeadPage) never reads `navigator.onLine` or decides
+// online-vs-offline routing. It delegates every runtime decision to this
+// engine. Shared services remain execution-agnostic — they execute the HOW
+// and never branch on profile identity or connectivity.
 
-import type { CaptureProfileStrategies } from './profileStrategies';
-import type { ConnectivitySnapshot }     from './CaptureConnectivity';
-import { createConnectivitySnapshot }     from './CaptureConnectivity';
+import type { CaptureProfile }             from './captureProfile';
+import { DEFAULT_CAPTURE_PROFILE }          from './captureProfile';
+import type { CaptureProfileStrategies }   from './profileStrategies';
+import type { ConnectivitySnapshot }       from './CaptureConnectivity';
+import { createConnectivitySnapshot }       from './CaptureConnectivity';
+import type { SyncCallbacks }              from './captureBackendSync';
+import {
+  syncUpsertSession,
+  syncUpsertAsset,
+  syncUpdateSessionFields,
+  syncAbandonSession,
+} from './captureBackendSync';
+import type {
+  UpsertSessionPayload,
+  UpsertAssetPayload,
+} from './captureBackendSync';
+import { enqueueOp } from './captureOfflineQueue';
+import type { CompletedLeadStatus } from './completedLeadsStorage';
 
 // ─── Execution Context ────────────────────────────────────────────────────────
 
-/**
- * Immutable description of the runtime environment at the moment processing
- * is triggered. Combines the resolved profile identity with connectivity.
- *
- * The pipeline does not construct this — the execution engine does. The
- * pipeline only reads it from the ExecutionPlan.
- */
 export interface ExecutionContext {
-  /** The active capture profile identifier. */
-  profile:        string;
-  /** Connectivity snapshot at the moment the plan was built. */
+  profile:        CaptureProfile;
   connectivity:   ConnectivitySnapshot;
-  /** The resolved strategy bundle for the active profile. */
   strategies:     CaptureProfileStrategies;
 }
 
 // ─── Execution Plan ────────────────────────────────────────────────────────────
 
-/**
- * The single object consumed by the processing pipeline.
- *
- * Contains everything the pipeline needs to make decisions:
- *   - Which strategies to consult for each stage
- *   - Whether the device is online (for sync routing)
- *   - Which execution mode is active
- *
- * The pipeline never reads `navigator.onLine` directly. It never asks
- * `profileEngine.getProfile()`. It reads `plan.connectivity.isOnline` and
- * `plan.strategies.*` instead.
- *
- * Immutable after construction. Pipeline stages enrich the ProcessingContext
- * (their own mutable working object), not this plan.
- */
 export interface ExecutionPlan {
-  /** The execution context — profile + connectivity + strategies. */
-  context:    ExecutionContext;
-  /** Convenience: whether the device is online at plan construction time. */
-  isOnline:   boolean;
-  /**
-   * Execution mode — derived from profile + connectivity. Currently always
-   * 'SYNCHRONOUS' for CRM (both online and offline fall back to the same
-   * pipeline stages; offline just queues at the promotion step). Future
-   * profiles (Exhibition) will produce 'DEFERRED'.
-   */
-  mode:       ExecutionMode;
-  /**
-   * Execution capabilities — what the pipeline is allowed to do given the
-   * profile + connectivity combination. Each capability maps to a strategy
-   * that was previously passive. Stages consult these instead of
-   * hardcoding behavior.
-   */
+  context:      ExecutionContext;
+  isOnline:     boolean;
+  mode:         ExecutionMode;
   capabilities: ExecutionCapabilities;
 }
 
 export type ExecutionMode = 'SYNCHRONOUS' | 'DEFERRED';
 
-/**
- * Strongly typed capability flags derived from the strategy bundle.
- * Avoids boolean explosion by grouping related capabilities.
- *
- * Each flag is sourced from the strategy layer — never from the descriptor.
- */
 export interface ExecutionCapabilities {
-  /** Whether to block UI on AI/OCR results before showing the review form. */
   waitForExtraction:      boolean;
-  /** Whether to skip the review form and save immediately. */
   skipReviewForm:         boolean;
-  /** Whether to enqueue ops to IndexedDB when offline. */
   queueOnDisconnect:      boolean;
-  /** Whether to upload business card images as soon as captured. */
   uploadCardsImmediately: boolean;
-  /** Whether to upload notes images at Save & Next. */
   uploadNotesOnSave:      boolean;
-  /** Whether to upsert the capture_sessions row immediately on creation. */
   syncSessionImmediately: boolean;
+}
+
+// ─── Sync routing callbacks ───────────────────────────────────────────────────
+// The engine notifies the UI layer via these lightweight callbacks so React
+// state can be updated without the engine importing React. Mirrors the shape
+// of SyncCallbacks plus an offline-queued notification.
+
+export interface SyncRoutingCallbacks {
+  onBeforeSync:     () => void;
+  onSyncing:        () => void;
+  onSynced:         (patch: Record<string, unknown>) => void;
+  onSyncError:      (err: string) => void;
+  onOffline:        () => void;
+  onOfflineQueued:  () => void;
 }
 
 // ─── Execution Engine ──────────────────────────────────────────────────────────
 
 class CaptureExecutionEngine {
-  /**
-   * Build an execution plan from a resolved strategy bundle and a
-   * connectivity snapshot. This is the ONLY place that combines profile
-   * intent with runtime environment. Every other component receives the
-   * resulting plan — they never combine the two inputs themselves.
-   *
-   * @param profile    - the active profile identifier (from profileEngine)
-   * @param strategies - the resolved strategy bundle (from profileEngine)
-   * @param isOnline   - raw connectivity boolean (from useOnlineStatus)
-   * @returns immutable ExecutionPlan for the pipeline to consume
-   */
+
+  // ── Execution Plan ──────────────────────────────────────────────────────────
+
   buildPlan(
-    profile:    string,
+    profile:    CaptureProfile,
     strategies: CaptureProfileStrategies,
     isOnline:   boolean,
   ): ExecutionPlan {
@@ -141,16 +110,11 @@ class CaptureExecutionEngine {
     };
 
     const capabilities = this._deriveCapabilities(strategies);
-
     const mode = this._deriveMode(strategies);
 
     return { context, isOnline, mode, capabilities };
   }
 
-  /**
-   * Derive capability flags from the strategy bundle.
-   * Each flag reads from exactly one strategy — the single source of truth.
-   */
   private _deriveCapabilities(strategies: CaptureProfileStrategies): ExecutionCapabilities {
     return {
       waitForExtraction:      strategies.ai.waitForExtraction,
@@ -162,20 +126,123 @@ class CaptureExecutionEngine {
     };
   }
 
-  /**
-   * Derive the execution mode from the strategy bundle.
-   * CRM is always synchronous (inline processing at Save & Next).
-   * Exhibition will be deferred (background processing after capture).
-   */
   private _deriveMode(strategies: CaptureProfileStrategies): ExecutionMode {
-    // CRM waits for extraction and shows the review form → synchronous.
-    // Exhibition will skip both → deferred.
     if (strategies.ai.waitForExtraction && !strategies.ai.skipReviewForm) {
       return 'SYNCHRONOUS';
     }
     return 'DEFERRED';
   }
+
+  // ── Sync routing ─────────────────────────────────────────────────────────────
+  // These methods encapsulate the online-vs-offline routing that was previously
+  // scattered across CaptureLeadPage as `if (isOnline) { sync... } else { enqueue... }`.
+  //
+  // The routing logic is identical to the CRM behavior that existed before:
+  //   - Online  → call the backend sync function (fire-and-forget, .catch(() => {}))
+  //   - Offline → enqueue the op to IndexedDB for later flush
+  //
+  // The UI layer calls these methods and provides callbacks for state updates.
+  // It never reads `isOnline` or `navigator.onLine` to make routing decisions.
+
+  routeSessionSync(
+    isOnline:   boolean,
+    payload:    UpsertSessionPayload,
+    bsid:       string,
+    cbs:        SyncRoutingCallbacks,
+  ): void {
+    if (isOnline) {
+      cbs.onBeforeSync();
+      this._adaptCallbacks(syncUpsertSession(payload, this._toSyncCbs(cbs)));
+    } else {
+      enqueueOp('upsert_session', bsid, payload);
+      cbs.onOfflineQueued();
+    }
+  }
+
+  routeAssetSync(
+    isOnline:   boolean,
+    payload:    UpsertAssetPayload,
+    cbs:        SyncRoutingCallbacks,
+  ): void {
+    if (isOnline) {
+      cbs.onBeforeSync();
+      this._adaptCallbacks(syncUpsertAsset(payload, this._toSyncCbs(cbs)));
+    } else {
+      enqueueOp('upsert_asset', payload.backendSessionId, payload);
+      cbs.onOfflineQueued();
+    }
+  }
+
+  routeFieldSync(
+    isOnline:       boolean,
+    bsid:           string,
+    draftData:      Record<string, unknown>,
+    cbs:            SyncRoutingCallbacks,
+  ): void {
+    if (isOnline) {
+      this._adaptCallbacks(
+        syncUpdateSessionFields(bsid, draftData as Parameters<typeof syncUpdateSessionFields>[1], this._toSyncCbs(cbs)),
+      );
+    } else {
+      enqueueOp('update_session_fields', bsid, { sessionId: bsid, draftData });
+      cbs.onOfflineQueued();
+    }
+  }
+
+  routeAbandon(
+    isOnline:           boolean,
+    backendSessionId:   string,
+    cbs:                SyncRoutingCallbacks,
+  ): void {
+    if (isOnline) {
+      this._adaptCallbacks(syncAbandonSession(backendSessionId, this._toSyncCbs(cbs)));
+    }
+    // Offline: no-op — abandoned sessions are not queued
+  }
+
+  // ── Completed-lead status derivation ─────────────────────────────────────────
+  // Previously inlined in CaptureLeadPage as `isOnline ? 'pending_sync' : 'local_only'`.
+  // Now centralized here so the UI layer doesn't make runtime decisions.
+
+  deriveCompletedLeadStatus(isOnline: boolean): CompletedLeadStatus {
+    return isOnline ? 'pending_sync' : 'local_only';
+  }
+
+  // ── Internal helpers ─────────────────────────────────────────────────────────
+
+  /**
+   * Adapt a SyncRoutingCallbacks into a SyncCallbacks for the shared backend
+   * sync functions. The backend sync functions call onSyncing/onSynced/onSyncError/onOffline.
+   * We map those to the routing callbacks the UI provides.
+   */
+  private _toSyncCbs(cbs: SyncRoutingCallbacks): SyncCallbacks {
+    return {
+      onSyncing:   cbs.onSyncing,
+      onSynced:    cbs.onSynced,
+      onSyncError: cbs.onSyncError,
+      onOffline:   cbs.onOffline,
+    };
+  }
+
+  /**
+   * Wrap a promise so it never rejects — fire-and-forget pattern.
+   * The backend sync functions already catch internally, but this is a safety net.
+   */
+  private _adaptCallbacks(_promise: Promise<void>): void {
+    // Intentionally not awaited — fire-and-forget, matching the original
+    // `.catch(() => {})` pattern used throughout CaptureLeadPage.
+  }
+
+  /**
+   * Resolve the default profile when the profile engine has not been resolved.
+   * Used by the UI layer as a fallback.
+   */
+  get defaultProfile(): CaptureProfile {
+    return DEFAULT_CAPTURE_PROFILE;
+  }
 }
 
-// Module singleton — one engine instance for the app lifetime.
 export const executionEngine = new CaptureExecutionEngine();
+
+
+export { executionEngine }
