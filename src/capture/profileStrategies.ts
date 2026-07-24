@@ -181,6 +181,7 @@ class CrmResultStrategy implements ResultStrategy {
   transformResult(result: ProcessingResult): ProcessingResult {
     return result;
   }
+}
 // ─── Exhibition Profile implementation ────────────────────────────────────────
 // Speed-first: non-blocking capture, deferred extraction, all uploads on save,
 // always-queue routing, review skipped, promotion active, result pass-through.
@@ -242,8 +243,6 @@ const EXHIBITION_STRATEGIES: CaptureProfileStrategies = {
   promotion:  new ExhibitionPromotionStrategy(),
   result:     new ExhibitionResultStrategy(),
 };
-
-}
 
 const CRM_STRATEGIES: CaptureProfileStrategies = {
   validation: new CrmValidationStrategy(),

@@ -114,17 +114,6 @@ export default function CaptureLeadPage() {
     onSynced:        (patch: Record<string, unknown>) => {
       actions.patchSync({ ...patch, status: 'synced' } as Partial<BackendSyncState>);
       actions.decrementPendingOps();
-  // Seed the session's capture profile from the rep's persisted default.
-  // Fires on mount and whenever the session returns to IDLE, so leaving and
-  // reopening Capture (or backing out of a session) restores the persisted
-  // default rather than keeping a temporary override.
-  useEffect(() => {
-    if (session.sessionStatus === 'IDLE' && salesRep?.default_capture_profile) {
-      actions.setCaptureProfile(salesRep.default_capture_profile);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [salesRep?.default_capture_profile, session.sessionStatus]);
-
     },
     onSyncError:     (err: string) => {
       actions.setSyncStatus('error', err);
@@ -141,11 +130,16 @@ export default function CaptureLeadPage() {
     },
   }), [actions]);
 
-  // Extraction sync callbacks use the same SyncRoutingCallbacks as all other
-  // routing — the execution engine owns the online-vs-offline decision for
-  // extractions just as it does for sessions, assets, and field updates.
-
-
+  // Seed the session's capture profile from the rep's persisted default.
+  // Re-runs whenever the persisted default changes (My Account save) or the
+  // session returns to IDLE (back/discard/save-next), so the toggle always
+  // reflects the account-level setting at the start of every new capture.
+  useEffect(() => {
+    if (session.sessionStatus === 'IDLE') {
+      actions.setCaptureProfile(salesRep?.default_capture_profile ?? 'CRM');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [salesRep?.default_capture_profile, session.sessionStatus]);
 
   useAutosave(session, { isOnline, onSaveStateChange: setSaveState });
 
