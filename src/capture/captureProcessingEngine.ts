@@ -43,8 +43,7 @@ import {
 import type { SyncCallbacks }          from './captureBackendSync';
 import { enqueueOp }                   from './captureOfflineQueue';
 import { executePromotion }            from './capturePromotionService';
-import { profileEngine }               from './captureProfileEngine';
-import type { CaptureProfileStrategies } from './profileStrategies';
+import type { ExecutionPlan }          from './CaptureExecutionEngine';
 import { buildCompletedLead, saveCompletedLead } from './completedLeadsStorage';
 import type {
   BusinessCardAsset,
@@ -267,8 +266,13 @@ export interface ProcessingContext {
    * reference the same local record.
    */
   completedLeadId:  string;
-  /** Whether the device has network connectivity at the moment Save & Next was tapped. */
-  isOnline:         boolean;
+  /**
+   * Execution plan — combines the active profile's strategies with the
+   * connectivity snapshot. The pipeline reads all behavioral decisions
+   * and the online/offline flag from this plan. Stages never call
+   * profileEngine or navigator.onLine directly.
+   */
+  plan:             ExecutionPlan;
 
   // ── Enrichment fields — written by pipeline stages ─────────────────────────
 
@@ -356,7 +360,8 @@ function executeExtractionStage(ctx: ProcessingContext): void {
  * Terminal when invalid — writes ctx.result with outcome 'failed'.
  * Non-terminal when valid — does not write ctx.result.
  */
-function executeValidationStage(ctx: ProcessingContext, strategies: CaptureProfileStrategies): void {
+function executeValidationStage(ctx: ProcessingContext): void {
+  const strategies = ctx.plan.context.strategies;
   const result = strategies.validation.validate(ctx.session.draftData);
   if (!result.valid) {
     ctx.result = {
@@ -383,7 +388,8 @@ function executeValidationStage(ctx: ProcessingContext, strategies: CaptureProfi
  *
  * Non-terminal — writes ctx.review; does not write ctx.result.
  */
-function executeReviewStage(ctx: ProcessingContext, strategies: CaptureProfileStrategies): void {
+function executeReviewStage(ctx: ProcessingContext): void {
+  const strategies = ctx.plan.context.strategies;
   const rawConfidence = ctx.session.draftData.extractionConfidence;
   const confidencePercent =
     typeof rawConfidence === 'number'
@@ -408,8 +414,10 @@ function executeReviewStage(ctx: ProcessingContext, strategies: CaptureProfileSt
  *
  * Terminal stage — writes ctx.result. Never throws.
  */
-async function executePromotionStage(ctx: ProcessingContext, strategies: CaptureProfileStrategies): Promise<void> {
-  const { session, backendSessionId, eventCode, eventId, eventName, completedLeadId, isOnline } = ctx;
+async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
+  const { session, backendSessionId, eventCode, eventId, eventName, completedLeadId, plan } = ctx;
+  const strategies = plan.context.strategies;
+  const isOnline = plan.isOnline;
 
   const promotionOptions = strategies.promotion.buildOptions({
     backendSessionId,
@@ -477,13 +485,13 @@ async function executePromotionStage(ctx: ProcessingContext, strategies: Capture
 export async function processCaptureSession(
   ctx: ProcessingContext,
 ): Promise<ProcessingResult> {
-  const strategies = profileEngine.getStrategies();
+  const strategies = ctx.plan.context.strategies;
   executeEvidenceStage(ctx);
   executeExtractionStage(ctx);
-  executeValidationStage(ctx, strategies);
-  if (ctx.result) return ctx.result;   // validation failed — skip Review + Promotion
-  executeReviewStage(ctx, strategies);
-  await executePromotionStage(ctx, strategies);
+  executeValidationStage(ctx);
+  if (ctx.result) return strategies.result.transformResult(ctx.result);
+  executeReviewStage(ctx);
+  await executePromotionStage(ctx);
   // ctx.result is always set by executePromotionStage
-  return ctx.result!;
+  return strategies.result.transformResult(ctx.result!);
 }

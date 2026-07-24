@@ -36,6 +36,8 @@ import {
 } from './capture/captureProcessingEngine';
 import type { ExtractionSyncCallbacks, ProcessingContext } from './capture/captureProcessingEngine';
 import { profileEngine } from './capture/captureProfileEngine';
+import { executionEngine } from './capture/CaptureExecutionEngine';
+import type { ExecutionPlan } from './capture/CaptureExecutionEngine';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
@@ -366,6 +368,12 @@ export default function CaptureLeadPage() {
 
     addEntryRef.current('Save & Next — promoting session to lead_entry', { bsid });
 
+    const plan: ExecutionPlan = executionEngine.buildPlan(
+      profileEngine.getProfile() ?? 'CRM',
+      profileEngine.getStrategies(),
+      isOnline,
+    );
+
     const ctx: ProcessingContext = {
       session:          s,
       backendSessionId: bsid,
@@ -373,7 +381,7 @@ export default function CaptureLeadPage() {
       completedLeadId:  bsid,
       eventId:          selectedEvent?.id ?? null,
       eventName:        selectedEvent?.name ?? null,
-      isOnline,
+      plan,
     };
 
     const result = await processCaptureSession(ctx);
