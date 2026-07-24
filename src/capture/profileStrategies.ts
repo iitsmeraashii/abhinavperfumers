@@ -181,6 +181,68 @@ class CrmResultStrategy implements ResultStrategy {
   transformResult(result: ProcessingResult): ProcessingResult {
     return result;
   }
+// ─── Exhibition Profile implementation ────────────────────────────────────────
+// Speed-first: non-blocking capture, deferred extraction, all uploads on save,
+// always-queue routing, review skipped, promotion active, result pass-through.
+
+class ExhibitionValidationStrategy implements ValidationStrategy {
+  validate(data: DraftData): ValidationResult {
+    return validationEngine.validate(data);
+  }
+}
+
+class ExhibitionReviewStrategy implements ReviewStrategy {
+  evaluate(data: DraftData, extractionConfidence: number | null): ReviewResult {
+    return reviewEngine.evaluate(data, extractionConfidence);
+  }
+}
+
+class ExhibitionAIStrategy implements AIStrategy {
+  waitForExtraction = false;
+  skipReviewForm    = true;
+}
+
+class ExhibitionQueueStrategy implements QueueStrategy {
+  queueOnDisconnect = false;
+}
+
+class ExhibitionUploadStrategy implements UploadStrategy {
+  uploadCardsImmediately = false;
+  uploadNotesOnSave      = true;
+  uploadVoiceOnSave      = true;
+}
+
+class ExhibitionPromotionStrategy implements PromotionStrategy {
+  buildOptions(params: PromotionStrategyParams): PromoteSessionOptions {
+    return {
+      backendSessionId: params.backendSessionId,
+      draftData:        params.draftData,
+      eventCode:        params.eventCode,
+      completedLeadId:  params.completedLeadId,
+      captureMethod:    params.captureMethod as PromoteSessionOptions['captureMethod'],
+      eventId:          params.eventId,
+      eventName:        params.eventName,
+      requiresReview:   params.requiresReview,
+    };
+  }
+}
+
+class ExhibitionResultStrategy implements ResultStrategy {
+  transformResult(result: ProcessingResult): ProcessingResult {
+    return result;
+  }
+}
+
+const EXHIBITION_STRATEGIES: CaptureProfileStrategies = {
+  validation: new ExhibitionValidationStrategy(),
+  review:     new ExhibitionReviewStrategy(),
+  ai:         new ExhibitionAIStrategy(),
+  queue:      new ExhibitionQueueStrategy(),
+  upload:     new ExhibitionUploadStrategy(),
+  promotion:  new ExhibitionPromotionStrategy(),
+  result:     new ExhibitionResultStrategy(),
+};
+
 }
 
 const CRM_STRATEGIES: CaptureProfileStrategies = {
@@ -201,7 +263,8 @@ const CRM_STRATEGIES: CaptureProfileStrategies = {
 import type { CaptureProfile } from './captureProfile';
 
 const PROFILE_STRATEGY_REGISTRY: Partial<Record<CaptureProfile, CaptureProfileStrategies>> = {
-  CRM: CRM_STRATEGIES,
+  CRM:        CRM_STRATEGIES,
+  EXHIBITION: EXHIBITION_STRATEGIES,
 };
 
 export function getProfileStrategies(profile: CaptureProfile): CaptureProfileStrategies {
