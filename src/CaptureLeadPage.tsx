@@ -6,7 +6,7 @@ import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
 import { useAutosave } from './capture/useAutosave';
 import { loadDraft, clearDraft } from './capture/captureDraftStorage';
-import { deleteSessionAssets } from './capture/captureAssetStorage';
+import { deleteSessionAssets, getAsset } from './capture/captureAssetStorage';
 import { OfflineBanner } from './capture/OfflineBanner';
 import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
 import { CaptureProfileSelector } from './capture/CaptureProfileSelector';
@@ -100,7 +100,7 @@ export default function CaptureLeadPage() {
     (s: { status: string; progress: number; progressLabel: string; error: string | null }) => {
       setOcrDebug(s as typeof ocrDebug);
     },
-  const [exhibitionCardAssets, setExhibitionCardAssets] = useState<{ front: string; back: string | null }>({ front: '', back: null });
+  const [exhibitionCardImages, setExhibitionCardImages] = useState<{ front: string | null; back: string | null }>({ front: null, back: null });
     [],
   );
 
@@ -651,7 +651,11 @@ export default function CaptureLeadPage() {
       lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
       await saveCompletedLead(lead);
       addEntryRef.current('Card complete — lead saved to completed_leads', { id: bsid, status: lead.status });
-      setExhibitionCardAssets({ front: frontAssetId, back: backAssetId });
+      const [frontAsset, backAsset] = await Promise.all([
+        getAsset(frontAssetId),
+        backAssetId ? getAsset(backAssetId) : Promise.resolve(null),
+      ]);
+      setExhibitionCardImages({ front: frontAsset?.dataUrl ?? null, back: backAsset?.dataUrl ?? null });
     }
   }, [actions, session.draftData, cardSessionId, lastOcrResult, isOnline, makeRoutingCbs, queue, selectedEvent]);
 
@@ -787,8 +791,8 @@ export default function CaptureLeadPage() {
         />
       )}
 
-            frontAssetId={exhibitionCardAssets.front}
-            backAssetId={exhibitionCardAssets.back}
+            frontDataUrl={exhibitionCardImages.front}
+            backDataUrl={exhibitionCardImages.back}
       <CaptureDebugPanel
         session={session}
         lastScan={lastScan}
