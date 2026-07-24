@@ -34,16 +34,8 @@
 import { evidenceManager }            from './captureEvidenceManager';
 import { extractionCoordinator }       from './captureExtractionCoordinator';
 import type { ReviewResult }           from './captureReviewEngine';
-import {
-  syncUpsertVisionExtraction,
-  syncUpsertOcrExtraction,
-  syncUpsertQrExtraction,
-  syncUpdateSessionExtractionMeta,
-} from './captureBackendSync';
-import type { SyncCallbacks }          from './captureBackendSync';
-import { enqueueOp }                   from './captureOfflineQueue';
-import { executePromotion }            from './capturePromotionService';
-import type { ExecutionPlan }          from './CaptureExecutionEngine';
+import { executionEngine } from './CaptureExecutionEngine';
+import type { ExecutionPlan, SyncRoutingCallbacks } from './CaptureExecutionEngine';
 import { buildCompletedLead, saveCompletedLead } from './completedLeadsStorage';
 import type {
   BusinessCardAsset,
@@ -93,21 +85,17 @@ export function notifySessionReset(): void {
 
 // ─── Extraction Stage — real-time event handlers ──────────────────────────────
 // Called as extraction results arrive during capture (before Save & Next).
-// The engine owns dedup and online/offline routing; React state callbacks are
-// injected by the caller so the engine has no React dependency.
+// The engine owns dedup and delegates online/offline routing to the
+// CaptureExecutionEngine. React state callbacks are injected by the caller so
+// the engine has no React dependency.
 
 /**
- * ExtractionSyncCallbacks — extends the standard SyncCallbacks with two hooks
- * that allow CaptureLeadPage to update React state for the extraction paths.
- *
- *   onBeforeOnlineSync — called just before firing the async sync (e.g. incrementPendingOps)
- *   onOfflineQueued    — called after enqueueOp (e.g. setSyncStatus + incrementPendingCount)
+ * ExtractionSyncCallbacks — alias for SyncRoutingCallbacks. Extraction
+ * handlers use the same callback shape as all other routing methods on the
+ * execution engine. The onBeforeSync hook fires before an online sync starts;
+ * onOfflineQueued fires after an op is enqueued for offline replay.
  */
-export interface ExtractionSyncCallbacks extends SyncCallbacks {
-  onBeforeOnlineSync: () => void;
-  onOfflineQueued:    () => void;
-}
-
+export type ExtractionSyncCallbacks = SyncRoutingCallbacks;
 export type ExtractionHandlerOutcome = 'synced' | 'queued' | 'skipped';
 
 /**
@@ -116,7 +104,7 @@ export type ExtractionHandlerOutcome = 'synced' | 'queued' | 'skipped';
  * Responsibilities:
  *   - Guard: only openai_vision writes an extraction_results row
  *   - Mark this asset in the dedup set so a subsequent Tesseract row is suppressed
- *   - Route sync: online → fire-and-forget; offline → enqueue
+ *   - Delegate sync-vs-queue routing to the CaptureExecutionEngine
  */
 export async function handleVisionExtraction(params: {
   result:           VisionResult;
@@ -137,30 +125,17 @@ export async function handleVisionExtraction(params: {
   const extractionId = crypto.randomUUID();
   const payload = { extractionId, backendSessionId, backendAssetId, visionResult: result };
 
-  if (isOnline) {
-    syncCbs.onBeforeOnlineSync();
-    syncUpsertVisionExtraction(payload, {
-      onSyncing:   syncCbs.onSyncing,
-      onSynced:    syncCbs.onSynced,
-      onSyncError: syncCbs.onSyncError,
-      onOffline:   syncCbs.onOffline,
-    }).catch(() => {});
+  executionEngine.routeVisionExtraction(isOnline, backendSessionId, payload, syncCbs);
 
-    // Update session-level extraction metadata (fire-and-forget, no UI impact).
-    syncUpdateSessionExtractionMeta({
-      backendSessionId: backendSessionId,
-      source:           result.source,
-      confidence:       result.fields.confidence,
-      durationMs:       result.durationMs,
-    }, { onSyncing: () => {}, onSynced: () => {}, onSyncError: () => {}, onOffline: () => {} })
-      .catch(() => {});
+  // Update session-level extraction metadata (fire-and-forget, no UI impact).
+  executionEngine.routeVisionExtractionMeta(isOnline, {
+    backendSessionId,
+    source:           result.source,
+    confidence:       result.fields.confidence,
+    durationMs:       result.durationMs,
+  });
 
-    return 'synced';
-  }
-
-  await enqueueOp('upsert_vision_extraction', backendSessionId, payload);
-  syncCbs.onOfflineQueued();
-  return 'queued';
+  return isOnline ? 'synced' : 'queued';
 }
 
 /**
@@ -168,7 +143,7 @@ export async function handleVisionExtraction(params: {
  *
  * Responsibilities:
  *   - Dedup: skip if Vision already wrote a row for this asset
- *   - Route sync: online → fire-and-forget; offline → enqueue
+ *   - Delegate sync-vs-queue routing to the CaptureExecutionEngine
  */
 export async function handleOcrExtraction(params: {
   result:           OcrResult;
@@ -185,27 +160,16 @@ export async function handleOcrExtraction(params: {
   const extractionId = crypto.randomUUID();
   const payload = { extractionId, backendSessionId, backendAssetId, ocrResult: result };
 
-  if (isOnline) {
-    syncCbs.onBeforeOnlineSync();
-    syncUpsertOcrExtraction(payload, {
-      onSyncing:   syncCbs.onSyncing,
-      onSynced:    syncCbs.onSynced,
-      onSyncError: syncCbs.onSyncError,
-      onOffline:   syncCbs.onOffline,
-    }).catch(() => {});
-    return 'synced';
-  }
+  executionEngine.routeOcrExtraction(isOnline, backendSessionId, payload, syncCbs);
 
-  await enqueueOp('upsert_ocr_extraction', backendSessionId, payload);
-  syncCbs.onOfflineQueued();
-  return 'queued';
+  return isOnline ? 'synced' : 'queued';
 }
 
 /**
  * Handle a QR extraction result.
  *
  * Responsibilities:
- *   - Route sync: online → fire-and-forget; offline → enqueue
+ *   - Delegate sync-vs-queue routing to the CaptureExecutionEngine
  */
 export async function handleQrExtraction(params: {
   parsed:           ParsedContact;
@@ -219,20 +183,9 @@ export async function handleQrExtraction(params: {
   const extractionId = crypto.randomUUID();
   const payload = { extractionId, backendSessionId, parsed, durationMs };
 
-  if (isOnline) {
-    syncCbs.onBeforeOnlineSync();
-    syncUpsertQrExtraction(payload, {
-      onSyncing:   syncCbs.onSyncing,
-      onSynced:    syncCbs.onSynced,
-      onSyncError: syncCbs.onSyncError,
-      onOffline:   syncCbs.onOffline,
-    }).catch(() => {});
-    return 'synced';
-  }
+  executionEngine.routeQrExtraction(isOnline, backendSessionId, payload, syncCbs);
 
-  await enqueueOp('upsert_qr_extraction', backendSessionId, payload);
-  syncCbs.onOfflineQueued();
-  return 'queued';
+  return isOnline ? 'synced' : 'queued';
 }
 
 // ─── Pipeline Contract ────────────────────────────────────────────────────────
@@ -437,16 +390,17 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
     );
     lead.status = 'pending_sync';
     await saveCompletedLead(lead);
-    await enqueueOp('promote_session', backendSessionId, promotionOptions);
+    await executionEngine.routePromotion(false, backendSessionId, promotionOptions);
     ctx.result = { outcome: 'queued', leadId: null, error: null };
   };
 
-  if (!isOnline) {
+  const routeResult = await executionEngine.routePromotion(isOnline, backendSessionId, promotionOptions);
+  if (routeResult.queued) {
     await _queuePromotion();
     return;
   }
 
-  const result = await executePromotion(promotionOptions);
+  const result = routeResult.result;
 
   if (result.error) {
     const isNonRetryable =

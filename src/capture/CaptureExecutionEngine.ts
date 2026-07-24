@@ -35,15 +35,26 @@ import type { CaptureProfileStrategies }   from './profileStrategies';
 import type { ConnectivitySnapshot }       from './CaptureConnectivity';
 import { createConnectivitySnapshot }       from './CaptureConnectivity';
 import type { SyncCallbacks }              from './captureBackendSync';
+import type { BackendSyncState }           from './types';
+import type { PromoteSessionOptions, PromoteSessionResult } from './capturePromotionService';
+import { executePromotion }                 from './capturePromotionService';
 import {
   syncUpsertSession,
   syncUpsertAsset,
   syncUpdateSessionFields,
   syncAbandonSession,
+  syncUpsertVisionExtraction,
+  syncUpsertOcrExtraction,
+  syncUpsertQrExtraction,
+  syncUpdateSessionExtractionMeta,
 } from './captureBackendSync';
 import type {
   UpsertSessionPayload,
   UpsertAssetPayload,
+  UpsertVisionExtractionPayload,
+  UpsertOcrExtractionPayload,
+  UpsertQrExtractionPayload,
+  UpdateSessionExtractionMetaPayload,
 } from './captureBackendSync';
 import { enqueueOp } from './captureOfflineQueue';
 import type { CompletedLeadStatus } from './completedLeadsStorage';
@@ -84,7 +95,7 @@ export interface ExecutionCapabilities {
 export interface SyncRoutingCallbacks {
   onBeforeSync:     () => void;
   onSyncing:        () => void;
-  onSynced:         (patch: Record<string, unknown>) => void;
+  onSynced:         (patch: Partial<BackendSyncState>) => void;
   onSyncError:      (err: string) => void;
   onOffline:        () => void;
   onOfflineQueued:  () => void;
@@ -200,6 +211,99 @@ class CaptureExecutionEngine {
     // Offline: no-op — abandoned sessions are not queued
   }
 
+  // ── Extraction routing ──────────────────────────────────────────────────────
+  // These methods own the online-vs-offline routing for extraction result sync.
+  // Previously, these routing decisions lived inside the processing pipeline's
+  // extraction event handlers. Now the pipeline delegates routing to the engine.
+  //
+  // Routing logic is identical to the CRM behavior that existed before:
+  //   - Online  → fire the backend sync function (fire-and-forget)
+  //   - Offline → enqueue the op to IndexedDB for later flush
+  //
+  // The processing pipeline calls these methods and handles only extraction
+  // orchestration (dedup guards, result classification). It never branches on
+  // connectivity.
+
+  routeVisionExtraction(
+    isOnline:     boolean,
+    backendSessionId: string,
+    payload:      UpsertVisionExtractionPayload,
+    cbs:          SyncRoutingCallbacks,
+  ): void {
+    if (isOnline) {
+      cbs.onBeforeSync();
+      this._adaptCallbacks(syncUpsertVisionExtraction(payload, this._toSyncCbs(cbs)));
+    } else {
+      enqueueOp('upsert_vision_extraction', backendSessionId, payload);
+      cbs.onOfflineQueued();
+    }
+  }
+
+  routeOcrExtraction(
+    isOnline:     boolean,
+    backendSessionId: string,
+    payload:      UpsertOcrExtractionPayload,
+    cbs:          SyncRoutingCallbacks,
+  ): void {
+    if (isOnline) {
+      cbs.onBeforeSync();
+      this._adaptCallbacks(syncUpsertOcrExtraction(payload, this._toSyncCbs(cbs)));
+    } else {
+      enqueueOp('upsert_ocr_extraction', backendSessionId, payload);
+      cbs.onOfflineQueued();
+    }
+  }
+
+  routeQrExtraction(
+    isOnline:     boolean,
+    backendSessionId: string,
+    payload:      UpsertQrExtractionPayload,
+    cbs:          SyncRoutingCallbacks,
+  ): void {
+    if (isOnline) {
+      cbs.onBeforeSync();
+      this._adaptCallbacks(syncUpsertQrExtraction(payload, this._toSyncCbs(cbs)));
+    } else {
+      enqueueOp('upsert_qr_extraction', backendSessionId, payload);
+      cbs.onOfflineQueued();
+    }
+  }
+
+  routeVisionExtractionMeta(
+    isOnline:     boolean,
+    payload:      UpdateSessionExtractionMetaPayload,
+  ): void {
+    if (isOnline) {
+      this._adaptCallbacks(
+        syncUpdateSessionExtractionMeta(payload, this._silentCbs()),
+      );
+    }
+    // Offline: no-op — extraction metadata is not queued; it updates on next
+    // session sync when connectivity returns.
+  }
+
+  // ── Promotion routing ───────────────────────────────────────────────────────
+  // The processing pipeline's terminal stage delegates promotion routing here.
+  // Online  → call executePromotion directly and return the result.
+  // Offline → enqueue a 'promote_session' op for later flush.
+  //
+  // Error classification (retryable vs non-retryable) stays in the pipeline
+  // because it inspects the promotion result — a business decision, not a
+  // connectivity routing decision.
+
+  async routePromotion(
+    isOnline:         boolean,
+    backendSessionId: string,
+    options:          PromoteSessionOptions,
+  ): Promise<{ queued: true } | { queued: false; result: PromoteSessionResult }> {
+    if (!isOnline) {
+      await enqueueOp('promote_session', backendSessionId, options);
+      return { queued: true };
+    }
+    const result = await executePromotion(options);
+    return { queued: false, result };
+  }
+
   // ── Completed-lead status derivation ─────────────────────────────────────────
   // Previously inlined in CaptureLeadPage as `isOnline ? 'pending_sync' : 'local_only'`.
   // Now centralized here so the UI layer doesn't make runtime decisions.
@@ -224,6 +328,15 @@ class CaptureExecutionEngine {
     };
   }
 
+  private _silentCbs(): SyncCallbacks {
+    return {
+      onSyncing:   () => {},
+      onSynced:    () => {},
+      onSyncError: () => {},
+      onOffline:   () => {},
+    };
+  }
+
   /**
    * Wrap a promise so it never rejects — fire-and-forget pattern.
    * The backend sync functions already catch internally, but this is a safety net.
@@ -243,6 +356,3 @@ class CaptureExecutionEngine {
 }
 
 export const executionEngine = new CaptureExecutionEngine();
-
-
-export { executionEngine }

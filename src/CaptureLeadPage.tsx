@@ -27,7 +27,7 @@ import {
   handleQrExtraction,
   processCaptureSession,
 } from './capture/captureProcessingEngine';
-import type { ExtractionSyncCallbacks, ProcessingContext } from './capture/captureProcessingEngine';
+import type { ProcessingContext } from './capture/captureProcessingEngine';
 import { profileEngine } from './capture/captureProfileEngine';
 import { executionEngine } from './capture/CaptureExecutionEngine';
 import type { ExecutionPlan, SyncRoutingCallbacks } from './capture/CaptureExecutionEngine';
@@ -128,29 +128,9 @@ export default function CaptureLeadPage() {
     },
   }), [actions]);
 
-  // Extraction sync callbacks — passed to engine extraction event handlers so the
-  // engine can drive React state updates without importing React.
-  const makeExtractionSyncCbs = useCallback((): ExtractionSyncCallbacks => ({
-    onBeforeOnlineSync: () => actions.incrementPendingOps(),
-    onSyncing:          () => actions.setSyncStatus('syncing'),
-    onSynced:           (patch: Partial<BackendSyncState>) => {
-      actions.patchSync({ ...patch, status: 'synced' });
-      actions.decrementPendingOps();
-    },
-    onSyncError:        (err: string) => {
-      actions.setSyncStatus('error', err);
-      actions.decrementPendingOps();
-      addEntryRef.current('Backend sync error', err, 'warn');
-    },
-    onOffline:          () => {
-      actions.setSyncStatus('offline');
-      actions.decrementPendingOps();
-    },
-    onOfflineQueued:    () => {
-      actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
-    },
-  }), [actions]);
+  // Extraction sync callbacks use the same SyncRoutingCallbacks as all other
+  // routing — the execution engine owns the online-vs-offline decision for
+  // extractions just as it does for sessions, assets, and field updates.
 
 
 
@@ -437,7 +417,7 @@ export default function CaptureLeadPage() {
         backendSessionId: bsid,
         durationMs: Date.now() - scanStart,
         isOnline,
-        syncCbs: makeExtractionSyncCbs(),
+        syncCbs: makeRoutingCbs(),
       });
 
       executionEngine.routeFieldSync(isOnline, bsid, draft, makeRoutingCbs());
@@ -452,7 +432,7 @@ export default function CaptureLeadPage() {
 
       addEntryRef.current('QR extraction queued/synced', { bsid });
     }, 0);
-  }, [actions, form, handleQrExtraction, makeExtractionSyncCbs, makeRoutingCbs, selectedEvent, isOnline]);
+  }, [actions, form, handleQrExtraction, makeRoutingCbs, selectedEvent, isOnline]);
 
   // ── Business card assets changed ─────────────────────────────────────────
   const handleCardAssetsChanged = useCallback(async (
@@ -512,9 +492,9 @@ export default function CaptureLeadPage() {
       backendSessionId: bsid,
       backendAssetId,
       isOnline,
-      syncCbs: makeExtractionSyncCbs(),
+      syncCbs: makeRoutingCbs(),
     });
-  }, [actions, isOnline, makeExtractionSyncCbs]);
+  }, [actions, isOnline, makeRoutingCbs]);
 
   // ── Vision extraction result received ─────────────────────────────────────
   // Called for both openai_vision and tesseract_fallback.
@@ -537,9 +517,9 @@ export default function CaptureLeadPage() {
       backendSessionId: bsid,
       backendAssetId,
       isOnline,
-      syncCbs: makeExtractionSyncCbs(),
+      syncCbs: makeRoutingCbs(),
     });
-  }, [isOnline, makeExtractionSyncCbs]);
+  }, [isOnline, makeRoutingCbs]);
 
   // ── Card capture complete (Continue pressed) ──────────────────────────────
   const handleCardComplete = useCallback(async (
