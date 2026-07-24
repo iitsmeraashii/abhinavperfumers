@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import type { Session, User as SupabaseUser } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
+import type { CaptureProfile } from './capture/captureProfile';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -12,10 +13,11 @@ export interface SalesRep {
   role:             string;
   email:            string;
   phone:            string | null;
-  auth_user_id:     string;
-  login_enabled:    boolean;
-  is_active:        boolean;
-  default_event_id: string | null;
+  auth_user_id:            string;
+  login_enabled:           boolean;
+  is_active:               boolean;
+  default_event_id:        string | null;
+  default_capture_profile: CaptureProfile;
 }
 
 // Legacy shape kept identical so all consumers (LeadsPage, DashboardPage, etc.)
@@ -97,7 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const { data, error } = await supabase
         .from('my_rep_profile')
-        .select('id, rep_code, name, role, email, phone, auth_user_id, login_enabled, is_active, default_event_id')
+        .select('id, rep_code, name, role, email, phone, auth_user_id, login_enabled, is_active, default_event_id, default_capture_profile')
         .maybeSingle();
 
       if (error) {
@@ -123,16 +125,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       setSalesRep({
-        id:               data.id,
-        rep_code:         data.rep_code,
-        name:             data.name,
-        role:             data.role,
-        email:            data.email ?? s.user.email ?? '',
-        phone:            data.phone ?? null,
-        auth_user_id:     data.auth_user_id ?? s.user.id,
-        login_enabled:    data.login_enabled,
-        is_active:        data.is_active,
-        default_event_id: data.default_event_id ?? null,
+        id:                      data.id,
+        rep_code:                data.rep_code,
+        name:                    data.name,
+        role:                    data.role,
+        email:                   data.email ?? s.user.email ?? '',
+        phone:                   data.phone ?? null,
+        auth_user_id:            data.auth_user_id ?? s.user.id,
+        login_enabled:           data.login_enabled,
+        is_active:               data.is_active,
+        default_event_id:        data.default_event_id ?? null,
+        default_capture_profile: (data.default_capture_profile as CaptureProfile) ?? 'CRM',
       });
     } catch (err) {
       console.error('[AuthContext] loadRepProfile threw', err);

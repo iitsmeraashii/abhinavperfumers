@@ -7,6 +7,9 @@ import {
 import { useAuth } from './AuthContext';
 import { useEvent, type AppEvent } from './EventContext';
 import { formatDateShort, formatDateLong } from './utils/dateFormat';
+import { CaptureProfileSelector } from './capture/CaptureProfileSelector';
+import type { CaptureProfile } from './capture/captureProfile';
+import { supabase } from './supabaseClient';
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
 
@@ -293,11 +296,14 @@ export default function MyAccountPage({ onBack }: { onBack: () => void }) {
 
   const [toast, setToast]         = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
   const [saving, setSaving]       = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileValue, setProfileValue]   = useState<CaptureProfile>('CRM');
   const toastTimer                = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Refresh event validation on mount
   useEffect(() => {
     refreshSelectedEvent();
+    setProfileValue(salesRep?.default_capture_profile ?? 'CRM');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -305,6 +311,26 @@ export default function MyAccountPage({ onBack }: { onBack: () => void }) {
     setToast({ msg, type });
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }
+
+  async function handleProfileChange(profile: CaptureProfile) {
+    if (profile === profileValue) return;
+    setSavingProfile(true);
+    const prev = profileValue;
+    setProfileValue(profile); // optimistic
+    try {
+      const { error } = await supabase
+        .from('sales_representatives')
+        .update({ default_capture_profile: profile })
+        .eq('id', salesRep!.id);
+      if (error) throw error;
+      showToast(`Default capture mode set to ${profile === 'CRM' ? 'CRM' : 'Exhibition'}`, 'success');
+    } catch {
+      setProfileValue(prev); // revert
+      showToast('Failed to save — please try again', 'error');
+    } finally {
+      setSavingProfile(false);
+    }
   }
 
   async function handleEventChange(event: AppEvent) {
@@ -432,6 +458,26 @@ export default function MyAccountPage({ onBack }: { onBack: () => void }) {
               <div className="flex items-center gap-2 px-3 py-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
                 <AlertCircle className="w-4 h-4 shrink-0" />
                 No event selected — lead captures will not be linked to an event
+              </div>
+            )}
+          </div>
+        </Section>
+
+        {/* Section C — Default capture mode */}
+        <Section title="Default Capture Mode">
+          <div className="py-4 space-y-3">
+            <p className="text-xs text-stone-500 leading-relaxed">
+              Default mode for new lead capture sessions.
+            </p>
+            <CaptureProfileSelector
+              value={profileValue}
+              onChange={handleProfileChange}
+              disabled={savingProfile}
+            />
+            {savingProfile && (
+              <div className="flex items-center gap-2 text-xs text-stone-500">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Saving…
               </div>
             )}
           </div>

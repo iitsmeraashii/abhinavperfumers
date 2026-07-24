@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { useEvent } from './EventContext';
+import { useAuth } from './AuthContext';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
 import { useAutosave } from './capture/useAutosave';
@@ -45,6 +46,7 @@ export default function CaptureLeadPage() {
   const { selectedEvent } = useEvent();
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isFlushing, setIsFlushing] = useState(false);
+  const { salesRep } = useAuth();
   const [promotionToast, setPromotionToast] = useState<{ message: string; isError: boolean } | null>(null);
 
   // Flush the offline queue and update pending count badge
@@ -112,6 +114,15 @@ export default function CaptureLeadPage() {
     onSynced:        (patch: Record<string, unknown>) => {
       actions.patchSync({ ...patch, status: 'synced' } as Partial<BackendSyncState>);
       actions.decrementPendingOps();
+  // Seed the session's capture profile from the rep's persisted default.
+  // Only applies when IDLE — an active session keeps its current profile.
+  useEffect(() => {
+    if (session.sessionStatus === 'IDLE' && salesRep?.default_capture_profile) {
+      actions.setCaptureProfile(salesRep.default_capture_profile);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [salesRep?.default_capture_profile]);
+
     },
     onSyncError:     (err: string) => {
       actions.setSyncStatus('error', err);
