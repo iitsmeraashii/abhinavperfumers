@@ -5,12 +5,12 @@
 //
 // Architecture:
 //
-//   CaptureLeadPage (thin UI)
+//   CaptureProfileEngine                (resolves strategies — INTERNAL)
 //         │
 //         ▼
-//   CaptureExecutionEngine      ← Profile + Connectivity
-//    · buildPlan()              ← immutable plan for the pipeline
-//    · routeSessionSync()       ← online: backend sync / offline: enqueue
+//   CaptureExecutionEngine               (translates strategies → policies)
+//    · buildPlan()                       ← immutable execution contract
+//    · routeSessionSync()                ← routes by QueuePolicy
 //    · routeAssetSync()
 //    · routeFieldSync()
 //    · routeAbandon()
@@ -18,22 +18,20 @@
 //         │
 //         ├──────────────────────┐
 //         ▼                      ▼
-//   Execution Plan          Shared Services
-//   (pipeline consumes)     (backendSync, offlineQueue)
+//   Execution Plan           Shared Services
+//   (pipeline consumes)      (backendSync, offlineQueue)
 //         │                      ▲
 //         ▼                      │
 //   Processing Pipeline ─────────┘
 //
-// The UI layer (CaptureLeadPage) never reads `navigator.onLine` or decides
-// online-vs-offline routing. It delegates every runtime decision to this
-// engine. Shared services remain execution-agnostic — they execute the HOW
-// and never branch on profile identity or connectivity.
+// Strategies are INTERNAL to this engine. The ExecutionPlan exposes only
+// immutable execution policies — runtime behavior, not strategy flags.
+// The UI and Processing Pipeline consume policies and never inspect
+// strategies.
 
 import type { CaptureProfile }             from './captureProfile';
 import { DEFAULT_CAPTURE_PROFILE }          from './captureProfile';
 import type { CaptureProfileStrategies }   from './profileStrategies';
-import type { ConnectivitySnapshot }       from './CaptureConnectivity';
-import { createConnectivitySnapshot }       from './CaptureConnectivity';
 import type { SyncCallbacks }              from './captureBackendSync';
 import type { BackendSyncState }           from './types';
 import type { PromoteSessionOptions, PromoteSessionResult } from './capturePromotionService';
@@ -58,39 +56,63 @@ import type {
 } from './captureBackendSync';
 import { enqueueOp } from './captureOfflineQueue';
 import type { CompletedLeadStatus } from './completedLeadsStorage';
+import type { DraftData } from './types';
 
-// ─── Execution Context ────────────────────────────────────────────────────────
+// ─── Execution Policies (PUBLIC) ──────────────────────────────────────────────
+// These are the runtime behavior contract. Consumers read policies, never
+// strategies. Each policy expresses WHEN an operation should execute, not
+// whether a strategy flag is set.
 
-export interface ExecutionContext {
-  profile:        CaptureProfile;
-  connectivity:   ConnectivitySnapshot;
-  strategies:     CaptureProfileStrategies;
+/** When extraction (Vision/OCR) should run relative to capture. */
+export type ExtractionPolicy = 'IMMEDIATE' | 'DEFERRED';
+
+/** When a particular evidence type should be uploaded to the backend. */
+export type UploadTiming = 'IMMEDIATE' | 'ON_SAVE' | 'NEVER';
+
+export interface UploadPolicy {
+  businessCard: UploadTiming;
+  notesImage:   UploadTiming;
+  voiceNote:    UploadTiming;
 }
+
+/** When a sync operation should fire. */
+export type SyncTiming = 'IMMEDIATE' | 'ON_SAVE' | 'NEVER';
+
+export interface SyncPolicy {
+  session:   SyncTiming;
+  fields:    SyncTiming;
+  promotion: SyncTiming;
+}
+
+/** How the queue (online-vs-offline routing) should behave. */
+export type QueuePolicy = 'ONLINE_FIRST' | 'ALWAYS_QUEUE' | 'OFFLINE_ONLY';
+
+/** Whether the review stage should execute and what to do with its result. */
+export type ReviewPolicy = 'EVALUATE' | 'SKIP';
+
+/** Whether promotion should proceed to lead_entries insert. */
+export type PromotionPolicy = 'PROMOTE' | 'SKIP';
+
+/** Whether the processing result should be transformed before returning to UI. */
+export type ResultPolicy = 'PASS_THROUGH' | 'SUPPRESS_TOAST';
 
 // ─── Execution Plan ────────────────────────────────────────────────────────────
 
 export interface ExecutionPlan {
-  context:      ExecutionContext;
   isOnline:     boolean;
-  mode:         ExecutionMode;
-  capabilities: ExecutionCapabilities;
-}
-
-export type ExecutionMode = 'SYNCHRONOUS' | 'DEFERRED';
-
-export interface ExecutionCapabilities {
-  waitForExtraction:      boolean;
-  skipReviewForm:         boolean;
-  queueOnDisconnect:      boolean;
-  uploadCardsImmediately: boolean;
-  uploadNotesOnSave:      boolean;
-  syncSessionImmediately: boolean;
+  extraction:   ExtractionPolicy;
+  upload:       UploadPolicy;
+  queue:        QueuePolicy;
+  review:       ReviewPolicy;
+  promotion:    PromotionPolicy;
+  result:       ResultPolicy;
+  /** Internal — pipeline stages still need strategy objects for validation/review/promotion/result. */
+  strategies:   CaptureProfileStrategies;
 }
 
 // ─── Sync routing callbacks ───────────────────────────────────────────────────
 // The engine notifies the UI layer via these lightweight callbacks so React
-// state can be updated without the engine importing React. Mirrors the shape
-// of SyncCallbacks plus an offline-queued notification.
+// state can be updated without the engine importing React.
 
 export interface SyncRoutingCallbacks {
   onBeforeSync:     () => void;
@@ -108,62 +130,84 @@ class CaptureExecutionEngine {
   // ── Execution Plan ──────────────────────────────────────────────────────────
 
   buildPlan(
-    profile:    CaptureProfile,
+    _profile:   CaptureProfile,
     strategies: CaptureProfileStrategies,
     isOnline:   boolean,
   ): ExecutionPlan {
-    const connectivity = createConnectivitySnapshot(isOnline);
-
-    const context: ExecutionContext = {
-      profile,
-      connectivity,
+    return {
+      isOnline,
+      extraction: this._deriveExtractionPolicy(strategies),
+      upload:     this._deriveUploadPolicy(strategies),
+      queue:      this._deriveQueuePolicy(strategies),
+      review:     this._deriveReviewPolicy(strategies),
+      promotion:  this._derivePromotionPolicy(strategies),
+      result:     this._deriveResultPolicy(strategies),
       strategies,
     };
-
-    const capabilities = this._deriveCapabilities(strategies);
-    const mode = this._deriveMode(strategies);
-
-    return { context, isOnline, mode, capabilities };
   }
 
-  private _deriveCapabilities(strategies: CaptureProfileStrategies): ExecutionCapabilities {
+  // ── Policy derivation (strategies → policies) ───────────────────────────────
+  // These methods are the ONLY place where strategy flags are read.
+  // They translate internal strategy configuration into public runtime policies.
+
+  private _deriveExtractionPolicy(strategies: CaptureProfileStrategies): ExtractionPolicy {
+    return strategies.ai.waitForExtraction ? 'IMMEDIATE' : 'DEFERRED';
+  }
+
+  private _deriveUploadPolicy(strategies: CaptureProfileStrategies): UploadPolicy {
     return {
-      waitForExtraction:      strategies.ai.waitForExtraction,
-      skipReviewForm:         strategies.ai.skipReviewForm,
-      queueOnDisconnect:      strategies.queue.queueOnDisconnect,
-      uploadCardsImmediately: strategies.upload.uploadCardsImmediately,
-      uploadNotesOnSave:      strategies.upload.uploadNotesOnSave,
-      syncSessionImmediately: strategies.sync.syncSessionImmediately,
+      businessCard: strategies.upload.uploadCardsImmediately ? 'IMMEDIATE' : 'ON_SAVE',
+      notesImage:   strategies.upload.uploadNotesOnSave      ? 'ON_SAVE'   : 'NEVER',
+      voiceNote:    strategies.upload.uploadVoiceOnSave      ? 'ON_SAVE'   : 'NEVER',
     };
   }
 
-  private _deriveMode(strategies: CaptureProfileStrategies): ExecutionMode {
-    if (strategies.ai.waitForExtraction && !strategies.ai.skipReviewForm) {
-      return 'SYNCHRONOUS';
-    }
-    return 'DEFERRED';
+  private _deriveQueuePolicy(strategies: CaptureProfileStrategies): QueuePolicy {
+    return strategies.queue.queueOnDisconnect ? 'ONLINE_FIRST' : 'ALWAYS_QUEUE';
+  }
+
+  private _deriveReviewPolicy(strategies: CaptureProfileStrategies): ReviewPolicy {
+    return strategies.ai.skipReviewForm ? 'SKIP' : 'EVALUATE';
+  }
+
+  private _derivePromotionPolicy(_strategies: CaptureProfileStrategies): PromotionPolicy {
+    return 'PROMOTE';
+  }
+
+  private _deriveResultPolicy(_strategies: CaptureProfileStrategies): ResultPolicy {
+    return 'PASS_THROUGH';
+  }
+
+  // ── Queue routing ────────────────────────────────────────────────────────────
+  // These methods route based on the QueuePolicy + connectivity, not raw
+  // `isOnline` booleans. The routing logic:
+  //
+  //   ONLINE_FIRST  — online: sync immediately / offline: enqueue
+  //   ALWAYS_QUEUE  — always enqueue (never sync live)
+  //   OFFLINE_ONLY  — always enqueue (sync only via queue replay)
+  //
+  // For CRM (ONLINE_FIRST), behavior is identical to before:
+  //   - Online  → call the backend sync function (fire-and-forget)
+  //   - Offline → enqueue the op to IndexedDB for later flush
+
+  private _shouldSync(queue: QueuePolicy, isOnline: boolean): boolean {
+    if (queue === 'ALWAYS_QUEUE') return false;
+    if (queue === 'OFFLINE_ONLY') return false;
+    return isOnline; // ONLINE_FIRST
   }
 
   // ── Sync routing ─────────────────────────────────────────────────────────────
-  // These methods encapsulate the online-vs-offline routing that was previously
-  // scattered across CaptureLeadPage as `if (isOnline) { sync... } else { enqueue... }`.
-  //
-  // The routing logic is identical to the CRM behavior that existed before:
-  //   - Online  → call the backend sync function (fire-and-forget, .catch(() => {}))
-  //   - Offline → enqueue the op to IndexedDB for later flush
-  //
-  // The UI layer calls these methods and provides callbacks for state updates.
-  // It never reads `isOnline` or `navigator.onLine` to make routing decisions.
 
   routeSessionSync(
+    queue:      QueuePolicy,
     isOnline:   boolean,
     payload:    UpsertSessionPayload,
     bsid:       string,
     cbs:        SyncRoutingCallbacks,
   ): void {
-    if (isOnline) {
+    if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
-      this._adaptCallbacks(syncUpsertSession(payload, this._toSyncCbs(cbs)));
+      syncUpsertSession(payload, this._toSyncCbs(cbs)).catch(() => {});
     } else {
       enqueueOp('upsert_session', bsid, payload);
       cbs.onOfflineQueued();
@@ -171,13 +215,14 @@ class CaptureExecutionEngine {
   }
 
   routeAssetSync(
+    queue:      QueuePolicy,
     isOnline:   boolean,
     payload:    UpsertAssetPayload,
     cbs:        SyncRoutingCallbacks,
   ): void {
-    if (isOnline) {
+    if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
-      this._adaptCallbacks(syncUpsertAsset(payload, this._toSyncCbs(cbs)));
+      syncUpsertAsset(payload, this._toSyncCbs(cbs)).catch(() => {});
     } else {
       enqueueOp('upsert_asset', payload.backendSessionId, payload);
       cbs.onOfflineQueued();
@@ -185,15 +230,14 @@ class CaptureExecutionEngine {
   }
 
   routeFieldSync(
-    isOnline:       boolean,
-    bsid:           string,
-    draftData:      Record<string, unknown>,
-    cbs:            SyncRoutingCallbacks,
+    queue:      QueuePolicy,
+    isOnline:   boolean,
+    bsid:       string,
+    draftData:  DraftData,
+    cbs:        SyncRoutingCallbacks,
   ): void {
-    if (isOnline) {
-      this._adaptCallbacks(
-        syncUpdateSessionFields(bsid, draftData as Parameters<typeof syncUpdateSessionFields>[1], this._toSyncCbs(cbs)),
-      );
+    if (this._shouldSync(queue, isOnline)) {
+      syncUpdateSessionFields(bsid, draftData, this._toSyncCbs(cbs)).catch(() => {});
     } else {
       enqueueOp('update_session_fields', bsid, { sessionId: bsid, draftData });
       cbs.onOfflineQueued();
@@ -201,38 +245,29 @@ class CaptureExecutionEngine {
   }
 
   routeAbandon(
-    isOnline:           boolean,
-    backendSessionId:   string,
-    cbs:                SyncRoutingCallbacks,
+    queue:          QueuePolicy,
+    isOnline:       boolean,
+    backendSessionId: string,
+    cbs:            SyncRoutingCallbacks,
   ): void {
-    if (isOnline) {
-      this._adaptCallbacks(syncAbandonSession(backendSessionId, this._toSyncCbs(cbs)));
+    if (this._shouldSync(queue, isOnline)) {
+      syncAbandonSession(backendSessionId, this._toSyncCbs(cbs)).catch(() => {});
     }
     // Offline: no-op — abandoned sessions are not queued
   }
 
   // ── Extraction routing ──────────────────────────────────────────────────────
-  // These methods own the online-vs-offline routing for extraction result sync.
-  // Previously, these routing decisions lived inside the processing pipeline's
-  // extraction event handlers. Now the pipeline delegates routing to the engine.
-  //
-  // Routing logic is identical to the CRM behavior that existed before:
-  //   - Online  → fire the backend sync function (fire-and-forget)
-  //   - Offline → enqueue the op to IndexedDB for later flush
-  //
-  // The processing pipeline calls these methods and handles only extraction
-  // orchestration (dedup guards, result classification). It never branches on
-  // connectivity.
 
   routeVisionExtraction(
-    isOnline:     boolean,
+    queue:          QueuePolicy,
+    isOnline:       boolean,
     backendSessionId: string,
-    payload:      UpsertVisionExtractionPayload,
-    cbs:          SyncRoutingCallbacks,
+    payload:        UpsertVisionExtractionPayload,
+    cbs:            SyncRoutingCallbacks,
   ): void {
-    if (isOnline) {
+    if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
-      this._adaptCallbacks(syncUpsertVisionExtraction(payload, this._toSyncCbs(cbs)));
+      syncUpsertVisionExtraction(payload, this._toSyncCbs(cbs)).catch(() => {});
     } else {
       enqueueOp('upsert_vision_extraction', backendSessionId, payload);
       cbs.onOfflineQueued();
@@ -240,14 +275,15 @@ class CaptureExecutionEngine {
   }
 
   routeOcrExtraction(
-    isOnline:     boolean,
+    queue:          QueuePolicy,
+    isOnline:       boolean,
     backendSessionId: string,
-    payload:      UpsertOcrExtractionPayload,
-    cbs:          SyncRoutingCallbacks,
+    payload:        UpsertOcrExtractionPayload,
+    cbs:            SyncRoutingCallbacks,
   ): void {
-    if (isOnline) {
+    if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
-      this._adaptCallbacks(syncUpsertOcrExtraction(payload, this._toSyncCbs(cbs)));
+      syncUpsertOcrExtraction(payload, this._toSyncCbs(cbs)).catch(() => {});
     } else {
       enqueueOp('upsert_ocr_extraction', backendSessionId, payload);
       cbs.onOfflineQueued();
@@ -255,14 +291,15 @@ class CaptureExecutionEngine {
   }
 
   routeQrExtraction(
-    isOnline:     boolean,
+    queue:          QueuePolicy,
+    isOnline:       boolean,
     backendSessionId: string,
-    payload:      UpsertQrExtractionPayload,
-    cbs:          SyncRoutingCallbacks,
+    payload:        UpsertQrExtractionPayload,
+    cbs:            SyncRoutingCallbacks,
   ): void {
-    if (isOnline) {
+    if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
-      this._adaptCallbacks(syncUpsertQrExtraction(payload, this._toSyncCbs(cbs)));
+      syncUpsertQrExtraction(payload, this._toSyncCbs(cbs)).catch(() => {});
     } else {
       enqueueOp('upsert_qr_extraction', backendSessionId, payload);
       cbs.onOfflineQueued();
@@ -270,33 +307,26 @@ class CaptureExecutionEngine {
   }
 
   routeVisionExtractionMeta(
-    isOnline:     boolean,
-    payload:      UpdateSessionExtractionMetaPayload,
+    queue:          QueuePolicy,
+    isOnline:       boolean,
+    payload:        UpdateSessionExtractionMetaPayload,
   ): void {
-    if (isOnline) {
-      this._adaptCallbacks(
-        syncUpdateSessionExtractionMeta(payload, this._silentCbs()),
-      );
+    if (this._shouldSync(queue, isOnline)) {
+      syncUpdateSessionExtractionMeta(payload, this._silentCbs()).catch(() => {});
     }
     // Offline: no-op — extraction metadata is not queued; it updates on next
     // session sync when connectivity returns.
   }
 
   // ── Promotion routing ───────────────────────────────────────────────────────
-  // The processing pipeline's terminal stage delegates promotion routing here.
-  // Online  → call executePromotion directly and return the result.
-  // Offline → enqueue a 'promote_session' op for later flush.
-  //
-  // Error classification (retryable vs non-retryable) stays in the pipeline
-  // because it inspects the promotion result — a business decision, not a
-  // connectivity routing decision.
 
   async routePromotion(
-    isOnline:         boolean,
+    queue:          QueuePolicy,
+    isOnline:       boolean,
     backendSessionId: string,
     options:          PromoteSessionOptions,
   ): Promise<{ queued: true } | { queued: false; result: PromoteSessionResult }> {
-    if (!isOnline) {
+    if (!this._shouldSync(queue, isOnline)) {
       await enqueueOp('promote_session', backendSessionId, options);
       return { queued: true };
     }
@@ -305,8 +335,6 @@ class CaptureExecutionEngine {
   }
 
   // ── Completed-lead status derivation ─────────────────────────────────────────
-  // Previously inlined in CaptureLeadPage as `isOnline ? 'pending_sync' : 'local_only'`.
-  // Now centralized here so the UI layer doesn't make runtime decisions.
 
   deriveCompletedLeadStatus(isOnline: boolean): CompletedLeadStatus {
     return isOnline ? 'pending_sync' : 'local_only';
@@ -335,15 +363,6 @@ class CaptureExecutionEngine {
       onSyncError: () => {},
       onOffline:   () => {},
     };
-  }
-
-  /**
-   * Wrap a promise so it never rejects — fire-and-forget pattern.
-   * The backend sync functions already catch internally, but this is a safety net.
-   */
-  private _adaptCallbacks(_promise: Promise<void>): void {
-    // Intentionally not awaited — fire-and-forget, matching the original
-    // `.catch(() => {})` pattern used throughout CaptureLeadPage.
   }
 
   /**

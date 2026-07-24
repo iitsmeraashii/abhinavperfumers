@@ -14,6 +14,7 @@ import { saveAsset, deleteAsset, getSessionAssets } from './captureAssetStorage'
 import { useVisionExtraction } from './useVisionExtraction';
 import type { BusinessCardAsset, CardSide, CaptureSession, DraftData, OcrResult, VisionResult } from './types';
 import type { VisionState } from './useVisionExtraction';
+import type { ExtractionPolicy } from './CaptureExecutionEngine';
 import { Toast } from './CaptureUI';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -28,6 +29,7 @@ interface Props {
   session: CaptureSession;
   sessionId: string;
   isOnline?: boolean;
+  extractionPolicy?: ExtractionPolicy;
   onComplete: (frontAssetId: string, backAssetId: string | null, ocrResult: OcrResult | null, visionResult: VisionResult | null) => void;
   onBack: () => void;
   onAssetsChanged?: (front: BusinessCardAsset | null, back: BusinessCardAsset | null) => void;
@@ -565,7 +567,7 @@ function ChipInput({ label, icon: Icon, values, confidence, onAdd, onRemove, inp
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function BusinessCardCapture({
-  session, sessionId, isOnline = true, onComplete, onBack, onAssetsChanged,
+  session, sessionId, isOnline = true, extractionPolicy = 'IMMEDIATE', onComplete, onBack, onAssetsChanged,
   onDraftPatch, onVisionResult, onOcrResult, onOcrStateChange, onOcrDiagnostics: _ignored,
   onDebugLog,
 }: Props) {
@@ -724,9 +726,9 @@ export function BusinessCardCapture({
       );
 
       if (side === 'front') {
-        if (!isOnline) {
+        if (extractionPolicy === 'DEFERRED' || !isOnline) {
           showToast('Saved offline — fill details manually');
-          onDebugLog?.('Front captured — offline, extraction deferred', { assetId: asset.id });
+          onDebugLog?.('Front captured — extraction deferred', { assetId: asset.id });
         } else {
           onDebugLog?.('Front captured — starting vision extraction', { assetId: asset.id });
           const result = await runExtraction(asset.id, asset.dataUrl);

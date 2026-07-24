@@ -35,7 +35,7 @@ import { evidenceManager }            from './captureEvidenceManager';
 import { extractionCoordinator }       from './captureExtractionCoordinator';
 import type { ReviewResult }           from './captureReviewEngine';
 import { executionEngine } from './CaptureExecutionEngine';
-import type { ExecutionPlan, SyncRoutingCallbacks } from './CaptureExecutionEngine';
+import type { ExecutionPlan, SyncRoutingCallbacks, UploadTiming, QueuePolicy } from './CaptureExecutionEngine';
 import { buildCompletedLead, saveCompletedLead } from './completedLeadsStorage';
 import type {
   BusinessCardAsset,
@@ -52,27 +52,31 @@ import type { ParsedContact }          from './parseQrPayload';
 /**
  * Register business card image evidence at capture time.
  * Called by CaptureLeadPage when card assets change (before Save & Next).
+ * The upload timing is controlled by the UploadPolicy from the execution plan.
  */
 export function registerCardEvidence(
   sessionId: string,
   assets: { front: BusinessCardAsset | null; back: BusinessCardAsset | null },
+  uploadTiming: UploadTiming,
 ): void {
   const { front, back } = assets;
-  if (front) evidenceManager.register({ type: 'business_card_front', sessionId, asset: front, uploadImmediately: true });
-  if (back)  evidenceManager.register({ type: 'business_card_back',  sessionId, asset: back,  uploadImmediately: true });
+  if (front) evidenceManager.register({ type: 'business_card_front', sessionId, asset: front, uploadTiming });
+  if (back)  evidenceManager.register({ type: 'business_card_back',  sessionId, asset: back,  uploadTiming });
 }
 
 /**
  * Register a completed voice note recording as evidence.
  * Called by CaptureLeadPage when the recorder emits a blob.
+ * The upload timing is controlled by the UploadPolicy from the execution plan.
  */
 export function registerVoiceNoteEvidence(
   sessionId: string,
   audioBlob: Blob,
   durationMs: number,
   mimeType: string,
+  uploadTiming: UploadTiming,
 ): void {
-  evidenceManager.register({ type: 'voice_note', sessionId, audioBlob, durationMs, mimeType, uploadImmediately: false });
+  evidenceManager.register({ type: 'voice_note', sessionId, audioBlob, durationMs, mimeType, uploadTiming });
 }
 
 /**
@@ -110,10 +114,11 @@ export async function handleVisionExtraction(params: {
   result:           VisionResult;
   backendSessionId: string;
   backendAssetId:   string | null;
+  queue:            QueuePolicy;
   isOnline:         boolean;
   syncCbs:          ExtractionSyncCallbacks;
 }): Promise<ExtractionHandlerOutcome> {
-  const { result, backendSessionId, backendAssetId, isOnline, syncCbs } = params;
+  const { result, backendSessionId, backendAssetId, queue, isOnline, syncCbs } = params;
 
   // Only openai_vision writes an extraction_results row.
   // tesseract_fallback is covered by the OCR path via handleOcrExtraction.
@@ -125,10 +130,10 @@ export async function handleVisionExtraction(params: {
   const extractionId = crypto.randomUUID();
   const payload = { extractionId, backendSessionId, backendAssetId, visionResult: result };
 
-  executionEngine.routeVisionExtraction(isOnline, backendSessionId, payload, syncCbs);
+  executionEngine.routeVisionExtraction(queue, isOnline, backendSessionId, payload, syncCbs);
 
   // Update session-level extraction metadata (fire-and-forget, no UI impact).
-  executionEngine.routeVisionExtractionMeta(isOnline, {
+  executionEngine.routeVisionExtractionMeta(queue, isOnline, {
     backendSessionId,
     source:           result.source,
     confidence:       result.fields.confidence,
@@ -149,10 +154,11 @@ export async function handleOcrExtraction(params: {
   result:           OcrResult;
   backendSessionId: string;
   backendAssetId:   string | null;
+  queue:            QueuePolicy;
   isOnline:         boolean;
   syncCbs:          ExtractionSyncCallbacks;
 }): Promise<ExtractionHandlerOutcome> {
-  const { result, backendSessionId, backendAssetId, isOnline, syncCbs } = params;
+  const { result, backendSessionId, backendAssetId, queue, isOnline, syncCbs } = params;
 
   // Vision already wrote the extraction_results row for this asset.
   if (extractionCoordinator.hasVisionExtraction(result.assetId)) return 'skipped';
@@ -160,7 +166,7 @@ export async function handleOcrExtraction(params: {
   const extractionId = crypto.randomUUID();
   const payload = { extractionId, backendSessionId, backendAssetId, ocrResult: result };
 
-  executionEngine.routeOcrExtraction(isOnline, backendSessionId, payload, syncCbs);
+  executionEngine.routeOcrExtraction(queue, isOnline, backendSessionId, payload, syncCbs);
 
   return isOnline ? 'synced' : 'queued';
 }
@@ -175,15 +181,16 @@ export async function handleQrExtraction(params: {
   parsed:           ParsedContact;
   backendSessionId: string;
   durationMs:       number;
+  queue:            QueuePolicy;
   isOnline:         boolean;
   syncCbs:          ExtractionSyncCallbacks;
 }): Promise<ExtractionHandlerOutcome> {
-  const { parsed, backendSessionId, durationMs, isOnline, syncCbs } = params;
+  const { parsed, backendSessionId, durationMs, queue, isOnline, syncCbs } = params;
 
   const extractionId = crypto.randomUUID();
   const payload = { extractionId, backendSessionId, parsed, durationMs };
 
-  executionEngine.routeQrExtraction(isOnline, backendSessionId, payload, syncCbs);
+  executionEngine.routeQrExtraction(queue, isOnline, backendSessionId, payload, syncCbs);
 
   return isOnline ? 'synced' : 'queued';
 }
@@ -220,8 +227,8 @@ export interface ProcessingContext {
    */
   completedLeadId:  string;
   /**
-   * Execution plan — combines the active profile's strategies with the
-   * connectivity snapshot. The pipeline reads all behavioral decisions
+   * Execution plan — the immutable runtime contract produced by the
+   * CaptureExecutionEngine. The pipeline reads all behavioral decisions
    * and the online/offline flag from this plan. Stages never call
    * profileEngine or navigator.onLine directly.
    */
@@ -275,14 +282,14 @@ export interface ProcessingResult {
  * Non-terminal — does not write ctx.result.
  */
 function executeEvidenceStage(ctx: ProcessingContext): void {
-  const { session, backendSessionId } = ctx;
+  const { session, backendSessionId, plan } = ctx;
 
   if (typeof session.draftData.notesImageDataUrl === 'string') {
     evidenceManager.register({
-      type:              'notes_image',
-      sessionId:         backendSessionId,
-      dataUrl:           session.draftData.notesImageDataUrl,
-      uploadImmediately: false,
+      type:        'notes_image',
+      sessionId:   backendSessionId,
+      dataUrl:     session.draftData.notesImageDataUrl,
+      uploadTiming: plan.upload.notesImage,
     });
   }
   evidenceManager.onSaveAndNext(backendSessionId);
@@ -314,7 +321,7 @@ function executeExtractionStage(ctx: ProcessingContext): void {
  * Non-terminal when valid — does not write ctx.result.
  */
 function executeValidationStage(ctx: ProcessingContext): void {
-  const strategies = ctx.plan.context.strategies;
+  const strategies = ctx.plan.strategies;
   const result = strategies.validation.validate(ctx.session.draftData);
   if (!result.valid) {
     ctx.result = {
@@ -342,7 +349,11 @@ function executeValidationStage(ctx: ProcessingContext): void {
  * Non-terminal — writes ctx.review; does not write ctx.result.
  */
 function executeReviewStage(ctx: ProcessingContext): void {
-  const strategies = ctx.plan.context.strategies;
+  if (ctx.plan.review === 'SKIP') {
+    ctx.review = { required: false, reason: null, confidence: null } as ReviewResult;
+    return;
+  }
+  const strategies = ctx.plan.strategies;
   const rawConfidence = ctx.session.draftData.extractionConfidence;
   const confidencePercent =
     typeof rawConfidence === 'number'
@@ -369,8 +380,13 @@ function executeReviewStage(ctx: ProcessingContext): void {
  */
 async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
   const { session, backendSessionId, eventCode, eventId, eventName, completedLeadId, plan } = ctx;
-  const strategies = plan.context.strategies;
+  const strategies = plan.strategies;
   const isOnline = plan.isOnline;
+
+  if (plan.promotion === 'SKIP') {
+    ctx.result = { outcome: 'queued', leadId: null, error: null };
+    return;
+  }
 
   const promotionOptions = strategies.promotion.buildOptions({
     backendSessionId,
@@ -390,11 +406,11 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
     );
     lead.status = 'pending_sync';
     await saveCompletedLead(lead);
-    await executionEngine.routePromotion(false, backendSessionId, promotionOptions);
+    await executionEngine.routePromotion(plan.queue, false, backendSessionId, promotionOptions);
     ctx.result = { outcome: 'queued', leadId: null, error: null };
   };
 
-  const routeResult = await executionEngine.routePromotion(isOnline, backendSessionId, promotionOptions);
+  const routeResult = await executionEngine.routePromotion(plan.queue, isOnline, backendSessionId, promotionOptions);
   if (routeResult.queued) {
     await _queuePromotion();
     return;
@@ -439,13 +455,18 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
 export async function processCaptureSession(
   ctx: ProcessingContext,
 ): Promise<ProcessingResult> {
-  const strategies = ctx.plan.context.strategies;
+  const strategies = ctx.plan.strategies;
   executeEvidenceStage(ctx);
   executeExtractionStage(ctx);
   executeValidationStage(ctx);
-  if (ctx.result) return strategies.result.transformResult(ctx.result);
+  if (ctx.result) {
+    return ctx.plan.result === 'SUPPRESS_TOAST'
+      ? strategies.result.transformResult(ctx.result)
+      : ctx.result;
+  }
   executeReviewStage(ctx);
   await executePromotionStage(ctx);
-  // ctx.result is always set by executePromotionStage
-  return strategies.result.transformResult(ctx.result!);
+  return ctx.plan.result === 'SUPPRESS_TOAST'
+    ? strategies.result.transformResult(ctx.result!)
+    : ctx.result!;
 }

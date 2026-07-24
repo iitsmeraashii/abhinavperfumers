@@ -28,6 +28,7 @@
 import { uploadVoiceNote }    from './assetStorageUpload';
 import { transcribeVoiceNote } from './voiceTranscriptionService';
 import { enqueueOp }           from './captureOfflineQueue';
+import type { UploadTiming }   from './CaptureExecutionEngine';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,18 +60,19 @@ class VoiceEvidenceManager {
    * Replaces any previously registered blob for the same session.
    */
   register(
-    sessionId:  string,
-    audioBlob:  Blob,
-    durationMs: number,
-    mimeType:   string,
+    sessionId:    string,
+    audioBlob:    Blob,
+    durationMs:   number,
+    mimeType:     string,
+    uploadTiming: UploadTiming = 'IMMEDIATE',
   ): void {
     if (!audioBlob || audioBlob.size === 0) return;
     this._pending = { sessionId, audioBlob, mimeType, durationMs };
 
-    // When online, upload + transcribe immediately so the user can see the
-    // transcript while still filling out the form. The polling in
-    // ManualEntryForm picks up status transitions from the DB.
-    if (navigator.onLine) {
+    // When IMMEDIATE and online, upload + transcribe right away so the user
+    // can see the transcript while still filling the form.
+    // ON_SAVE defers to onSaveAndNext(); NEVER suppresses upload entirely.
+    if (uploadTiming === 'IMMEDIATE' && navigator.onLine) {
       const pending = this._pending;
       this._pending = null;
       void this._uploadAndTranscribe(sessionId, pending.audioBlob, pending.mimeType, pending.durationMs);

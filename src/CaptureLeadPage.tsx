@@ -9,6 +9,7 @@ import { loadDraft, clearDraft } from './capture/captureDraftStorage';
 import { deleteSessionAssets } from './capture/captureAssetStorage';
 import { OfflineBanner } from './capture/OfflineBanner';
 import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
+import { CaptureProfileSelector } from './capture/CaptureProfileSelector';
 import { ManualEntryForm } from './capture/ManualEntryForm';
 import { BusinessCardCapture } from './capture/BusinessCardCapture';
 import { Toast, DraftRecoveryBanner } from './capture/CaptureUI';
@@ -31,7 +32,8 @@ import {
 import type { ProcessingContext } from './capture/captureProcessingEngine';
 import { profileEngine } from './capture/captureProfileEngine';
 import { executionEngine } from './capture/CaptureExecutionEngine';
-import type { ExecutionPlan, SyncRoutingCallbacks } from './capture/CaptureExecutionEngine';
+import type { ExecutionPlan, SyncRoutingCallbacks, QueuePolicy, UploadTiming, ExtractionPolicy } from './capture/CaptureExecutionEngine';
+import type { CaptureProfile } from './capture/types';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
@@ -44,9 +46,9 @@ const QrScannerView = lazy(() =>
 
 export default function CaptureLeadPage() {
   const { selectedEvent } = useEvent();
+  const { salesRep } = useAuth();
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isFlushing, setIsFlushing] = useState(false);
-  const { salesRep } = useAuth();
   const [promotionToast, setPromotionToast] = useState<{ message: string; isError: boolean } | null>(null);
 
   // Flush the offline queue and update pending count badge
@@ -68,6 +70,14 @@ export default function CaptureLeadPage() {
   const [pendingDraft, setPendingDraft] = useState<{ session: typeof session; capturedAt: Date | null } | null>(null);
   const [qrScanning, setQrScanning] = useState(false);
   const [lastScan, setLastScan] = useState<ParsedContact | null>(null);
+
+  // Execution plan — built once when a session starts, rebuilt when profile
+  // changes. Contains immutable runtime policies derived from strategies.
+  const [plan, setPlan] = useState<ExecutionPlan | null>(null);
+  const queue: QueuePolicy = plan?.queue ?? 'ONLINE_FIRST';
+  const extractionPolicy: ExtractionPolicy = plan?.extraction ?? 'IMMEDIATE';
+  const cardUploadTiming: UploadTiming = plan?.upload.businessCard ?? 'IMMEDIATE';
+  const voiceUploadTiming: UploadTiming = plan?.upload.voiceNote ?? 'ON_SAVE';
 
   const qrSectionRef = useRef<HTMLDivElement>(null);
   const cardSectionRef = useRef<HTMLDivElement>(null);
@@ -104,6 +114,17 @@ export default function CaptureLeadPage() {
     getPendingCount().then(setPendingSyncCount);
   }, [isFlushing]);
 
+  // Seed the session's capture profile from the rep's persisted default.
+  // Fires on mount and whenever the session returns to IDLE, so leaving and
+  // reopening Capture (or backing out of a session) restores the persisted
+  // default rather than keeping a temporary override.
+  useEffect(() => {
+    if (session.sessionStatus === 'IDLE' && salesRep?.default_capture_profile) {
+      actions.setCaptureProfile(salesRep.default_capture_profile);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [salesRep?.default_capture_profile, session.sessionStatus]);
+
   // ── Sync routing callbacks ──────────────────────────────────────────────────
   // The execution engine owns the online-vs-offline routing decision. The UI
   // layer provides these callbacks so the engine can update React state.
@@ -130,16 +151,11 @@ export default function CaptureLeadPage() {
     },
   }), [actions]);
 
-  // Seed the session's capture profile from the rep's persisted default.
-  // Re-runs whenever the persisted default changes (My Account save) or the
-  // session returns to IDLE (back/discard/save-next), so the toggle always
-  // reflects the account-level setting at the start of every new capture.
-  useEffect(() => {
-    if (session.sessionStatus === 'IDLE') {
-      actions.setCaptureProfile(salesRep?.default_capture_profile ?? 'CRM');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [salesRep?.default_capture_profile, session.sessionStatus]);
+  // Extraction sync callbacks use the same SyncRoutingCallbacks as all other
+  // routing — the execution engine owns the online-vs-offline decision for
+  // extractions just as it does for sessions, assets, and field updates.
+
+
 
   useAutosave(session, { isOnline, onSaveStateChange: setSaveState });
 
@@ -180,6 +196,7 @@ export default function CaptureLeadPage() {
     // Re-sync to backend — engine routes online/offline
     if (normalised.sync.backendSessionId) {
       executionEngine.routeSessionSync(
+        queue,
         isOnline,
         {
           sessionId:     normalised.sync.backendSessionId,
@@ -193,14 +210,14 @@ export default function CaptureLeadPage() {
         makeRoutingCbs(),
       );
     }
-  }, [pendingDraft, actions, selectedEvent, isOnline, makeRoutingCbs]);
+  }, [pendingDraft, actions, selectedEvent, isOnline, makeRoutingCbs, queue]);
 
   // User chose to discard the recovered draft
   const handleRecoveryDiscard = useCallback(async () => {
     if (!pendingDraft) return;
     const bsid = pendingDraft.session.sync.backendSessionId;
     if (bsid) {
-      executionEngine.routeAbandon(isOnline, bsid, makeRoutingCbs());
+      executionEngine.routeAbandon(queue, isOnline, bsid, makeRoutingCbs());
     }
     const cardSid = pendingDraft.session.draftData.cardSessionId as string | undefined;
     if (cardSid) {
@@ -209,12 +226,34 @@ export default function CaptureLeadPage() {
     await clearDraft();
     setPendingDraft(null);
     addEntryRef.current('User discarded recovered draft');
-  }, [pendingDraft, isOnline, makeRoutingCbs]);
+  }, [pendingDraft, isOnline, makeRoutingCbs, queue]);
+
+  // ── Profile selection ─────────────────────────────────────────────────────
+  const handleProfileChange = useCallback((profile: CaptureProfile) => {
+    actions.setCaptureProfile(profile);
+    // If a session is already active, re-resolve the profile engine and
+    // rebuild the plan so derived policies update immediately.
+    if (profileEngine.getProfile() !== null) {
+      profileEngine.resolve(profile);
+      setPlan(
+        executionEngine.buildPlan(profile, profileEngine.getStrategies(), isOnline),
+      );
+    }
+  }, [actions, isOnline]);
 
   // ── Method selection ──────────────────────────────────────────────────────
   const handleMethodSelect = useCallback(async (method: CaptureMethod) => {
     form.handleReset();
     profileEngine.resolve(sessionRef.current.captureProfile);
+
+    // Build the execution plan once when a session starts.
+    const newPlan = executionEngine.buildPlan(
+      profileEngine.getProfile() ?? executionEngine.defaultProfile,
+      profileEngine.getStrategies(),
+      isOnline,
+    );
+    setPlan(newPlan);
+    const q = newPlan.queue;
 
     if (method === 'QR') {
       addEntryRef.current('QR scanner opened');
@@ -222,6 +261,7 @@ export default function CaptureLeadPage() {
       setQrScanning(true);
 
       executionEngine.routeSessionSync(
+        q,
         isOnline,
         {
           sessionId:     backendSessionId,
@@ -252,6 +292,7 @@ export default function CaptureLeadPage() {
       addEntryRef.current('Business card capture session started', { backendSessionId });
 
       executionEngine.routeSessionSync(
+        q,
         isOnline,
         {
           sessionId:     backendSessionId,
@@ -271,6 +312,7 @@ export default function CaptureLeadPage() {
       setQrScanning(false);
 
       executionEngine.routeSessionSync(
+        q,
         isOnline,
         {
           sessionId:     backendSessionId,
@@ -291,18 +333,19 @@ export default function CaptureLeadPage() {
   const handleBackToOptions = useCallback(() => {
     const bsid = sessionRef.current.sync.backendSessionId;
     if (bsid) {
-      executionEngine.routeAbandon(isOnline, bsid, makeRoutingCbs());
+      executionEngine.routeAbandon(queue, isOnline, bsid, makeRoutingCbs());
     }
     form.handleReset();
     actions.resetSession();
     profileEngine.reset();
+    setPlan(null);
     setQrScanning(false);
-  }, [actions, form, isOnline, makeRoutingCbs]);
+  }, [actions, form, isOnline, makeRoutingCbs, queue]);
 
   const handleDiscardDraft = useCallback(async () => {
     const bsid = sessionRef.current.sync.backendSessionId;
     if (bsid) {
-      executionEngine.routeAbandon(isOnline, bsid, makeRoutingCbs());
+      executionEngine.routeAbandon(queue, isOnline, bsid, makeRoutingCbs());
     }
     if (cardSessionId) {
       await deleteSessionAssets(cardSessionId);
@@ -313,8 +356,9 @@ export default function CaptureLeadPage() {
     form.handleReset();
     actions.resetSession();
     profileEngine.reset();
+    setPlan(null);
     setQrScanning(false);
-  }, [actions, form, cardSessionId, isOnline, makeRoutingCbs]);
+  }, [actions, form, cardSessionId, isOnline, makeRoutingCbs, queue]);
 
   // ── Save & start next lead (rapid capture) ───────────────────────────
   // Returns { error } on failure so ManualEntryForm can keep the form visible.
@@ -330,7 +374,7 @@ export default function CaptureLeadPage() {
 
     addEntryRef.current('Save & Next — promoting session to lead_entry', { bsid });
 
-    const plan: ExecutionPlan = executionEngine.buildPlan(
+    const p: ExecutionPlan = executionEngine.buildPlan(
       profileEngine.getProfile() ?? executionEngine.defaultProfile,
       profileEngine.getStrategies(),
       isOnline,
@@ -343,7 +387,7 @@ export default function CaptureLeadPage() {
       completedLeadId:  bsid,
       eventId:          selectedEvent?.id ?? null,
       eventName:        selectedEvent?.name ?? null,
-      plan,
+      plan:             p,
     };
 
     const result = await processCaptureSession(ctx);
@@ -380,6 +424,7 @@ export default function CaptureLeadPage() {
     form.handleReset();
     actions.resetSession();
     profileEngine.reset();
+    setPlan(null);
     setQrScanning(false);
     setCardSessionId('');
     setCardAssets({ front: null, back: null });
@@ -423,11 +468,12 @@ export default function CaptureLeadPage() {
         parsed,
         backendSessionId: bsid,
         durationMs: Date.now() - scanStart,
+        queue,
         isOnline,
         syncCbs: makeRoutingCbs(),
       });
 
-      executionEngine.routeFieldSync(isOnline, bsid, draft, makeRoutingCbs());
+      executionEngine.routeFieldSync(queue, isOnline, bsid, draft, makeRoutingCbs());
 
       // Persist to completed_leads so the Queue screen can show it
       const lead = buildCompletedLead(
@@ -460,21 +506,21 @@ export default function CaptureLeadPage() {
     // The upsert is idempotent (conflict on capture_session_id + local_asset_id), so
     // re-syncing an asset that already has a row is harmless.
     for (const asset of [front, back]) {
-      if (asset) executionEngine.routeAssetSync(isOnline, { backendSessionId: bsid, asset }, makeRoutingCbs());
+      if (asset) executionEngine.routeAssetSync(queue, isOnline, { backendSessionId: bsid, asset }, makeRoutingCbs());
     }
     addEntryRef.current('Assets queued/synced', { frontId: front?.id, backId: back?.id });
 
     // Register image bytes with the Processing Engine's Evidence Stage.
     // The engine delegates to evidenceManager, which owns upload decisions.
-    registerCardEvidence(bsid, { front, back });
-  }, [actions, isOnline, makeRoutingCbs]);
+    registerCardEvidence(bsid, { front, back }, cardUploadTiming);
+  }, [actions, isOnline, makeRoutingCbs, queue, cardUploadTiming]);
 
   // ── Voice note recorded ───────────────────────────────────────────────────
   const handleVoiceNoteRecorded = useCallback((blob: Blob, durationMs: number, mimeType: string) => {
     const bsid = sessionRef.current.sync.backendSessionId;
     if (!bsid) return;
-    registerVoiceNoteEvidence(bsid, blob, durationMs, mimeType);
-  }, []);
+    registerVoiceNoteEvidence(bsid, blob, durationMs, mimeType, voiceUploadTiming);
+  }, [voiceUploadTiming]);
 
   // ── OCR result received ───────────────────────────────────────────────────
   const handleOcrResult = useCallback(async (result: OcrResult) => {
@@ -498,10 +544,11 @@ export default function CaptureLeadPage() {
       result,
       backendSessionId: bsid,
       backendAssetId,
+      queue,
       isOnline,
       syncCbs: makeRoutingCbs(),
     });
-  }, [actions, isOnline, makeRoutingCbs]);
+  }, [actions, isOnline, makeRoutingCbs, queue]);
 
   // ── Vision extraction result received ─────────────────────────────────────
   // Called for both openai_vision and tesseract_fallback.
@@ -523,10 +570,11 @@ export default function CaptureLeadPage() {
       result,
       backendSessionId: bsid,
       backendAssetId,
+      queue,
       isOnline,
       syncCbs: makeRoutingCbs(),
     });
-  }, [isOnline, makeRoutingCbs]);
+  }, [isOnline, makeRoutingCbs, queue]);
 
   // ── Card capture complete (Continue pressed) ──────────────────────────────
   const handleCardComplete = useCallback(async (
@@ -591,7 +639,7 @@ export default function CaptureLeadPage() {
 
     const bsid = sessionRef.current.sync.backendSessionId;
     if (bsid) {
-      executionEngine.routeFieldSync(isOnline, bsid, newDraft, makeRoutingCbs());
+      executionEngine.routeFieldSync(queue, isOnline, bsid, newDraft, makeRoutingCbs());
       addEntryRef.current('Session fields queued/synced after card complete', { bsid });
 
       // Persist to completed_leads so the Queue screen can show it
@@ -603,7 +651,7 @@ export default function CaptureLeadPage() {
       await saveCompletedLead(lead);
       addEntryRef.current('Card complete — lead saved to completed_leads', { id: bsid, status: lead.status });
     }
-  }, [actions, session.draftData, cardSessionId, lastOcrResult, isOnline, makeRoutingCbs, selectedEvent]);
+  }, [actions, session.draftData, cardSessionId, lastOcrResult, isOnline, makeRoutingCbs, queue, selectedEvent]);
 
   // ── Manual form field sync (debounced 1.5s) ───────────────────────────────
   const fieldSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -614,12 +662,12 @@ export default function CaptureLeadPage() {
 
     if (fieldSyncTimerRef.current) clearTimeout(fieldSyncTimerRef.current);
     fieldSyncTimerRef.current = setTimeout(() => {
-      executionEngine.routeFieldSync(isOnline, bsid, session.draftData, makeRoutingCbs());
+      executionEngine.routeFieldSync(queue, isOnline, bsid, session.draftData, makeRoutingCbs());
     }, 1500);
 
     return () => { if (fieldSyncTimerRef.current) clearTimeout(fieldSyncTimerRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.draftData]);
+  }, [session.draftData, queue, isOnline]);
 
   // ─── Derived flags ─────────────────────────────────────────────────────────
   const isCapturing      = session.sessionStatus !== 'IDLE';
@@ -652,6 +700,16 @@ export default function CaptureLeadPage() {
               ? 'Session active — fill in details below'
               : 'Choose how you want to capture lead details'}
           </p>
+        </div>
+
+        <div className="mb-4">
+          <CaptureProfileSelector
+            value={session.captureProfile}
+            onChange={handleProfileChange}
+            disabled={isCapturing}
+            label="Capture Mode"
+            helperText="Temporary override for this capture session."
+          />
         </div>
 
         <CaptureMethodPicker
@@ -697,12 +755,11 @@ export default function CaptureLeadPage() {
             session={session}
             sessionId={cardSessionId}
             isOnline={isOnline}
+            extractionPolicy={extractionPolicy}
             onComplete={handleCardComplete}
             onBack={handleBackToOptions}
             onAssetsChanged={handleCardAssetsChanged}
             onDraftPatch={actions.patchDraft}
-            label="Capture Mode"
-            helperText="Temporary override for this capture session."
             onVisionResult={handleVisionResult}
             onOcrResult={handleOcrResult}
             onOcrStateChange={handleOcrStateChange}

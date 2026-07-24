@@ -3,14 +3,18 @@
 // Responsibilities:
 //   - evidence registration (CaptureEvidence model, not raw upload args)
 //   - upload decision per evidence type:
-//       business_card — upload immediately when online (fire-and-forget)
-//       notes_image   — upload at Save & Next when online (fire-and-forget)
+//       business_card — upload per UploadPolicy (IMMEDIATE or ON_SAVE)
+//       notes_image   — upload per UploadPolicy (ON_SAVE or NEVER)
 //       voice_note    — delegated entirely to VoiceEvidenceManager, which owns
 //                       the full upload → transcription lifecycle and offline queue
 //   - storage status updates (handled inside assetStorageUpload / voiceEvidenceManager)
 //   - evidence state scoped to the active capture session
+//
+// The manager is profile-agnostic. It receives UploadTiming policies from
+// the ExecutionPlan via the Processing Engine and never inspects strategies.
 
 import type { BusinessCardAsset } from './types';
+import type { UploadTiming }       from './CaptureExecutionEngine';
 import {
   uploadBusinessCardAsset,
   uploadNotesImage,
@@ -27,26 +31,26 @@ export type EvidenceType =
   | 'voice_note';
 
 interface BusinessCardEvidence {
-  type:             'business_card_front' | 'business_card_back';
-  sessionId:        string;
-  asset:            BusinessCardAsset;
-  uploadImmediately: true;
+  type:         'business_card_front' | 'business_card_back';
+  sessionId:    string;
+  asset:        BusinessCardAsset;
+  uploadTiming: UploadTiming;
 }
 
 interface NotesImageEvidence {
-  type:             'notes_image';
-  sessionId:        string;
-  dataUrl:          string;
-  uploadImmediately: false;
+  type:         'notes_image';
+  sessionId:    string;
+  dataUrl:      string;
+  uploadTiming: UploadTiming;
 }
 
 interface VoiceNoteEvidence {
-  type:             'voice_note';
-  sessionId:        string;
-  audioBlob:        Blob;
-  durationMs:       number;
-  mimeType:         string;
-  uploadImmediately: false;
+  type:         'voice_note';
+  sessionId:    string;
+  audioBlob:    Blob;
+  durationMs:   number;
+  mimeType:     string;
+  uploadTiming: UploadTiming;
 }
 
 export type CaptureEvidence = BusinessCardEvidence | NotesImageEvidence | VoiceNoteEvidence;
@@ -63,7 +67,7 @@ class CaptureEvidenceManager {
     switch (evidence.type) {
       case 'business_card_front':
       case 'business_card_back':
-        void this._uploadBusinessCard(evidence.asset);
+        void this._uploadBusinessCard(evidence.asset, evidence.uploadTiming);
         break;
 
       case 'notes_image':
@@ -75,11 +79,13 @@ class CaptureEvidenceManager {
       case 'voice_note':
         // Delegated to VoiceEvidenceManager, which owns the full upload →
         // transcription lifecycle including offline queueing.
+        // Pass uploadTiming so the manager can respect IMMEDIATE vs ON_SAVE.
         voiceEvidenceManager.register(
           evidence.sessionId,
           evidence.audioBlob,
           evidence.durationMs,
           evidence.mimeType,
+          evidence.uploadTiming,
         );
         break;
     }
@@ -117,7 +123,10 @@ class CaptureEvidenceManager {
 
   // ── Private upload helpers ─────────────────────────────────────────────────
 
-  private async _uploadBusinessCard(asset: BusinessCardAsset): Promise<void> {
+  private async _uploadBusinessCard(asset: BusinessCardAsset, timing: UploadTiming): Promise<void> {
+    if (timing === 'NEVER') return;
+    if (timing === 'ON_SAVE') return; // deferred to onSaveAndNext
+    // IMMEDIATE
     if (!navigator.onLine) return;
     const result = await uploadBusinessCardAsset(asset).catch(() => null);
     if (result?.uploaded && !result.metadataWritten) {

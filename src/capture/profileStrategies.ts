@@ -66,6 +66,7 @@ export interface QueueStrategy {
 export interface UploadStrategy {
   uploadCardsImmediately: boolean;
   uploadNotesOnSave:      boolean;
+  uploadVoiceOnSave:      boolean;
 }
 
 /**
@@ -90,16 +91,6 @@ export interface PromotionStrategyParams {
 }
 
 /**
- * Sync Strategy — controls how session/field sync operations are routed.
- *
- *   syncSessionImmediately: upsert the capture_sessions row as soon as a
- *                           session is created (CRM does this today).
- */
-export interface SyncStrategy {
-  syncSessionImmediately: boolean;
-}
-
-/**
  * ProcessingResult Strategy — no-op passthrough; the pipeline result shape
  * is shared. This strategy exists so future profiles can transform the
  * result (e.g. Exhibition may suppress the "queued" toast).
@@ -121,7 +112,6 @@ export interface CaptureProfileStrategies {
   queue:      QueueStrategy;
   upload:     UploadStrategy;
   promotion:  PromotionStrategy;
-  sync:       SyncStrategy;
   result:     ResultStrategy;
 }
 
@@ -156,6 +146,7 @@ class CrmQueueStrategy implements QueueStrategy {
 class CrmUploadStrategy implements UploadStrategy {
   uploadCardsImmediately = true;
   uploadNotesOnSave      = true;
+  uploadVoiceOnSave      = true;
 }
 
 class CrmPromotionStrategy implements PromotionStrategy {
@@ -173,15 +164,23 @@ class CrmPromotionStrategy implements PromotionStrategy {
   }
 }
 
-class CrmSyncStrategy implements SyncStrategy {
-  syncSessionImmediately = true;
-}
 
 class CrmResultStrategy implements ResultStrategy {
   transformResult(result: ProcessingResult): ProcessingResult {
     return result;
   }
 }
+
+const CRM_STRATEGIES: CaptureProfileStrategies = {
+  validation: new CrmValidationStrategy(),
+  review:     new CrmReviewStrategy(),
+  ai:         new CrmAIStrategy(),
+  queue:      new CrmQueueStrategy(),
+  upload:     new CrmUploadStrategy(),
+  promotion:  new CrmPromotionStrategy(),
+  result:     new CrmResultStrategy(),
+};
+
 // ─── Exhibition Profile implementation ────────────────────────────────────────
 // Speed-first: non-blocking capture, deferred extraction, all uploads on save,
 // always-queue routing, review skipped, promotion active, result pass-through.
@@ -242,17 +241,6 @@ const EXHIBITION_STRATEGIES: CaptureProfileStrategies = {
   upload:     new ExhibitionUploadStrategy(),
   promotion:  new ExhibitionPromotionStrategy(),
   result:     new ExhibitionResultStrategy(),
-};
-
-const CRM_STRATEGIES: CaptureProfileStrategies = {
-  validation: new CrmValidationStrategy(),
-  review:     new CrmReviewStrategy(),
-  ai:         new CrmAIStrategy(),
-  queue:      new CrmQueueStrategy(),
-  upload:     new CrmUploadStrategy(),
-  promotion:  new CrmPromotionStrategy(),
-  sync:       new CrmSyncStrategy(),
-  result:     new CrmResultStrategy(),
 };
 
 // ─── Profile registry ─────────────────────────────────────────────────────────
