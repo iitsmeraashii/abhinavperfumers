@@ -100,6 +100,7 @@ export default function CaptureLeadPage() {
     (s: { status: string; progress: number; progressLabel: string; error: string | null }) => {
       setOcrDebug(s as typeof ocrDebug);
     },
+  const [exhibitionCardAssets, setExhibitionCardAssets] = useState<{ front: string; back: string | null }>({ front: '', back: null });
     [],
   );
 
@@ -650,6 +651,7 @@ export default function CaptureLeadPage() {
       lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
       await saveCompletedLead(lead);
       addEntryRef.current('Card complete — lead saved to completed_leads', { id: bsid, status: lead.status });
+      setExhibitionCardAssets({ front: frontAssetId, back: backAssetId });
     }
   }, [actions, session.draftData, cardSessionId, lastOcrResult, isOnline, makeRoutingCbs, queue, selectedEvent]);
 
@@ -785,6 +787,8 @@ export default function CaptureLeadPage() {
         />
       )}
 
+            frontAssetId={exhibitionCardAssets.front}
+            backAssetId={exhibitionCardAssets.back}
       <CaptureDebugPanel
         session={session}
         lastScan={lastScan}
