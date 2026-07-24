@@ -291,7 +291,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MyAccountPage({ onBack }: { onBack: () => void }) {
-  const { user, salesRep, logout } = useAuth();
+  const { user, salesRep, logout, updateSalesRep } = useAuth();
   const { selectedEvent, activeEvents, loadingEvent, setSelectedEvent, refreshSelectedEvent } = useEvent();
 
   const [toast, setToast]         = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
@@ -324,6 +324,7 @@ export default function MyAccountPage({ onBack }: { onBack: () => void }) {
         .update({ default_capture_profile: profile })
         .eq('id', salesRep!.id);
       if (error) throw error;
+      updateSalesRep({ default_capture_profile: profile });
       showToast(`Default capture mode set to ${profile === 'CRM' ? 'CRM' : 'Exhibition'}`, 'success');
     } catch {
       setProfileValue(prev); // revert

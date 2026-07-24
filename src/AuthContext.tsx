@@ -40,6 +40,8 @@ interface AuthContextType {
   loading:  boolean;
   login:    (rep_code: string, password: string) => Promise<string | null>;
   logout:   () => Promise<void>;
+  /** Patch the cached rep profile in-place after a successful DB update. */
+  updateSalesRep: (patch: Partial<SalesRep>) => void;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -221,8 +223,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     : null;
 
+  // Patch the cached rep profile after a successful DB update so consumers
+  // (e.g. Capture page's default profile init) see the new value immediately,
+  // without requiring a logout/login cycle.
+  const updateSalesRep = useCallback((patch: Partial<SalesRep>) => {
+    setSalesRep(prev => (prev ? { ...prev, ...patch } : prev));
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ user, salesRep, authUser, session, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, salesRep, authUser, session, loading, login, logout, updateSalesRep }}>
       {children}
     </AuthContext.Provider>
   );
