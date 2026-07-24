@@ -115,13 +115,15 @@ export default function CaptureLeadPage() {
       actions.patchSync({ ...patch, status: 'synced' } as Partial<BackendSyncState>);
       actions.decrementPendingOps();
   // Seed the session's capture profile from the rep's persisted default.
-  // Only applies when IDLE — an active session keeps its current profile.
+  // Fires on mount and whenever the session returns to IDLE, so leaving and
+  // reopening Capture (or backing out of a session) restores the persisted
+  // default rather than keeping a temporary override.
   useEffect(() => {
     if (session.sessionStatus === 'IDLE' && salesRep?.default_capture_profile) {
       actions.setCaptureProfile(salesRep.default_capture_profile);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [salesRep?.default_capture_profile]);
+  }, [salesRep?.default_capture_profile, session.sessionStatus]);
 
     },
     onSyncError:     (err: string) => {
@@ -705,6 +707,8 @@ export default function CaptureLeadPage() {
             onBack={handleBackToOptions}
             onAssetsChanged={handleCardAssetsChanged}
             onDraftPatch={actions.patchDraft}
+            label="Capture Mode"
+            helperText="Temporary override for this capture session."
             onVisionResult={handleVisionResult}
             onOcrResult={handleOcrResult}
             onOcrStateChange={handleOcrStateChange}
