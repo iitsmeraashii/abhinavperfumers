@@ -788,9 +788,12 @@ interface Props {
   onDiscard:     () => Promise<void>;
   onSaveAndNext?: () => Promise<{ error?: string } | void>;
   onVoiceNoteRecorded?: (blob: Blob, durationMs: number, mimeType: string) => void;
+  /** When true, contact fields are optional because evidence (card/QR)
+   *  satisfies the minimum save requirement. Used in Exhibition mode. */
+  contactDetailsOptional?: boolean;
 }
 
-export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onVoiceNoteRecorded }: Props) {
+export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onVoiceNoteRecorded, contactDetailsOptional }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
@@ -825,6 +828,9 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
 
   const hasDraftData = !!(clientName || company || phone || notes || notesImage);
   const hasIdentifier = !!(clientName.trim() || company.trim() || phone.trim());
+  // In Exhibition mode, evidence (card/QR) satisfies the minimum requirement.
+  const hasEvidence = !!(d.cardFrontAssetId || d.rawQr);
+  const canSave = contactDetailsOptional ? (hasIdentifier || hasEvidence) : hasIdentifier;
   const backendSessionId = session.sync.backendSessionId;
 
   // Authoritative transcription state derived solely from capture_assets.transcription_status.
@@ -1237,9 +1243,11 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
           px-4 pt-3 md:relative md:mt-6 md:border-t-0 md:bg-transparent md:backdrop-blur-none md:px-0 md:pt-0"
         style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}
       >
-        {!hasIdentifier && (
+        {!canSave && (
           <p className="max-w-lg mx-auto mb-2 text-center text-xs font-medium text-amber-600">
-            Enter at least a name, company, or phone number to save this lead
+            {contactDetailsOptional
+              ? 'Capture a business card, scan a QR code, or enter a name, company, or phone number to save'
+              : 'Enter at least a name, company, or phone number to save this lead'}
           </p>
         )}
         <div className="max-w-lg mx-auto flex gap-3">
@@ -1258,7 +1266,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
           <button
             type="button"
             onClick={handleSaveAndNext}
-            disabled={saving || !hasIdentifier}
+            disabled={saving || !canSave}
             className="flex-[2] flex items-center justify-center gap-2 py-3.5 rounded-xl
               bg-stone-900 text-white text-sm font-semibold shadow-sm
               hover:bg-stone-800 active:bg-stone-950 active:scale-[0.98]

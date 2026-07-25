@@ -6,13 +6,14 @@ import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
 import { useAutosave } from './capture/useAutosave';
 import { loadDraft, clearDraft } from './capture/captureDraftStorage';
-import { deleteSessionAssets, getAsset } from './capture/captureAssetStorage';
+import { deleteSessionAssets } from './capture/captureAssetStorage';
 import { OfflineBanner } from './capture/OfflineBanner';
 import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
 import { CaptureProfileSelector } from './capture/CaptureProfileSelector';
 import { ManualEntryForm } from './capture/ManualEntryForm';
 import { BusinessCardCapture } from './capture/BusinessCardCapture';
 import { Toast, DraftRecoveryBanner } from './capture/CaptureUI';
+import { ExhibitionPostCapture } from './capture/ExhibitionPostCapture';
 import type { SaveState } from './capture/useAutosave';
 import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
 import {
@@ -94,13 +95,18 @@ export default function CaptureLeadPage() {
     error: string | null;
   }>({ status: 'idle', progress: 0, progressLabel: '', error: null });
   const [ocrDiagnostics, setOcrDiagnostics] = useState<OcrPipelineDiagnostics | null>(null);
+  // Exhibition post-capture: after a business card is captured, show a lightweight
+  // decision screen (Save & Next / Add Details / Discard) instead of jumping
+  // straight to the manual form. Only used in EXHIBITION profile.
+  const [showExhibitionPostCapture, setShowExhibitionPostCapture] = useState(false);
+  const [exhibitionSaving, setExhibitionSaving] = useState(false);
+  const [exhibitionCardAssets, setExhibitionCardAssets] = useState<{ front: string; back: string | null }>({ front: '', back: null });
 
   // Stable reference so BusinessCardCapture's useEffect dep on this prop doesn't cycle.
   const handleOcrStateChange = useCallback(
     (s: { status: string; progress: number; progressLabel: string; error: string | null }) => {
       setOcrDebug(s as typeof ocrDebug);
     },
-  const [exhibitionCardImages, setExhibitionCardImages] = useState<{ front: string | null; back: string | null }>({ front: null, back: null });
     [],
   );
 
@@ -636,9 +642,31 @@ export default function CaptureLeadPage() {
       cardBackAssetId:  backAssetId ?? undefined,
     };
 
+    const bsid = sessionRef.current.sync.backendSessionId;
+
+    // Exhibition mode: show the post-capture decision screen instead of
+    // jumping straight to the manual form. The session stays in CAPTURING
+    // with captureMethod BUSINESS_CARD so the card UI is unmounted and the
+    // post-capture overlay takes over.
+    if (profileEngine.getProfile() === 'EXHIBITION') {
+      // Stash the draft so Add More Details can pick it up later.
+      actions.startCaptureWithDraft('MANUAL', newDraft);
+      setExhibitionCardAssets({ front: frontAssetId, back: backAssetId });
+      setShowExhibitionPostCapture(true);
+      if (bsid) {
+        executionEngine.routeFieldSync(queue, isOnline, bsid, newDraft, makeRoutingCbs());
+        const lead = buildCompletedLead(
+          bsid, 'BUSINESS_CARD', newDraft as import('./capture/types').DraftData,
+          bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
+        );
+        lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
+        await saveCompletedLead(lead);
+      }
+      return;
+    }
+
     actions.startCaptureWithDraft('MANUAL', newDraft);
 
-    const bsid = sessionRef.current.sync.backendSessionId;
     if (bsid) {
       executionEngine.routeFieldSync(queue, isOnline, bsid, newDraft, makeRoutingCbs());
       addEntryRef.current('Session fields queued/synced after card complete', { bsid });
@@ -651,13 +679,28 @@ export default function CaptureLeadPage() {
       lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
       await saveCompletedLead(lead);
       addEntryRef.current('Card complete — lead saved to completed_leads', { id: bsid, status: lead.status });
-      const [frontAsset, backAsset] = await Promise.all([
-        getAsset(frontAssetId),
-        backAssetId ? getAsset(backAssetId) : Promise.resolve(null),
-      ]);
-      setExhibitionCardImages({ front: frontAsset?.dataUrl ?? null, back: backAsset?.dataUrl ?? null });
     }
   }, [actions, session.draftData, cardSessionId, lastOcrResult, isOnline, makeRoutingCbs, queue, selectedEvent]);
+
+  // ── Exhibition post-capture actions ──────────────────────────────────────
+  const handleExhibitionSaveAndNext = useCallback(async () => {
+    setExhibitionSaving(true);
+    await handleSaveAndNext();
+    setExhibitionSaving(false);
+    setShowExhibitionPostCapture(false);
+  }, [handleSaveAndNext]);
+
+  const handleExhibitionAddDetails = useCallback(() => {
+    // The draft was already stashed via startCaptureWithDraft('MANUAL', ...) when
+    // the card was captured. Just hide the post-capture overlay — the manual
+    // form is already mounted and will render with the stashed draft.
+    setShowExhibitionPostCapture(false);
+  }, []);
+
+  const handleExhibitionDiscard = useCallback(async () => {
+    setShowExhibitionPostCapture(false);
+    await handleDiscardDraft();
+  }, [handleDiscardDraft]);
 
   // ── Manual form field sync (debounced 1.5s) ───────────────────────────────
   const fieldSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -678,8 +721,8 @@ export default function CaptureLeadPage() {
   // ─── Derived flags ─────────────────────────────────────────────────────────
   const isCapturing      = session.sessionStatus !== 'IDLE';
   const showQrScanner    = isCapturing && session.captureMethod === 'QR' && qrScanning;
-  const showManualForm   = isCapturing && session.captureMethod === 'MANUAL';
-  const showBusinessCard = isCapturing && session.captureMethod === 'BUSINESS_CARD';
+  const showManualForm   = isCapturing && session.captureMethod === 'MANUAL' && !showExhibitionPostCapture;
+  const showBusinessCard = isCapturing && session.captureMethod === 'BUSINESS_CARD' && !showExhibitionPostCapture;
 
   useEffect(() => {
     if (showQrScanner && qrSectionRef.current) {
@@ -742,6 +785,17 @@ export default function CaptureLeadPage() {
           </div>
         )}
 
+        {showExhibitionPostCapture && (
+          <ExhibitionPostCapture
+            frontAssetId={exhibitionCardAssets.front}
+            backAssetId={exhibitionCardAssets.back}
+            onSaveAndNext={handleExhibitionSaveAndNext}
+            onAddDetails={handleExhibitionAddDetails}
+            onDiscard={handleExhibitionDiscard}
+            saving={exhibitionSaving}
+          />
+        )}
+
         {showManualForm && (
           <ManualEntryForm
             session={session}
@@ -752,6 +806,7 @@ export default function CaptureLeadPage() {
             onDiscard={handleDiscardDraft}
             onSaveAndNext={handleSaveAndNext}
             onVoiceNoteRecorded={handleVoiceNoteRecorded}
+            contactDetailsOptional={session.captureProfile === 'EXHIBITION'}
           />
         )}
 
@@ -771,6 +826,7 @@ export default function CaptureLeadPage() {
             onOcrStateChange={handleOcrStateChange}
             onOcrDiagnostics={setOcrDiagnostics}
             onDebugLog={(step, detail, level) => addEntry(step, detail, level)}
+            exhibitionMode={session.captureProfile === 'EXHIBITION'}
           />
           </div>
         )}
@@ -791,8 +847,6 @@ export default function CaptureLeadPage() {
         />
       )}
 
-            frontDataUrl={exhibitionCardImages.front}
-            backDataUrl={exhibitionCardImages.back}
       <CaptureDebugPanel
         session={session}
         lastScan={lastScan}

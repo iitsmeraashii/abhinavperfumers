@@ -187,7 +187,25 @@ const CRM_STRATEGIES: CaptureProfileStrategies = {
 
 class ExhibitionValidationStrategy implements ValidationStrategy {
   validate(data: DraftData): ValidationResult {
-    return validationEngine.validate(data);
+    // Exhibition mode: a lead is valid if it has at least one contact identifier
+    // (name, company, phone) OR evidence (business card photo, QR scan).
+    // Evidence satisfies the minimum because AI will extract details later.
+    const hasName    = !!String(data.clientName ?? '').trim();
+    const hasCompany = !!String(data.company    ?? '').trim();
+    const hasPhone   = !!String(data.phone      ?? '').trim();
+    const hasCard    = !!data.cardFrontAssetId;
+    const hasQr      = !!data.rawQr;
+
+    if (hasName || hasCompany || hasPhone || hasCard || hasQr) {
+      return { valid: true };
+    }
+
+    return {
+      valid: false,
+      error: {
+        message: 'At least one identifier is required — capture a business card, scan a QR code, or enter a name, company, or phone number to save this lead',
+      },
+    };
   }
 }
 

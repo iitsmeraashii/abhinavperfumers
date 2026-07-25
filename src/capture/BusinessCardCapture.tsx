@@ -39,6 +39,9 @@ interface Props {
   onOcrStateChange?: (state: { status: string; progress: number; progressLabel: string; error: string | null }) => void;
   onOcrDiagnostics?: (diag: null) => void;
   onDebugLog?: (step: string, detail?: unknown, level?: 'info' | 'warn' | 'error') => void;
+  /** When true, skip the contact-details section and Continue button, and
+   *  auto-fire onComplete as soon as the front card is captured. */
+  exhibitionMode?: boolean;
 }
 
 // ─── Full-screen camera overlay ───────────────────────────────────────────────
@@ -569,7 +572,7 @@ function ChipInput({ label, icon: Icon, values, confidence, onAdd, onRemove, inp
 export function BusinessCardCapture({
   session, sessionId, isOnline = true, extractionPolicy = 'IMMEDIATE', onComplete, onBack, onAssetsChanged,
   onDraftPatch, onVisionResult, onOcrResult, onOcrStateChange, onOcrDiagnostics: _ignored,
-  onDebugLog,
+  onDebugLog, exhibitionMode = false,
 }: Props) {
   const [front, setFront] = useState<CardState>({ asset: null, status: 'empty' });
   const [back,  setBack]  = useState<CardState>({ asset: null, status: 'empty' });
@@ -584,6 +587,7 @@ export function BusinessCardCapture({
   );
   // lastVisionResult is display-only (confidence badge colours); not part of shared state
   const [lastVisionResult, setLastVisionResult] = useState<VisionResult | null>(null);
+  const autoCompletedRef = useRef(false);
 
   // ── All extracted / edited field values are derived from session.draftData ──
   // Writes go through onDraftPatch → actions.patchDraft (same pattern as ManualEntryForm).
@@ -759,9 +763,17 @@ export function BusinessCardCapture({
 
   const isBusy      = front.status === 'saving' || back.status === 'saving';
   const isRunning   = visionState.status !== 'idle' && visionState.status !== 'done' && visionState.status !== 'error';
-  const canContinue = !!front.asset;
+  const canContinue = !!front.asset && !exhibitionMode;
   const hasExtracted = visionState.status === 'done' && !!visionState.result;
-  const showFields   = hasExtracted || (!!front.asset && !isRunning) || (!isOnline && !!front.asset);
+  const showFields   = !exhibitionMode && (hasExtracted || (!!front.asset && !isRunning) || (!isOnline && !!front.asset));
+
+  // Exhibition mode: auto-fire onComplete as soon as the front card is saved.
+  useEffect(() => {
+    if (exhibitionMode && front.asset && !autoCompletedRef.current) {
+      autoCompletedRef.current = true;
+      onComplete(front.asset.id, back.asset?.id ?? null, null, null);
+    }
+  }, [exhibitionMode, front.asset, back.asset, onComplete]);
 
   function handleContinue() {
     if (!front.asset) return;
