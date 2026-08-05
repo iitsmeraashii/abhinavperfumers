@@ -40,7 +40,8 @@ export type PendingOpType =
   | 'upsert_vision_extraction'
   | 'update_session_fields'
   | 'promote_session'
-  | 'upload_voice_note';
+  | 'upload_voice_note'
+  | 'enqueue_processing_job';
 
 export interface PendingOp {
   id:           string;        // stable op ID (frontend-generated)
@@ -179,6 +180,25 @@ async function executeOp(op: PendingOp): Promise<void> {
         durationMs: number;
       });
       break;
+    case 'enqueue_processing_job': {
+      // ALPE offline fallback: replay a deferred processing-job enqueue.
+      const { produceProcessingJob } = await import('../alpe/jobProducer');
+      const p = op.payload as {
+        backendSessionId: string;
+        draftData:        DraftData;
+        captureMethod:    string | null;
+        eventId:          string | null;
+        eventName:        string | null;
+      };
+      await produceProcessingJob({
+        backendSessionId: p.backendSessionId,
+        draftData:        p.draftData,
+        captureMethod:    p.captureMethod as import('./types').CaptureMethod | null,
+        eventId:          p.eventId,
+        eventName:        p.eventName,
+      });
+      break;
+    }
     default:
       // Unknown op type — drop silently
       break;

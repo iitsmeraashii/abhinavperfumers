@@ -2,7 +2,7 @@
 // Shows all captured leads grouped by sync state.
 // Works fully offline: reads only from IndexedDB, never blocks on network.
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
 import { Inbox, RefreshCw, Wifi, WifiOff, Search, X, Clock, CheckCircle2, AlertCircle, Loader2, FileText, ChevronDown, ChevronRight, Flame, Thermometer, Snowflake, Camera, QrCode, ClipboardList, RotateCcw, Trash2, CreditCard as Edit3, Eye, ArrowRight, Filter, Plus } from 'lucide-react';
 import {
   loadQueueItems, deleteQueueItem, getDisplayName, getDisplayCompany,
@@ -10,6 +10,7 @@ import {
 } from './capture/leadQueueStorage';
 import { getPendingCount, flushQueue } from './capture/captureOfflineQueue';
 import { useOnlineStatus } from './capture/useOnlineStatus';
+import { getAlpeRuntimeState, subscribeAlpeRuntime } from './alpe/diagnostics';
 
 // ─── Status config ─────────────────────────────────────────────────────────────
 
@@ -403,6 +404,127 @@ function DeleteSheet({ item, onConfirm, onCancel }: {
   );
 }
 
+// ─── ALPE Runtime section (dev-only) ──────────────────────────────────────────
+
+function AlpeRuntimeSection() {
+  const state = useSyncExternalStore(
+    subscribeAlpeRuntime,
+    getAlpeRuntimeState,
+    getAlpeRuntimeState,
+  );
+  const [open, setOpen] = useState(false);
+
+  const statusColor = state.schedulerStatus === 'running'
+    ? 'text-green-700 bg-green-50'
+    : state.schedulerStatus === 'starting' || state.schedulerStatus === 'stopping'
+      ? 'text-amber-700 bg-amber-50'
+      : 'text-stone-500 bg-stone-100';
+
+  return (
+    <div className="mt-3 rounded-xl border border-stone-200 overflow-hidden">
+      <button
+        className="w-full flex items-center justify-between px-3 py-2 text-left bg-stone-50/50"
+        onClick={() => setOpen(o => !o)}
+      >
+        <span className="text-[11px] font-semibold text-stone-500 uppercase tracking-wide">ALPE Runtime</span>
+        {open ? <ChevronDown className="w-3.5 h-3.5 text-stone-400" /> : <ChevronRight className="w-3.5 h-3.5 text-stone-400" />}
+      </button>
+
+      {open && (
+        <div className="px-3 pb-3 pt-2 space-y-3 text-xs font-mono">
+          {/* Scheduler */}
+          <div>
+            <p className="text-[10px] text-stone-400 mb-1.5 uppercase tracking-wide">Scheduler</p>
+            <div className="grid grid-cols-2 gap-1.5">
+              <div className="bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <p className="text-[10px] text-stone-400">Status</p>
+                <p className={`font-bold text-sm ${statusColor} rounded px-1.5 py-0.5 inline-block`}>{state.schedulerStatus}</p>
+              </div>
+              <div className="bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <p className="text-[10px] text-stone-400">Poll interval</p>
+                <p className="font-bold text-stone-800 text-sm">{(state.pollIntervalMs / 1000).toFixed(1)}s</p>
+              </div>
+              <div className="bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <p className="text-[10px] text-stone-400">Poll count</p>
+                <p className="font-bold text-stone-800 text-sm">{state.pollCount}</p>
+              </div>
+              <div className="bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <p className="text-[10px] text-stone-400">Last poll</p>
+                <p className="font-bold text-stone-800 text-sm truncate">{state.lastPollAt ? new Date(state.lastPollAt).toLocaleTimeString() : '—'}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Queue Processing */}
+          <div>
+            <p className="text-[10px] text-stone-400 mb-1.5 uppercase tracking-wide">Queue Processing</p>
+            <div className="space-y-1">
+              <div className="flex items-center justify-between bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-stone-500">Jobs found (last poll)</span>
+                <span className="font-bold text-stone-800">{state.jobsFoundLastPoll}</span>
+              </div>
+              <div className="flex items-center justify-between bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-stone-500">Jobs claimed (last poll)</span>
+                <span className="font-bold text-stone-800">{state.jobsClaimedLastPoll}</span>
+              </div>
+              <div className="flex items-center justify-between bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-stone-500">Current job ID</span>
+                <span className="font-bold text-stone-700 text-[11px] truncate max-w-[140px]">{state.currentJobId ?? '—'}</span>
+              </div>
+              <div className="flex items-center justify-between bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-stone-500">Queue state</span>
+                <span className="font-bold text-stone-800">{state.currentQueueState ?? '—'}</span>
+              </div>
+              <div className="flex items-center justify-between bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-stone-500">processing_started_at</span>
+                <span className="font-bold text-stone-800 text-[11px]">{state.processingStartedAt ? new Date(state.processingStartedAt).toLocaleTimeString() : '—'}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Worker */}
+          <div>
+            <p className="text-[10px] text-stone-400 mb-1.5 uppercase tracking-wide">Worker</p>
+            <div className="space-y-1">
+              <div className="flex items-center justify-between bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-stone-500">Worker state</span>
+                <span className="font-bold text-stone-800">{state.workerState ?? '—'}</span>
+              </div>
+              <div className="flex items-center justify-between bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-stone-500">Pipeline stage</span>
+                <span className="font-bold text-stone-800">{state.currentPipelineStage ?? '—'}</span>
+              </div>
+              <div className="flex items-center justify-between bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-stone-500">Capture profile</span>
+                <span className="font-bold text-stone-800">{state.currentCaptureProfile ?? '—'}</span>
+              </div>
+              <div className="flex items-center justify-between bg-stone-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-stone-500">Queue policy</span>
+                <span className="font-bold text-stone-800">{state.queuePolicy ?? '—'}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Errors */}
+          <div>
+            <p className="text-[10px] text-stone-400 mb-1.5 uppercase tracking-wide">Errors</p>
+            <div className="space-y-1">
+              <div className="flex items-start justify-between bg-red-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-red-500 shrink-0">Scheduler</span>
+                <span className="text-red-700 text-[11px] text-right break-all">{state.lastSchedulerError ?? '—'}</span>
+              </div>
+              <div className="flex items-start justify-between bg-red-50 rounded-lg px-2.5 py-1.5">
+                <span className="text-red-500 shrink-0">Worker</span>
+                <span className="text-red-700 text-[11px] text-right break-all">{state.lastWorkerError ?? '—'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Debug panel ─────────────────────────────────────────────────────────────
 
 function QueueDebugPanel({ items, filtered, pendingOps, isOnline }: {
@@ -501,6 +623,9 @@ function QueueDebugPanel({ items, filtered, pendingOps, isOnline }: {
               </div>
             </div>
           )}
+
+          {/* ALPE Runtime — dev-only diagnostics */}
+          <AlpeRuntimeSection />
         </div>
       )}
     </div>

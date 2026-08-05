@@ -12,7 +12,7 @@
 import type { DraftData } from './types';
 import type { ValidationResult } from './captureValidationEngine';
 import type { ReviewResult } from './captureReviewEngine';
-import type { ProcessingResult } from './captureProcessingEngine';
+import type { ProcessingResult } from '../alpe/pipeline';
 import type { PromoteSessionOptions } from './capturePromotionService';
 
 // ─── Strategy interfaces ──────────────────────────────────────────────────────

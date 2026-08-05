@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './AuthContext';
+import { useAlpeScheduler } from './alpe/useAlpeScheduler';
 import { EventProvider, useEvent } from './EventContext';
 import LoginPage from './LoginPage';
 import LeadsPage from './LeadsPage';
@@ -287,6 +288,7 @@ function MobileMoreDrawer({
 
 function Layout() {
   const { user, logout } = useAuth();
+  useAlpeScheduler(user?.authUserId);
   const { refreshSelectedEvent, clearEvent } = useEvent();
   const isAdmin = user?.role === 'admin';
 

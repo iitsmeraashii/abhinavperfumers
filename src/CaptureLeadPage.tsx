@@ -28,9 +28,10 @@ import {
   handleVisionExtraction,
   handleOcrExtraction,
   handleQrExtraction,
-  processCaptureSession,
-} from './capture/captureProcessingEngine';
-import type { ProcessingContext } from './capture/captureProcessingEngine';
+  submitCaptureSession,
+} from './capture/captureProcessingAdapter';
+import type { AdapterResult } from './capture/captureProcessingAdapter';
+import { useAlpeProcessing, notifyAlpeReconnect, notifyAlpeOffline } from './alpe';
 import { profileEngine } from './capture/captureProfileEngine';
 import { executionEngine } from './capture/CaptureExecutionEngine';
 import type { ExecutionPlan, SyncRoutingCallbacks, QueuePolicy, UploadTiming, ExtractionPolicy } from './capture/CaptureExecutionEngine';
@@ -52,7 +53,10 @@ export default function CaptureLeadPage() {
   const [isFlushing, setIsFlushing] = useState(false);
   const [promotionToast, setPromotionToast] = useState<{ message: string; isError: boolean } | null>(null);
 
-  // Flush the offline queue and update pending count badge
+  // Flush the offline queue and update pending count badge.
+  // After the offline queue drains, notify ALPE so it polls immediately —
+  // jobs replayed from the offline queue are now in processing_queue and
+  // ready to be processed.
   const handleReconnect = useCallback(async () => {
     setIsFlushing(true);
     try {
@@ -60,10 +64,14 @@ export default function CaptureLeadPage() {
     } finally {
       setIsFlushing(false);
       getPendingCount().then(setPendingSyncCount);
+      notifyAlpeReconnect();
     }
   }, []);
 
-  const isOnline = useOnlineStatus({ onReconnect: handleReconnect });
+  const isOnline = useOnlineStatus({
+    onReconnect: handleReconnect,
+    onOffline: notifyAlpeOffline,
+  });
   const [session, actions] = useCaptureSession();
   const form = useManualEntryForm(actions);
   const [saveState, setSaveState] = useState<SaveState>('idle');
@@ -379,25 +387,27 @@ export default function CaptureLeadPage() {
       return;
     }
 
-    addEntryRef.current('Save & Next — promoting session to lead_entry', { bsid });
+    addEntryRef.current('Save & Next — submitting capture session', { bsid, isOnline });
 
-    const p: ExecutionPlan = executionEngine.buildPlan(
-      profileEngine.getProfile() ?? executionEngine.defaultProfile,
-      profileEngine.getStrategies(),
-      isOnline,
-    );
+    // Build the legacy execution plan only when ALPE is disabled — the legacy
+    // pipeline consumes it; the ALPE path ignores it.
+    const p: ExecutionPlan | null = useAlpeProcessing()
+      ? null
+      : executionEngine.buildPlan(
+          profileEngine.getProfile() ?? executionEngine.defaultProfile,
+          profileEngine.getStrategies(),
+          isOnline,
+        );
 
-    const ctx: ProcessingContext = {
+    const result: AdapterResult = await submitCaptureSession({
       session:          s,
       backendSessionId: bsid,
       eventCode:        selectedEvent?.event_code ?? null,
-      completedLeadId:  bsid,
       eventId:          selectedEvent?.id ?? null,
       eventName:        selectedEvent?.name ?? null,
       plan:             p,
-    };
-
-    const result = await processCaptureSession(ctx);
+      isOnline,
+    });
 
     if (result.outcome === 'failed') {
       const err = result.error ?? '';
@@ -409,7 +419,7 @@ export default function CaptureLeadPage() {
         : `Failed to save lead: ${err}`;
       setPromotionToast({ message: msg, isError: true });
       setTimeout(() => setPromotionToast(null), 8000);
-      addEntryRef.current('Save & Next — promotion failed (non-retryable)', err);
+      addEntryRef.current('Save & Next — submission failed (non-retryable)', err);
       return { error: err };
     }
 
@@ -419,8 +429,12 @@ export default function CaptureLeadPage() {
       const msg = isOnline
         ? 'Lead saved — will sync when reconnected'
         : 'Lead saved — will sync when back online';
-      addEntryRef.current('Save & Next — promotion queued', { bsid, online: isOnline });
+      addEntryRef.current('Save & Next — submission queued', { bsid, online: isOnline });
       setPromotionToast({ message: msg, isError: false });
+      setTimeout(() => setPromotionToast(null), 4000);
+    } else if (result.outcome === 'submitted') {
+      addEntryRef.current('Save & Next — processing job enqueued', { jobId: result.jobId });
+      setPromotionToast({ message: 'Lead submitted for processing!', isError: false });
       setTimeout(() => setPromotionToast(null), 4000);
     } else {
       addEntryRef.current('Save & Next — lead promoted', { leadId: result.leadId });
@@ -685,9 +699,13 @@ export default function CaptureLeadPage() {
   // ── Exhibition post-capture actions ──────────────────────────────────────
   const handleExhibitionSaveAndNext = useCallback(async () => {
     setExhibitionSaving(true);
-    await handleSaveAndNext();
+    const result = await handleSaveAndNext();
     setExhibitionSaving(false);
-    setShowExhibitionPostCapture(false);
+    // Only dismiss the post-capture overlay on success — on failure the user
+    // needs to retry from the overlay, not be dropped into the full form.
+    if (!result?.error) {
+      setShowExhibitionPostCapture(false);
+    }
   }, [handleSaveAndNext]);
 
   const handleExhibitionAddDetails = useCallback(() => {
