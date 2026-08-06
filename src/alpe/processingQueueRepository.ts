@@ -5,12 +5,15 @@
 import { supabase } from '../supabaseClient';
 import type { EnqueueJobInput, EnqueueResult, ProcessingState, QueueEntry } from './types';
 import { alpeLog, updateAlpeRuntime } from './diagnostics';
+import { logOperationStart, logOperationEnd, logEvent, getCorrelationId } from '../capture/assetSyncDiagnostics';
 
 const TABLE = 'processing_queue';
 
 // ─── Enqueue ──────────────────────────────────────────────────────────────────
 
 export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult> {
+  const corrId = getCorrelationId() ?? 'no_correlation';
+
   const {
     jobId,
     captureSessionId,
@@ -21,6 +24,14 @@ export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult>
     scheduledAt = null,
     metadata = {},
   } = input;
+
+  const ctx = {
+    backendSessionId: captureSessionId,
+  };
+
+  const op = logOperationStart('capture_assets repository insert/upsert — enqueueJob()', ctx);
+
+  logEvent('enqueueJob() — entry', ctx, { corrId, jobId, captureSessionId, userId, eventId });
 
   const now = new Date().toISOString();
 
@@ -43,15 +54,52 @@ export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult>
     updated_at:            now,
   };
 
-  const { data, error } = await supabase
+  logEvent('enqueueJob() — row built', ctx, { corrId, rowId: row.id, rowState: row.state });
+
+  // ── Step: processing_queue insert ─────────────────────────────────────────
+  logEvent('enqueueJob() — awaiting processing_queue insert', ctx, { corrId });
+  const { data, error, count } = await supabase
     .from(TABLE)
     .insert(row)
     .select()
     .maybeSingle();
+  logEvent('enqueueJob() — processing_queue insert resolved', ctx, {
+    corrId,
+    data: data ?? null,
+    dataIsNull: data === null,
+    dataIsUndefined: data === undefined,
+    error: error ? { code: error.code, message: error.message, details: error.details, hint: error.hint, constraint: error.constraint } : null,
+    count: count ?? null,
+  });
 
   if (error) {
+    logEvent('enqueueJob() — insert returned error', ctx, {
+      corrId,
+      error: { code: error.code, message: error.message, details: error.details, hint: error.hint, constraint: error.constraint, status: (error as Record<string, unknown>).status ?? null },
+      operation: 'enqueueJob',
+    });
+    logOperationEnd(op, { payload: row, error, rowsAffected: 0 });
     return { success: false, jobId: null, error: error.message, queued: false };
   }
+
+  // Explicitly log if data resolved to null/undefined/empty
+  if (data === null || data === undefined) {
+    logEvent('enqueueJob() — insert resolved with null/undefined data', ctx, {
+      corrId, dataIsNull: data === null, dataIsUndefined: data === undefined,
+    });
+  }
+  if (count === 0) {
+    logEvent('enqueueJob() — insert resolved with zero rows affected', ctx, { corrId, count });
+  }
+
+  logOperationEnd(op, {
+    payload:          row,
+    rowsAffected:     count ?? 1,
+    createdRowId:     (data as QueueEntry | null)?.id ?? jobId,
+    dbResponse:       data,
+  });
+
+  logEvent('enqueueJob() — returning success', ctx, { corrId, jobId: (data as QueueEntry | null)?.id ?? jobId });
 
   return {
     success:   true,

@@ -57,6 +57,10 @@ import type {
 import { enqueueOp } from './captureOfflineQueue';
 import type { CompletedLeadStatus } from './completedLeadsStorage';
 import type { DraftData } from './types';
+import {
+  logEvent, logOperationStart, logOperationEnd,
+  getCorrelationId,
+} from './assetSyncDiagnostics';
 
 // ─── Execution Policies (PUBLIC) ──────────────────────────────────────────────
 // These are the runtime behavior contract. Consumers read policies, never
@@ -205,6 +209,10 @@ class CaptureExecutionEngine {
     bsid:       string,
     cbs:        SyncRoutingCallbacks,
   ): void {
+    logEvent('routeSessionSync() started', {
+      backendSessionId: bsid,
+      captureMethod: payload.captureMethod,
+    }, { queue, isOnline });
     if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
       syncUpsertSession(payload, this._toSyncCbs(cbs)).catch(() => {});
@@ -220,13 +228,123 @@ class CaptureExecutionEngine {
     payload:    UpsertAssetPayload,
     cbs:        SyncRoutingCallbacks,
   ): void {
-    if (this._shouldSync(queue, isOnline)) {
-      cbs.onBeforeSync();
-      syncUpsertAsset(payload, this._toSyncCbs(cbs)).catch(() => {});
-    } else {
-      enqueueOp('upsert_asset', payload.backendSessionId, payload);
-      cbs.onOfflineQueued();
+    const ctx = {
+      backendSessionId: payload.backendSessionId,
+      assetType:        'business_card' as const,
+      assetSide:         payload.asset.side,
+      localAssetId:      payload.asset.id,
+    };
+    const op = logOperationStart('routeAssetSync()', ctx, { queue, isOnline });
+    const corrId = getCorrelationId() ?? 'no_correlation';
+
+    logEvent('routeAssetSync() — entry', ctx, { queue, isOnline, corrId });
+
+    // ── Branch: _shouldSync() ──────────────────────────────────────────────
+    const shouldSync = this._shouldSync(queue, isOnline);
+    logEvent('routeAssetSync() — _shouldSync() evaluated', ctx, {
+      queue, isOnline, shouldSync, corrId,
+    });
+
+    if (shouldSync) {
+      logEvent('routeAssetSync() — branch: ONLINE SYNC', ctx, { corrId });
+
+      // ── Step: onBeforeSync callback ─────────────────────────────────────
+      logEvent('routeAssetSync() — calling cbs.onBeforeSync()', ctx, { corrId });
+      try {
+        cbs.onBeforeSync();
+        logEvent('routeAssetSync() — cbs.onBeforeSync() returned', ctx, { corrId });
+      } catch (cbErr) {
+        logEvent('routeAssetSync() — cbs.onBeforeSync() threw', ctx, { corrId, error: String(cbErr) });
+        logOperationEnd(op, { error: cbErr instanceof Error ? cbErr : new Error(String(cbErr)) });
+        return;
+      }
+
+      // ── Step: syncUpsertAsset() call ────────────────────────────────────
+      logEvent('routeAssetSync() — calling syncUpsertAsset()', ctx, { corrId });
+      const syncCbs = this._toSyncCbs(cbs);
+      logEvent('routeAssetSync() — _toSyncCbs() resolved', ctx, { corrId, hasOnSyncing: !!syncCbs.onSyncing, hasOnSynced: !!syncCbs.onSynced, hasOnSyncError: !!syncCbs.onSyncError, hasOnOffline: !!syncCbs.onOffline });
+
+      const syncPromise = syncUpsertAsset(payload, syncCbs);
+      logEvent('routeAssetSync() — syncUpsertAsset() promise created', ctx, { corrId, promiseType: typeof syncPromise, isPromise: syncPromise instanceof Promise });
+
+      syncPromise
+        .then(() => {
+          logEvent('routeAssetSync() — syncUpsertAsset() promise RESOLVED', ctx, { corrId });
+          logOperationEnd(op, { extra: { branch: 'online', resolved: true } });
+        })
+        .catch((syncErr: unknown) => {
+          // Log the COMPLETE error object before it is swallowed
+          const errInfo: Record<string, unknown> = {};
+          if (syncErr && typeof syncErr === 'object') {
+            const e = syncErr as Record<string, unknown>;
+            errInfo.code = e.code ?? null;
+            errInfo.message = e.message ?? null;
+            errInfo.details = e.details ?? null;
+            errInfo.hint = e.hint ?? null;
+            errInfo.constraint = e.constraint ?? null;
+            errInfo.status = e.status ?? null;
+            errInfo.stack = e.stack ?? null;
+          } else {
+            errInfo.message = String(syncErr);
+          }
+          logEvent('routeAssetSync() — syncUpsertAsset() promise REJECTED', ctx, {
+            corrId,
+            error: errInfo,
+            operation: 'syncUpsertAsset',
+            failureSource: 'Asset Upsert',
+          });
+          logOperationEnd(op, { error: syncErr instanceof Error ? syncErr : new Error(String(syncErr)) });
+        });
+
+      logEvent('routeAssetSync() — .then/.catch handlers attached', ctx, { corrId });
+      logEvent('routeAssetSync() — returning (online branch, fire-and-forget)', ctx, { corrId, returnReason: 'fire-and-forget sync dispatched' });
+      return;
     }
+
+    // ── Branch: OFFLINE / QUEUE ─────────────────────────────────────────────
+    logEvent('routeAssetSync() — branch: OFFLINE QUEUE', ctx, { corrId, queue });
+
+    logEvent('routeAssetSync() — calling enqueueOp()', ctx, { corrId, opType: 'upsert_asset' });
+    const enqueuePromise = enqueueOp('upsert_asset', payload.backendSessionId, payload);
+    logEvent('routeAssetSync() — enqueueOp() returned', ctx, { corrId, isPromise: enqueuePromise instanceof Promise });
+
+    enqueuePromise
+      .then(() => {
+        logEvent('routeAssetSync() — enqueueOp() promise RESOLVED', ctx, { corrId });
+        logOperationEnd(op, { extra: { branch: 'offline', enqueued: true } });
+      })
+      .catch((enqueueErr: unknown) => {
+        const errInfo: Record<string, unknown> = {};
+        if (enqueueErr && typeof enqueueErr === 'object') {
+          const e = enqueueErr as Record<string, unknown>;
+          errInfo.code = e.code ?? null;
+          errInfo.message = e.message ?? null;
+          errInfo.details = e.details ?? null;
+          errInfo.hint = e.hint ?? null;
+          errInfo.constraint = e.constraint ?? null;
+          errInfo.status = e.status ?? null;
+          errInfo.stack = e.stack ?? null;
+        } else {
+          errInfo.message = String(enqueueErr);
+        }
+        logEvent('routeAssetSync() — enqueueOp() promise REJECTED', ctx, {
+          corrId,
+          error: errInfo,
+          operation: 'enqueueOp',
+          failureSource: 'Network',
+        });
+        logOperationEnd(op, { error: enqueueErr instanceof Error ? enqueueErr : new Error(String(enqueueErr)) });
+      });
+
+    logEvent('routeAssetSync() — calling cbs.onOfflineQueued()', ctx, { corrId });
+    try {
+      cbs.onOfflineQueued();
+      logEvent('routeAssetSync() — cbs.onOfflineQueued() returned', ctx, { corrId });
+    } catch (cbErr) {
+      logEvent('routeAssetSync() — cbs.onOfflineQueued() threw', ctx, { corrId, error: String(cbErr) });
+    }
+
+    logEvent('routeAssetSync() — returning (offline branch, enqueued)', ctx, { corrId, returnReason: 'offline op enqueued' });
   }
 
   routeFieldSync(

@@ -24,6 +24,12 @@ import type { ExecutionPlan } from '../capture/CaptureExecutionEngine';
 import { buildCompletedLead, saveCompletedLead } from '../capture/completedLeadsStorage';
 import type { CaptureSession } from '../capture/types';
 import { alpeLog, updateAlpeRuntime } from './diagnostics';
+import { supabase } from '../supabaseClient';
+import type { EvidenceAssets } from './assetReference';
+import type { ResolvedEvidenceGroup } from './evidenceResolver';
+import { resolveAllEvidence } from './evidenceResolver';
+import { extractBusinessCard, extractQr } from './extractionService';
+import type { ExtractionOutcome } from './extractionService';
 
 // ─── Pipeline Contract ────────────────────────────────────────────────────────
 
@@ -42,7 +48,14 @@ export interface ProcessingContext {
   completedLeadId:  string;
   plan:             ExecutionPlan;
 
-  extractionSource?: string | null;
+  /** Canonical evidence references hydrated from capture_assets by the Worker. */
+  evidence: EvidenceAssets;
+
+  /** Resolved evidence payloads produced by the Evidence Resolver stage. */
+  resolvedEvidence?: ResolvedEvidenceGroup;
+
+  extractionSource?:    string | null;
+  extractionConfidence?: number | null;
   review?: ReviewResult;
   result?: ProcessingResult;
 }
@@ -73,15 +86,192 @@ function executeEvidenceStage(ctx: ProcessingContext): void {
   evidenceManager.onSaveAndNext(backendSessionId);
 }
 
-function executeExtractionStage(ctx: ProcessingContext): void {
+async function executeEvidenceResolutionStage(ctx: ProcessingContext): Promise<void> {
+  alpeLog('Pipeline stage → EVIDENCE_RESOLUTION');
+  updateAlpeRuntime({ currentPipelineStage: 'EVIDENCE_RESOLUTION' });
+
+  const resolved = await resolveAllEvidence(ctx.evidence);
+  ctx.resolvedEvidence = resolved;
+
+  // ── TEMPORARY DIAGNOSTICS: resolved evidence ──
+  const logEntry = {
+    businessCardFront: resolved.businessCard.front.status,
+    businessCardBack:  resolved.businessCard.back.status,
+    qr:                resolved.qr.status,
+    notesImage:        resolved.notesImage.status,
+    audio:             resolved.audio.status,
+    details: [
+      resolved.businessCard.front,
+      resolved.businessCard.back,
+      resolved.qr,
+      resolved.notesImage,
+      resolved.audio,
+    ].filter(r => r.reference).map(r => ({
+      assetType:      r.reference!.assetType,
+      assetId:        r.reference!.assetId,
+      storagePath:    r.storagePath,
+      status:         r.status,
+      urlResolved:    r.url !== null,
+      blobResolved:   r.blob !== null,
+      mimeType:       r.mimeType,
+    })),
+  };
+  console.log('[ALPE DIAG] Evidence Resolution:', logEntry);
+  try {
+    supabase.from('alpe_runtime_dumps').insert({
+      id: `evidence_resolved_${ctx.backendSessionId}`,
+      job_id: ctx.backendSessionId,
+      dump_point: 'EVIDENCE_RESOLUTION',
+      dump_data: logEntry,
+    }).then(() => {}, () => {});
+  } catch { /* ignore */ }
+}
+
+async function executeExtractionStage(ctx: ProcessingContext): Promise<void> {
   alpeLog('Pipeline stage → AI_EXTRACTION');
   updateAlpeRuntime({ currentPipelineStage: 'AI_EXTRACTION' });
-  ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
+
+  const resolved = ctx.resolvedEvidence;
+  const diag: {
+    started: boolean;
+    evidenceType: string | null;
+    provider: string | null;
+    confidence: number | null;
+    fieldsExtracted: string[];
+    error: string | null;
+  } = {
+    started: false,
+    evidenceType: null,
+    provider: null,
+    confidence: null,
+    fieldsExtracted: [],
+    error: null,
+  };
+
+  if (!resolved) {
+    ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
+    diag.error = 'No resolved evidence available';
+    logExtractionDiagnostics(ctx, diag);
+    return;
+  }
+
+  let outcome: ExtractionOutcome | null = null;
+  let evidenceType = 'none';
+
+  // Business card — prefer front, fall back to back
+  if (resolved.businessCard.front.status === 'resolved' || resolved.businessCard.back.status === 'resolved') {
+    evidenceType = 'business_card';
+    const cardRef = resolved.businessCard.front.status === 'resolved'
+      ? resolved.businessCard.front
+      : resolved.businessCard.back;
+    diag.started = true;
+    diag.evidenceType = evidenceType;
+    outcome = await extractBusinessCard(cardRef);
+  }
+  // QR
+  else if (resolved.qr.status === 'resolved') {
+    evidenceType = 'qr';
+    diag.started = true;
+    diag.evidenceType = evidenceType;
+    outcome = await extractQr(resolved.qr);
+  }
+  // Notes image — prepare hook only, no extraction yet
+  else if (resolved.notesImage.status === 'resolved') {
+    evidenceType = 'notes_image';
+    diag.started = true;
+    diag.evidenceType = evidenceType;
+    diag.provider = 'none (hook only)';
+    diag.confidence = 0;
+    diag.fieldsExtracted = [];
+    logExtractionDiagnostics(ctx, diag);
+    ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
+    return;
+  }
+
+  if (outcome && outcome.fields) {
+    const f = outcome.fields;
+    diag.provider    = outcome.source;
+    diag.confidence  = outcome.confidence;
+    diag.error       = outcome.error;
+
+    const extracted: string[] = [];
+    if (f.fullName)     extracted.push('clientName');
+    if (f.company)      extracted.push('company');
+    if (f.designation)  extracted.push('designation');
+    if (f.emails.length)      extracted.push('emails');
+    if (f.phoneNumbers.length) extracted.push('phoneNumbers');
+    if (f.website)      extracted.push('website');
+    if (f.address)      extracted.push('address');
+    diag.fieldsExtracted = extracted;
+
+    // Merge into draftData (don't overwrite fields already set by manual entry)
+    const d = ctx.session.draftData;
+    if (!d.clientName  && f.fullName)     d.clientName  = f.fullName;
+    if (!d.company     && f.company)      d.company     = f.company;
+    if (!d.designation && f.designation)  d.designation = f.designation;
+    if (!d.phone       && f.phoneNumbers.length) d.phone = f.phoneNumbers[0];
+    if (!d.email       && f.emails.length)       d.email  = f.emails[0];
+    if (!d.website     && f.website)      d.website     = f.website;
+    if (!d.address     && f.address)      d.address     = f.address;
+    if (!d.phoneNumbers?.length && f.phoneNumbers.length) d.phoneNumbers = f.phoneNumbers;
+    if (!d.emails?.length       && f.emails.length)       d.emails       = f.emails;
+    if (!d.visionRawText)  d.visionRawText  = f.rawText;
+    if (!d.ocrRawText)     d.ocrRawText     = f.rawText;
+    d.extractionSource    = outcome.source;
+    d.extractionConfidence = outcome.confidence;
+
+    ctx.extractionSource    = outcome.source;
+    ctx.extractionConfidence = outcome.confidence;
+  } else {
+    ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
+    if (outcome?.error) diag.error = outcome.error;
+  }
+
+  logExtractionDiagnostics(ctx, diag);
+}
+
+function logExtractionDiagnostics(
+  ctx: ProcessingContext,
+  diag: {
+    started: boolean;
+    evidenceType: string | null;
+    provider: string | null;
+    confidence: number | null;
+    fieldsExtracted: string[];
+    error: string | null;
+  },
+): void {
+  const logEntry = {
+    ...diag,
+    backendSessionId: ctx.backendSessionId,
+    updatedDraftData: {
+      clientName:           ctx.session.draftData.clientName ?? null,
+      company:              ctx.session.draftData.company ?? null,
+      phone:                ctx.session.draftData.phone ?? null,
+      email:                ctx.session.draftData.email ?? null,
+      phoneNumbers:         ctx.session.draftData.phoneNumbers ?? null,
+      emails:               ctx.session.draftData.emails ?? null,
+      extractionSource:    ctx.session.draftData.extractionSource ?? null,
+      extractionConfidence: ctx.session.draftData.extractionConfidence ?? null,
+    },
+    ctxExtractionSource:    ctx.extractionSource ?? null,
+    ctxExtractionConfidence: ctx.extractionConfidence ?? null,
+  };
+  console.log('[ALPE DIAG] AI Extraction:', logEntry);
+  try {
+    supabase.from('alpe_runtime_dumps').insert({
+      id: `extraction_${ctx.backendSessionId}`,
+      job_id: ctx.backendSessionId,
+      dump_point: 'AI_EXTRACTION',
+      dump_data: logEntry,
+    }).then(() => {}, () => {});
+  } catch { /* ignore */ }
 }
 
 function executeValidationStage(ctx: ProcessingContext): void {
   alpeLog('Pipeline stage → VALIDATION');
   updateAlpeRuntime({ currentPipelineStage: 'VALIDATION' });
+
   const strategies = ctx.plan.strategies;
   const result = strategies.validation.validate(ctx.session.draftData);
   if (!result.valid) {
@@ -184,7 +374,8 @@ export async function processCaptureSession(
   updateAlpeRuntime({ currentPipelineStage: 'LOAD_CONTEXT' });
   const strategies = ctx.plan.strategies;
   executeEvidenceStage(ctx);
-  executeExtractionStage(ctx);
+  await executeEvidenceResolutionStage(ctx);
+  await executeExtractionStage(ctx);
   executeValidationStage(ctx);
   if (ctx.result) {
     return ctx.plan.result === 'SUPPRESS_TOAST'

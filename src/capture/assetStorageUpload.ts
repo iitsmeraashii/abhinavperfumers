@@ -16,6 +16,7 @@
 
 import { supabase } from '../supabaseClient';
 import type { BusinessCardAsset } from './types';
+import { logOperationStart, logOperationEnd, logEvent, getCorrelationId } from './assetSyncDiagnostics';
 
 const BUCKET = 'lead-evidence';
 
@@ -68,29 +69,103 @@ const UPLOAD_FAIL: BusinessCardUploadResult = {
 export async function uploadBusinessCardAsset(
   asset: BusinessCardAsset,
 ): Promise<BusinessCardUploadResult> {
-  if (!navigator.onLine) return UPLOAD_FAIL;
+  const corrId = getCorrelationId() ?? 'no_correlation';
+  const ctx = {
+    backendSessionId: asset.sessionId,
+    assetType:        'business_card' as const,
+    assetSide:         asset.side,
+    localAssetId:      asset.id,
+  };
+
+  logEvent('uploadBusinessCardAsset() — entry', ctx, { corrId });
+
+  const op = logOperationStart('Storage Upload — uploadBusinessCardAsset()', ctx);
+  logEvent('uploadBusinessCardAsset() — logOperationStart created', ctx, { corrId });
+
+  // ── Branch: online check ──────────────────────────────────────────────────
+  const isOnline = navigator.onLine;
+  logEvent('uploadBusinessCardAsset() — navigator.onLine evaluated', ctx, { corrId, isOnline });
+
+  if (!isOnline) {
+    logEvent('uploadBusinessCardAsset() — returning: offline', ctx, { corrId, returnReason: 'navigator.onLine is false', uploaded: false, storagePath: null });
+    logOperationEnd(op, { extra: { skipped: 'offline' } });
+    return UPLOAD_FAIL;
+  }
 
   try {
+    // ── Step: getAuthUserId ──────────────────────────────────────────────────
+    logEvent('uploadBusinessCardAsset() — awaiting getAuthUserId()', ctx, { corrId });
     const userId = await getAuthUserId();
-    if (!userId) return UPLOAD_FAIL;
+    logEvent('uploadBusinessCardAsset() — getAuthUserId() resolved', ctx, {
+      corrId, userId: userId ?? null, userIdIsNull: userId === null, userIdIsUndefined: userId === undefined,
+    });
 
-    const storagePath = `${userId}/${asset.id}.jpg`;
-    const blob = dataUrlToBlob(asset.dataUrl);
-
-    const { error: uploadError } = await supabase.storage
-      .from(BUCKET)
-      .upload(storagePath, blob, { contentType: 'image/jpeg', upsert: true });
-
-    if (uploadError) {
-      console.warn('[assetStorageUpload] business card upload failed:', uploadError.message);
+    if (!userId) {
+      logEvent('uploadBusinessCardAsset() — returning: not authenticated', ctx, { corrId, returnReason: 'userId is null', uploaded: false, storagePath: null });
+      logOperationEnd(op, { error: new Error('Not authenticated') });
       return UPLOAD_FAIL;
     }
 
+    const storagePath = `${userId}/${asset.id}.jpg`;
+    const blob = dataUrlToBlob(asset.dataUrl);
+    logEvent('uploadBusinessCardAsset() — storagePath and blob prepared', ctx, {
+      corrId, storagePath, blobSize: blob.size, blobType: blob.type,
+      blobIsEmpty: blob.size === 0,
+    });
+
+    // ── Step: Storage upload ─────────────────────────────────────────────────
+    logEvent('uploadBusinessCardAsset() — awaiting supabase.storage.upload()', ctx, { corrId, storagePath });
+    const { error: uploadError } = await supabase.storage
+      .from(BUCKET)
+      .upload(storagePath, blob, { contentType: 'image/jpeg', upsert: true });
+    logEvent('uploadBusinessCardAsset() — storage.upload() resolved', ctx, {
+      corrId,
+      uploadError: uploadError ? { message: uploadError.message, name: uploadError.name } : null,
+      uploaded: !uploadError,
+    });
+
+    if (uploadError) {
+      logEvent('uploadBusinessCardAsset() — returning: upload error', ctx, {
+        corrId, returnReason: 'storage.upload returned error', uploaded: false, storagePath: null,
+        error: { message: uploadError.message, name: uploadError.name },
+      });
+      logOperationEnd(op, { error: uploadError });
+      return UPLOAD_FAIL;
+    }
+
+    // ── Step: metadata write ─────────────────────────────────────────────────
+    logEvent('uploadBusinessCardAsset() — awaiting _writeAssetStorageMeta()', ctx, { corrId, storagePath });
     const metadataWritten = await _writeAssetStorageMeta(asset, userId, storagePath);
+    logEvent('uploadBusinessCardAsset() — _writeAssetStorageMeta() resolved', ctx, {
+      corrId, metadataWritten, metadataWrittenIsFalse: metadataWritten === false,
+    });
+
+    logEvent('uploadBusinessCardAsset() — returning: success', ctx, {
+      corrId, returnReason: 'upload + metadata complete', uploaded: true, storagePath,
+    });
+    logOperationEnd(op, { extra: { storagePath, metadataWritten } });
     return { uploaded: true, metadataWritten, storagePath };
 
   } catch (err) {
-    console.warn('[assetStorageUpload] uploadBusinessCardAsset error:', err);
+    // Log the COMPLETE error object before it is handled
+    const errInfo: Record<string, unknown> = {};
+    if (err && typeof err === 'object') {
+      const e = err as Record<string, unknown>;
+      errInfo.code = e.code ?? null;
+      errInfo.message = e.message ?? null;
+      errInfo.details = e.details ?? null;
+      errInfo.hint = e.hint ?? null;
+      errInfo.constraint = e.constraint ?? null;
+      errInfo.status = e.status ?? null;
+      errInfo.stack = e.stack ?? null;
+    } else {
+      errInfo.message = String(err);
+    }
+    logEvent('uploadBusinessCardAsset() — CAUGHT exception', ctx, {
+      corrId, error: errInfo, operation: 'uploadBusinessCardAsset',
+    });
+    logOperationEnd(op, { error: err });
+    logEvent('uploadBusinessCardAsset() — returning after catch', ctx, { corrId, returnReason: 'caught exception', uploaded: false, storagePath: null });
     return UPLOAD_FAIL;
   }
 }
@@ -112,26 +187,39 @@ async function _writeAssetStorageMeta(
 ): Promise<boolean> {
   const { data, error } = await supabase
     .from('capture_assets')
-    .update({
+    .upsert({
+      capture_session_id:    asset.sessionId,
+      user_id:               userId,
+      asset_type:            'business_card',
+      side:                  asset.side,
+      asset_side:            asset.side,
+      local_asset_id:        asset.id,
+      mime_type:             asset.mimeType,
+      size_bytes:            asset.sizeBytes,
+      file_size:             asset.sizeBytes,
+      original_width:        asset.originalWidth,
+      original_height:       asset.originalHeight,
+      stored_width:          asset.storedWidth,
+      stored_height:         asset.storedHeight,
+      width:                 asset.storedWidth,
+      height:                asset.storedHeight,
+      processing_status:     'done',
       storage_provider:      'SUPABASE',
       storage_bucket:        BUCKET,
       storage_path:          storagePath,
       storage_upload_status: 'uploaded',
       storage_uploaded_at:   new Date().toISOString(),
-    })
-    .eq('capture_session_id', asset.sessionId)
-    .eq('local_asset_id', asset.id)
-    .eq('user_id', userId)
+    }, { onConflict: 'capture_session_id,local_asset_id' })
     .select('id');
 
   if (error) {
-    console.warn('[assetStorageUpload] storage metadata UPDATE failed:', error.message);
+    console.warn('[assetStorageUpload] storage metadata upsert failed:', error.message);
     return false;
   }
 
-  const rows = Array.isArray(data) ? data.length : 0;
+  const rows = Array.isArray(data) ? data.length : (data ? 1 : 0);
   if (rows === 0) {
-    console.warn('[assetStorageUpload] storage metadata UPDATE matched zero rows — row may not exist yet');
+    console.warn('[assetStorageUpload] storage metadata upsert returned zero rows');
     return false;
   }
   return true;

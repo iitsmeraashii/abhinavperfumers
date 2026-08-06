@@ -13,6 +13,7 @@
 import { supabase } from '../supabaseClient';
 import { getAuthIdentity } from './captureAuth';
 import { executePromotion } from './capturePromotionService';
+import { logOperationStart, logOperationEnd, logEvent, getCorrelationId } from './assetSyncDiagnostics';
 import type {
   BackendSyncState,
   BusinessCardAsset,
@@ -57,16 +58,29 @@ export async function syncUpsertSession(
 ): Promise<void> {
   if (!online()) { cbs.onOffline(); return; }
 
+  const op = logOperationStart('syncUpsertSession()', {
+    backendSessionId: payload.sessionId,
+    captureMethod:    payload.captureMethod,
+  });
+
   cbs.onSyncing();
 
   try {
     const identity = await getAuthIdentity();
-    if (!identity) { cbs.onSyncError('Not authenticated'); return; }
+    if (!identity) { cbs.onSyncError('Not authenticated'); logOperationEnd(op, { error: new Error('Not authenticated') }); return; }
 
     const { userId, repCode } = identity;
     const {
       sessionId, captureMethod, draftData, sessionStatus, localDraftKey, eventId,
     } = payload;
+
+    // Check if session row already exists before upserting
+    const { data: existingRow } = await supabase
+      .from('capture_sessions')
+      .select('id')
+      .eq('id', sessionId)
+      .maybeSingle();
+    const sessionExistsBefore = !!existingRow;
 
     // Build the phones/emails arrays from the single-value draft fields
     const phones = draftData.phone ? [draftData.phone] : [];
@@ -80,41 +94,52 @@ export async function syncUpsertSession(
     if (draftData.email)        extractedFields.email        = draftData.email;
     if (draftData.designation)  extractedFields.designation  = draftData.designation;
 
-    const { error } = await supabase
+    const upsertPayload = {
+      id:               sessionId,
+      user_id:          userId,
+      sales_rep_code:   repCode,
+      event_id:         eventId ?? null,
+      capture_method:   captureMethod,
+      session_status:   sessionStatus.toLowerCase(),
+      extracted_fields: extractedFields,
+      notes:            draftData.notes ?? '',
+      phones,
+      emails,
+      local_draft_key:  localDraftKey ?? null,
+      // New enrichment fields
+      lead_temperature:       draftData.leadTemperature ?? null,
+      lead_type:              draftData.leadType ?? null,
+      previous_rep_code:      draftData.previousRepCode ?? null,
+      application:            draftData.application?.length ? draftData.application : null,
+      price_range:            draftData.priceRange ?? null,
+      quick_keywords:         draftData.quickKeywords?.length ? draftData.quickKeywords : null,
+      target_market:          draftData.targetMarket?.length ? draftData.targetMarket : null,
+      certification:          draftData.certification?.length ? draftData.certification : null,
+      benchmark:              draftData.benchmark?.length ? draftData.benchmark : null,
+      notes_image_url:        draftData.notesImageDataUrl ?? null,
+      voice_note_duration_ms: draftData.voiceNoteDurationMs ?? null,
+      voice_note_transcript:  draftData.voiceNoteTranscript ?? null,
+      // Legacy columns
+      client_name:      draftData.clientName ?? null,
+      company:          draftData.company    ?? null,
+      designation:      draftData.designation ?? null,
+      synced_at:        new Date().toISOString(),
+    };
+
+    const { error, count } = await supabase
       .from('capture_sessions')
-      .upsert({
-        id:               sessionId,
-        user_id:          userId,
-        sales_rep_code:   repCode,
-        event_id:         eventId ?? null,
-        capture_method:   captureMethod,
-        session_status:   sessionStatus.toLowerCase(),
-        extracted_fields: extractedFields,
-        notes:            draftData.notes ?? '',
-        phones,
-        emails,
-        local_draft_key:  localDraftKey ?? null,
-        // New enrichment fields
-        lead_temperature:       draftData.leadTemperature ?? null,
-        lead_type:              draftData.leadType ?? null,
-        previous_rep_code:      draftData.previousRepCode ?? null,
-        application:            draftData.application?.length ? draftData.application : null,
-        price_range:            draftData.priceRange ?? null,
-        quick_keywords:         draftData.quickKeywords?.length ? draftData.quickKeywords : null,
-        target_market:          draftData.targetMarket?.length ? draftData.targetMarket : null,
-        certification:          draftData.certification?.length ? draftData.certification : null,
-        benchmark:              draftData.benchmark?.length ? draftData.benchmark : null,
-        notes_image_url:        draftData.notesImageDataUrl ?? null,
-        voice_note_duration_ms: draftData.voiceNoteDurationMs ?? null,
-        voice_note_transcript:  draftData.voiceNoteTranscript ?? null,
-        // Legacy columns
-        client_name:      draftData.clientName ?? null,
-        company:          draftData.company    ?? null,
-        designation:      draftData.designation ?? null,
-        synced_at:        new Date().toISOString(),
-      }, { onConflict: 'id' });
+      .upsert(upsertPayload, { onConflict: 'id' })
+      .select('id')
+      .maybeSingle();
 
     if (error) throw error;
+
+    logOperationEnd(op, {
+      payload: upsertPayload,
+      sessionExistsBefore,
+      rowsAffected: count ?? 1,
+      dbResponse: { id: sessionId },
+    });
 
     cbs.onSynced({
       backendSessionId: sessionId,
@@ -123,6 +148,7 @@ export async function syncUpsertSession(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('[captureBackendSync] syncUpsertSession failed:', msg);
+    logOperationEnd(op, { error: err });
     cbs.onSyncError(msg);
   }
 }
@@ -138,55 +164,174 @@ export async function syncUpsertAsset(
   payload: UpsertAssetPayload,
   cbs: SyncCallbacks,
 ): Promise<void> {
-  if (!online()) { cbs.onOffline(); return; }
+  const corrId = getCorrelationId() ?? 'no_correlation';
+  const ctx = {
+    backendSessionId: payload.backendSessionId,
+    assetType:        'business_card' as const,
+    assetSide:         payload.asset.side,
+    localAssetId:      payload.asset.id,
+  };
 
+  logEvent('syncUpsertAsset() — entry', ctx, { corrId });
+
+  // ── Branch: online check ──────────────────────────────────────────────────
+  const isOnline = online();
+  logEvent('syncUpsertAsset() — online() evaluated', ctx, { corrId, isOnline });
+
+  if (!isOnline) {
+    logEvent('syncUpsertAsset() — returning: offline', ctx, { corrId, returnReason: 'navigator.onLine is false' });
+    cbs.onOffline();
+    return;
+  }
+
+  const op = logOperationStart('syncUpsertAsset()', ctx);
+  logEvent('syncUpsertAsset() — logOperationStart created', ctx, { corrId });
+
+  // ── Step: onSyncing callback ───────────────────────────────────────────────
+  logEvent('syncUpsertAsset() — calling cbs.onSyncing()', ctx, { corrId });
   cbs.onSyncing();
+  logEvent('syncUpsertAsset() — cbs.onSyncing() returned', ctx, { corrId });
 
   try {
+    // ── Step: getAuthIdentity ──────────────────────────────────────────────
+    logEvent('syncUpsertAsset() — awaiting getAuthIdentity()', ctx, { corrId });
     const identity = await getAuthIdentity();
-    if (!identity) { cbs.onSyncError('Not authenticated'); return; }
+    logEvent('syncUpsertAsset() — getAuthIdentity() resolved', ctx, {
+      corrId,
+      hasIdentity: !!identity,
+      identityUserId: identity?.userId ?? null,
+      identityRepCode: identity?.repCode ?? null,
+      identityIsNull: identity === null,
+      identityIsUndefined: identity === undefined,
+    });
+
+    if (!identity) {
+      logEvent('syncUpsertAsset() — returning: not authenticated', ctx, { corrId, returnReason: 'identity is null/undefined' });
+      cbs.onSyncError('Not authenticated');
+      logOperationEnd(op, { error: new Error('Not authenticated') });
+      return;
+    }
     const { userId } = identity;
 
     const { backendSessionId, asset } = payload;
+    logEvent('syncUpsertAsset() — payload destructured', ctx, { corrId, userId, backendSessionId, assetId: asset.id });
 
-    // local_asset_id is the stable frontend identifier ("asset_<ts>_<rand>").
-    // The DB generates the UUID primary key; (capture_session_id, local_asset_id)
-    // is the unique conflict key that makes each upsert idempotent.
-    const { data, error } = await supabase
+    // ── Step: session existence check ──────────────────────────────────────
+    logEvent('syncUpsertAsset() — awaiting session existence check', ctx, { corrId });
+    const { data: sessionRow, error: sessionCheckError } = await supabase
+      .from('capture_sessions')
+      .select('id')
+      .eq('id', backendSessionId)
+      .maybeSingle();
+    logEvent('syncUpsertAsset() — session existence check resolved', ctx, {
+      corrId,
+      sessionRow: sessionRow ?? null,
+      sessionRowIsNull: sessionRow === null,
+      sessionRowIsUndefined: sessionRow === undefined,
+      sessionCheckError: sessionCheckError ? { message: sessionCheckError.message, code: sessionCheckError.code } : null,
+    });
+
+    if (sessionCheckError) {
+      logEvent('syncUpsertAsset() — session existence check returned error', ctx, {
+        corrId,
+        error: { code: sessionCheckError.code, message: sessionCheckError.message, details: sessionCheckError.details, hint: sessionCheckError.hint },
+      });
+    }
+
+    const sessionExistsBefore = !!sessionRow;
+    logEvent('syncUpsertAsset() — sessionExistsBefore computed', ctx, { corrId, sessionExistsBefore });
+
+    // ── Step: build upsert payload ─────────────────────────────────────────
+    const upsertPayload = {
+      capture_session_id: backendSessionId,
+      user_id:            userId,
+      asset_type:         'business_card',
+      side:               asset.side,
+      asset_side:         asset.side,
+      local_asset_id:     asset.id,
+      mime_type:          asset.mimeType,
+      size_bytes:         asset.sizeBytes,
+      file_size:          asset.sizeBytes,
+      original_width:     asset.originalWidth,
+      original_height:    asset.originalHeight,
+      stored_width:       asset.storedWidth,
+      stored_height:      asset.storedHeight,
+      width:              asset.storedWidth,
+      height:             asset.storedHeight,
+      processing_status:  'done',
+    };
+    logEvent('syncUpsertAsset() — upsert payload built', ctx, { corrId, payloadKeys: Object.keys(upsertPayload) });
+
+    // ── Step: capture_assets upsert ─────────────────────────────────────────
+    logEvent('syncUpsertAsset() — awaiting capture_assets upsert', ctx, { corrId });
+    const { data, error, count } = await supabase
       .from('capture_assets')
-      .upsert({
-        capture_session_id: backendSessionId,
-        user_id:            userId,
-        asset_type:         'business_card',
-        side:               asset.side,
-        asset_side:         asset.side,   // legacy column
-        local_asset_id:     asset.id,
-        mime_type:          asset.mimeType,
-        size_bytes:         asset.sizeBytes,
-        file_size:          asset.sizeBytes,  // legacy column
-        original_width:     asset.originalWidth,
-        original_height:    asset.originalHeight,
-        stored_width:       asset.storedWidth,
-        stored_height:      asset.storedHeight,
-        width:              asset.storedWidth,   // legacy column
-        height:             asset.storedHeight,  // legacy column
-        processing_status:  'done',
-      }, { onConflict: 'capture_session_id,local_asset_id' })
+      .upsert(upsertPayload, { onConflict: 'capture_session_id,local_asset_id' })
       .select('id')
       .maybeSingle();
+    logEvent('syncUpsertAsset() — capture_assets upsert resolved', ctx, {
+      corrId,
+      data: data ?? null,
+      dataIsNull: data === null,
+      dataIsUndefined: data === undefined,
+      error: error ? { code: error.code, message: error.message, details: error.details, hint: error.hint, constraint: error.constraint } : null,
+      count: count ?? null,
+    });
 
-    if (error) throw error;
+    if (error) {
+      logEvent('syncUpsertAsset() — capture_assets upsert returned error, throwing', ctx, {
+        corrId,
+        error: { code: error.code, message: error.message, details: error.details, hint: error.hint, constraint: error.constraint, status: (error as Record<string, unknown>).status ?? null },
+      });
+      throw error;
+    }
 
     const confirmedId = data?.id ?? asset.id;
+    logEvent('syncUpsertAsset() — confirmedId computed', ctx, { corrId, confirmedId, dbReturnedId: data?.id ?? null, fellBackToAssetId: !data?.id });
 
+    logOperationEnd(op, {
+      payload: upsertPayload,
+      sessionExistsBefore,
+      rowsAffected: count ?? 1,
+      createdRowId: data?.id ?? null,
+      dbResponse: data,
+    });
+    logEvent('syncUpsertAsset() — logOperationEnd called', ctx, { corrId });
+
+    // ── Step: onSynced callback ─────────────────────────────────────────────
+    logEvent('syncUpsertAsset() — calling cbs.onSynced()', ctx, { corrId, confirmedId });
     cbs.onSynced({
       backendAssetIds:  { [asset.id]: confirmedId },
       lastSyncedAt:     new Date().toISOString(),
     });
+    logEvent('syncUpsertAsset() — cbs.onSynced() returned', ctx, { corrId });
+
+    logEvent('syncUpsertAsset() — returning normally', ctx, { corrId, returnReason: 'success' });
   } catch (err) {
+    // Log the COMPLETE error object before it is handled
+    const errInfo: Record<string, unknown> = {};
+    if (err && typeof err === 'object') {
+      const e = err as Record<string, unknown>;
+      errInfo.code = e.code ?? null;
+      errInfo.message = e.message ?? null;
+      errInfo.details = e.details ?? null;
+      errInfo.hint = e.hint ?? null;
+      errInfo.constraint = e.constraint ?? null;
+      errInfo.status = e.status ?? null;
+      errInfo.stack = e.stack ?? null;
+    } else {
+      errInfo.message = String(err);
+    }
+    logEvent('syncUpsertAsset() — CAUGHT exception', ctx, {
+      corrId,
+      error: errInfo,
+      operation: 'syncUpsertAsset',
+    });
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('[captureBackendSync] syncUpsertAsset failed:', msg);
+    logOperationEnd(op, { error: err });
     cbs.onSyncError(msg);
+    logEvent('syncUpsertAsset() — returning after catch', ctx, { corrId, returnReason: 'caught exception' });
   }
 }
 

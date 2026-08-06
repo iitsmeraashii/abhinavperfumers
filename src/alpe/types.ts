@@ -39,6 +39,7 @@ export type PipelineStage =
   | 'LOAD_CONTEXT'
   | 'VERIFY_ASSETS'
   | 'UPLOAD_ASSETS'
+  | 'EVIDENCE_RESOLUTION'
   | 'AI_EXTRACTION'
   | 'VALIDATION'
   | 'DECISION'
@@ -50,6 +51,7 @@ export const PIPELINE_STAGE_ORDER: readonly PipelineStage[] = [
   'LOAD_CONTEXT',
   'VERIFY_ASSETS',
   'UPLOAD_ASSETS',
+  'EVIDENCE_RESOLUTION',
   'AI_EXTRACTION',
   'VALIDATION',
   'DECISION',

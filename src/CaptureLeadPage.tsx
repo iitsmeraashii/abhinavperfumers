@@ -34,6 +34,10 @@ import type { AdapterResult } from './capture/captureProcessingAdapter';
 import { useAlpeProcessing, notifyAlpeReconnect, notifyAlpeOffline } from './alpe';
 import { profileEngine } from './capture/captureProfileEngine';
 import { executionEngine } from './capture/CaptureExecutionEngine';
+import {
+  startCorrelation, clearCorrelation,
+  logEvent, logOperationStart, logOperationEnd,
+} from './capture/assetSyncDiagnostics';
 import type { ExecutionPlan, SyncRoutingCallbacks, QueuePolicy, UploadTiming, ExtractionPolicy } from './capture/CaptureExecutionEngine';
 import type { CaptureProfile } from './capture/types';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
@@ -258,6 +262,11 @@ export default function CaptureLeadPage() {
 
   // ── Method selection ──────────────────────────────────────────────────────
   const handleMethodSelect = useCallback(async (method: CaptureMethod) => {
+    const corrId = startCorrelation();
+    logEvent('handleMethodSelect()', {
+      captureMethod: method,
+      localSessionId: sessionRef.current.sync.backendSessionId ?? null,
+    }, { correlationId: corrId });
     form.handleReset();
     profileEngine.resolve(sessionRef.current.captureProfile);
 
@@ -387,11 +396,21 @@ export default function CaptureLeadPage() {
       return;
     }
 
+    logEvent('handleSaveAndNext()', {
+      backendSessionId: bsid,
+      captureMethod: s.captureMethod,
+    }, { isOnline });
+    const saveOp = logOperationStart('handleSaveAndNext()', {
+      backendSessionId: bsid,
+      captureMethod: s.captureMethod,
+    });
     addEntryRef.current('Save & Next — submitting capture session', { bsid, isOnline });
+
+    const useAlpe = useAlpeProcessing();
 
     // Build the legacy execution plan only when ALPE is disabled — the legacy
     // pipeline consumes it; the ALPE path ignores it.
-    const p: ExecutionPlan | null = useAlpeProcessing()
+    const p: ExecutionPlan | null = useAlpe
       ? null
       : executionEngine.buildPlan(
           profileEngine.getProfile() ?? executionEngine.defaultProfile,
@@ -399,6 +418,71 @@ export default function CaptureLeadPage() {
           isOnline,
         );
 
+    // ── ALPE (Exhibition) path: fire-and-forget ──────────────────────────
+    // The entire processing pipeline — session upsert, job enqueue, asset
+    // upload, AI extraction, validation, promotion — runs in the background.
+    // The UI resets immediately so the rep can capture the next lead.
+    if (useAlpe) {
+      // Capture all values needed by the background task BEFORE resetting
+      // session state, since refs will point at the fresh (empty) session.
+      const sessionSnapshot = s;
+      const eventId   = selectedEvent?.id ?? null;
+      const eventName = selectedEvent?.name ?? null;
+
+      // Fire the processing job in the background. Do NOT await.
+      submitCaptureSession({
+        session:          sessionSnapshot,
+        backendSessionId: bsid,
+        eventCode:        selectedEvent?.event_code ?? null,
+        eventId,
+        eventName,
+        plan:             null,
+        isOnline,
+      }).then((result: AdapterResult) => {
+        logOperationEnd(saveOp, {
+          error: result.outcome === 'failed' ? result.error : null,
+          extra: { outcome: result.outcome, jobId: result.jobId },
+        });
+
+        if (result.outcome === 'failed') {
+          const err = result.error ?? '';
+          addEntryRef.current('Save & Next — background submission failed', err, 'warn');
+          // Show a toast but do NOT block — the session is already reset.
+          setPromotionToast({ message: `Background save failed: ${err}`, isError: true });
+          setTimeout(() => setPromotionToast(null), 8000);
+        } else if (result.outcome === 'queued') {
+          setPendingSyncCount(n => n + 1);
+          addEntryRef.current('Save & Next — background job queued', { bsid, online: isOnline });
+        } else {
+          addEntryRef.current('Save & Next — background job enqueued', { jobId: result.jobId });
+        }
+      }).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        logOperationEnd(saveOp, { error: err });
+        addEntryRef.current('Save & Next — background submission threw', msg, 'warn');
+        setPromotionToast({ message: `Background save error: ${msg}`, isError: true });
+        setTimeout(() => setPromotionToast(null), 8000);
+      });
+
+      // ── Reset UI immediately ────────────────────────────────────────────
+      addEntryRef.current('Save & Next — UI released (fire-and-forget)', { bsid });
+      form.handleReset();
+      actions.resetSession();
+      profileEngine.reset();
+      setPlan(null);
+      setQrScanning(false);
+      setCardSessionId('');
+      setCardAssets({ front: null, back: null });
+      setLastOcrResult(null);
+      notifySessionReset();
+      await clearDraft();
+      clearCorrelation();
+      setPromotionToast({ message: 'Lead saved — processing in background!', isError: false });
+      setTimeout(() => setPromotionToast(null), 2000);
+      return;
+    }
+
+    // ── Legacy CRM path: await processing (unchanged behaviour) ────────────
     const result: AdapterResult = await submitCaptureSession({
       session:          s,
       backendSessionId: bsid,
@@ -442,6 +526,7 @@ export default function CaptureLeadPage() {
       setTimeout(() => setPromotionToast(null), 3000);
     }
 
+    logOperationEnd(saveOp, { error: result.outcome === 'failed' ? result.error : null, extra: { outcome: result.outcome, jobId: result.jobId } });
     form.handleReset();
     actions.resetSession();
     profileEngine.reset();
@@ -451,6 +536,8 @@ export default function CaptureLeadPage() {
     setCardAssets({ front: null, back: null });
     setLastOcrResult(null);
     notifySessionReset();
+    await clearDraft();
+    clearCorrelation();
   }, [actions, form, selectedEvent, isOnline]);
 
   // ── QR scan complete ──────────────────────────────────────────────────────
@@ -513,6 +600,13 @@ export default function CaptureLeadPage() {
     front: BusinessCardAsset | null,
     back: BusinessCardAsset | null,
   ) => {
+    logEvent('handleCardAssetsChanged()', {
+      backendSessionId: sessionRef.current.sync.backendSessionId ?? null,
+      captureMethod: sessionRef.current.captureMethod,
+      assetType: 'business_card',
+      assetSide: front ? front.side : back?.side ?? null,
+      localAssetId: front?.id ?? back?.id ?? null,
+    }, { frontId: front?.id, backId: back?.id });
     setCardAssets({ front, back });
     actions.patchDraft({
       cardFrontAssetId: front?.id ?? undefined,
@@ -523,11 +617,45 @@ export default function CaptureLeadPage() {
     const bsid = sessionRef.current.sync.backendSessionId;
     if (!bsid) return;
 
+    // Ensure the capture_sessions row exists before syncing assets — the
+    // initial routeSessionSync in handleMethodSelect is fire-and-forget, so
+    // the row may not exist yet when the user takes a photo. Without this
+    // awaited upsert, the FK constraint on capture_assets silently rejects
+    // the asset insert and the photo is lost.
+    if (isOnline) {
+      const { syncUpsertSession } = await import('./capture/captureBackendSync');
+      const sessionOp = logOperationStart('syncUpsertSession (pre-asset)', {
+        backendSessionId: bsid,
+        captureMethod: sessionRef.current.captureMethod ?? 'MANUAL',
+      });
+      await syncUpsertSession({
+        sessionId:     bsid,
+        captureMethod: sessionRef.current.captureMethod ?? 'MANUAL',
+        draftData:     sessionRef.current.draftData,
+        sessionStatus: sessionRef.current.sessionStatus,
+        localDraftKey: 'active_capture_draft',
+        eventId:       selectedEvent?.id ?? null,
+      }, {
+        onSyncing:  () => {},
+        onSynced:   () => { logOperationEnd(sessionOp, { sessionExistsBefore: true }); },
+        onSyncError: (err) => { logOperationEnd(sessionOp, { error: new Error(err) }); },
+        onOffline:  () => { logOperationEnd(sessionOp, { extra: { skipped: 'offline' } }); },
+      }).catch((e) => { logOperationEnd(sessionOp, { error: e }); });
+    }
+
     // Sync EVERY present asset so both front and back get their own capture_assets row.
     // The upsert is idempotent (conflict on capture_session_id + local_asset_id), so
     // re-syncing an asset that already has a row is harmless.
     for (const asset of [front, back]) {
-      if (asset) executionEngine.routeAssetSync(queue, isOnline, { backendSessionId: bsid, asset }, makeRoutingCbs());
+      if (asset) {
+        logEvent('routeAssetSync() dispatched', {
+          backendSessionId: bsid,
+          assetType: 'business_card',
+          assetSide: asset.side,
+          localAssetId: asset.id,
+        });
+        executionEngine.routeAssetSync(queue, isOnline, { backendSessionId: bsid, asset }, makeRoutingCbs());
+      }
     }
     addEntryRef.current('Assets queued/synced', { frontId: front?.id, backId: back?.id });
 
@@ -604,6 +732,12 @@ export default function CaptureLeadPage() {
     ocrResult: OcrResult | null,
     visionResult: VisionResult | null,
   ) => {
+    logEvent('handleCardComplete()', {
+      backendSessionId: sessionRef.current.sync.backendSessionId ?? null,
+      captureMethod: 'BUSINESS_CARD',
+      assetType: 'business_card',
+      localAssetId: frontAssetId,
+    }, { frontAssetId, backAssetId, hasVisionResult: !!visionResult });
     addEntryRef.current('Business card capture complete', {
       frontAssetId, backAssetId,
       hasVisionResult: !!visionResult,
@@ -668,7 +802,18 @@ export default function CaptureLeadPage() {
       setExhibitionCardAssets({ front: frontAssetId, back: backAssetId });
       setShowExhibitionPostCapture(true);
       if (bsid) {
-        executionEngine.routeFieldSync(queue, isOnline, bsid, newDraft, makeRoutingCbs());
+        // Use routeSessionSync (UPSERT) instead of routeFieldSync (UPDATE) so
+        // the capture_sessions row is created if it doesn't exist yet. The
+        // initial routeSessionSync in handleMethodSelect is fire-and-forget,
+        // so the row may not exist when the card completes.
+        executionEngine.routeSessionSync(queue, isOnline, {
+          sessionId:     bsid,
+          captureMethod: 'MANUAL',
+          draftData:     newDraft as import('./capture/types').DraftData,
+          sessionStatus: 'CAPTURING',
+          localDraftKey:  'active_capture_draft',
+          eventId:       selectedEvent?.id ?? null,
+        }, makeRoutingCbs());
         const lead = buildCompletedLead(
           bsid, 'BUSINESS_CARD', newDraft as import('./capture/types').DraftData,
           bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,

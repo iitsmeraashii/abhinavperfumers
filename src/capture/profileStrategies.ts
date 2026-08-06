@@ -221,7 +221,7 @@ class ExhibitionAIStrategy implements AIStrategy {
 }
 
 class ExhibitionQueueStrategy implements QueueStrategy {
-  queueOnDisconnect = false;
+  queueOnDisconnect = true;
 }
 
 class ExhibitionUploadStrategy implements UploadStrategy {

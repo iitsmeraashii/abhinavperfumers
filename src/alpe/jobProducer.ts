@@ -17,6 +17,8 @@
 import { getAuthIdentity } from '../capture/captureAuth';
 import { buildCompletedLead, saveCompletedLead } from '../capture/completedLeadsStorage';
 import { syncUpsertSession } from '../capture/captureBackendSync';
+import { logOperationStart, logOperationEnd, logEvent } from '../capture/assetSyncDiagnostics';
+import { evidenceManager } from '../capture/captureEvidenceManager';
 import type { CaptureMethod, DraftData } from '../capture/types';
 import { enqueueJob } from './processingQueueRepository';
 import type { EnqueueResult } from './types';
@@ -40,8 +42,14 @@ export async function produceProcessingJob(
 ): Promise<ProduceJobResult> {
   const { backendSessionId, draftData, captureMethod, eventId, eventName } = params;
 
+  const op = logOperationStart('produceProcessingJob()', {
+    backendSessionId,
+    captureMethod,
+  });
+
   const identity = await getAuthIdentity();
   if (!identity?.userId) {
+    logOperationEnd(op, { error: new Error('Not authenticated') });
     return { outcome: 'failed', jobId: null, error: 'Not authenticated' };
   }
 
@@ -56,6 +64,10 @@ export async function produceProcessingJob(
     onSyncError: () => {},
     onOffline:   () => {},
   };
+  logEvent('produceProcessingJob() — pre-enqueue syncUpsertSession', {
+    backendSessionId,
+    captureMethod: captureMethod ?? 'MANUAL',
+  });
   await syncUpsertSession(
     {
       sessionId:     backendSessionId,
@@ -67,8 +79,40 @@ export async function produceProcessingJob(
     silentCbs,
   );
 
+  // ── Evidence Readiness Gate ──────────────────────────────────────────────
+  // For BUSINESS_CARD and QR captures, the processing job must not be
+  // enqueued until the required evidence has reached a resolvable state —
+  // meaning the asset has been uploaded to Supabase Storage and the
+  // storage_path has been written to capture_assets. Without this gate the
+  // scheduler claims the job immediately and the worker observes a missing
+  // storage_path, causing evidence resolution to fail and validation to
+  // reject the lead.
+  //
+  // flushPendingUploads starts any deferred (ON_SAVE) business card uploads.
+  // waitForUploads then awaits all upload promises (both IMMEDIATE and the
+  // just-started ON_SAVE ones) so the job is only enqueued after every
+  // evidence asset has a storage_path written to capture_assets.
+  logEvent('produceProcessingJob() — flushing pending evidence uploads', {
+    backendSessionId,
+    captureMethod,
+  });
+  evidenceManager.flushPendingUploads(backendSessionId);
+  logEvent('produceProcessingJob() — awaiting evidence uploads', {
+    backendSessionId,
+    captureMethod,
+  });
+  await evidenceManager.waitForUploads(backendSessionId);
+  logEvent('produceProcessingJob() — evidence uploads complete', {
+    backendSessionId,
+    captureMethod,
+  });
+
   const jobId = crypto.randomUUID();
 
+  logEvent('produceProcessingJob() — enqueueJob', {
+    backendSessionId,
+    captureMethod,
+  }, { jobId });
   const result: EnqueueResult = await enqueueJob({
     jobId,
     captureSessionId: backendSessionId,
@@ -84,6 +128,7 @@ export async function produceProcessingJob(
   });
 
   if (!result.success) {
+    logOperationEnd(op, { error: new Error(result.error ?? 'enqueue failed') });
     return { outcome: 'failed', jobId: null, error: result.error };
   }
 
@@ -97,5 +142,6 @@ export async function produceProcessingJob(
   lead.status = 'pending_sync';
   await saveCompletedLead(lead);
 
+  logOperationEnd(op, { extra: { jobId: result.jobId, outcome: 'queued' } });
   return { outcome: 'queued', jobId: result.jobId, error: null };
 }

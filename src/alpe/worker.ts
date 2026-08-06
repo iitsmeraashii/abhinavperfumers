@@ -26,6 +26,8 @@ import type {
 } from '../capture/types';
 import type { QueueEntry } from './types';
 import { alpeLog, alpeError, updateAlpeRuntime } from './diagnostics';
+import type { AssetReference, EvidenceAssets } from './assetReference';
+import { EMPTY_EVIDENCE } from './assetReference';
 
 export interface WorkerResult {
   outcome:   'completed' | 'failed' | 'requires_review' | 'queued';
@@ -62,6 +64,75 @@ interface BackendSessionRow {
   promoted_lead_id:     string | null;
 }
 
+interface BackendAssetRow {
+  id:                  string;
+  capture_session_id:  string;
+  asset_type:          string;
+  asset_side:          string | null;
+  side:                string | null;
+  local_asset_id:      string;
+  storage_path:        string | null;
+  storage_bucket:      string | null;
+  storage_provider:    string | null;
+  storage_upload_status: string | null;
+  mime_type:           string;
+  file_size:           number;
+  width:               number;
+  height:              number;
+  processing_status:   string;
+  transcription_status: string | null;
+}
+
+// ─── AssetReference builder ─────────────────────────────────────────────────
+
+function buildAssetReference(row: BackendAssetRow): AssetReference {
+  const uploaded = row.storage_upload_status === 'uploaded';
+  return {
+    assetId:       row.id,
+    assetType:     row.asset_type,
+    assetSide:     row.asset_side ?? row.side ?? null,
+    storagePath:   row.storage_path ?? null,
+    publicUrl:     null,
+    localAssetId:  row.local_asset_id,
+    mimeType:      row.mime_type,
+    source:        'capture_assets',
+    uploaded,
+    metadata: {
+      width:               row.width,
+      height:              row.height,
+      fileSize:            row.file_size,
+      transcriptionStatus: row.transcription_status,
+      processingStatus:   row.processing_status,
+      storageBucket:       row.storage_bucket,
+      storageProvider:    row.storage_provider,
+    },
+  };
+}
+
+function buildEvidence(assets: BackendAssetRow[]): EvidenceAssets {
+  const evidence: EvidenceAssets = {
+    businessCard: { front: null, back: null },
+    qr:           null,
+    notesImage:   null,
+    audio:        null,
+  };
+  for (const a of assets) {
+    const ref = buildAssetReference(a);
+    switch (a.asset_type) {
+      case 'business_card': {
+        const side = a.asset_side ?? a.side;
+        if (side === 'front')      evidence.businessCard.front = ref;
+        else if (side === 'back')  evidence.businessCard.back  = ref;
+        break;
+      }
+      case 'qr':           evidence.qr         = ref; break;
+      case 'notes_image':  evidence.notesImage  = ref; break;
+      case 'voice_note':   evidence.audio       = ref; break;
+    }
+  }
+  return evidence;
+}
+
 async function fetchBackendSession(backendSessionId: string): Promise<BackendSessionRow | null> {
   const { data, error } = await supabase
     .from('capture_sessions')
@@ -73,7 +144,22 @@ async function fetchBackendSession(backendSessionId: string): Promise<BackendSes
   return data as BackendSessionRow;
 }
 
-function reconstructDraftData(row: BackendSessionRow): DraftData {
+async function fetchBackendAssets(backendSessionId: string): Promise<BackendAssetRow[]> {
+  const { data, error } = await supabase
+    .from('capture_assets')
+    .select('id, capture_session_id, asset_type, asset_side, side, local_asset_id, storage_path, storage_bucket, storage_provider, storage_upload_status, mime_type, file_size, width, height, processing_status, transcription_status')
+    .eq('capture_session_id', backendSessionId)
+    .order('created_at', { ascending: true });
+
+  if (error || !data) return [];
+  return data as BackendAssetRow[];
+}
+
+function reconstructDraftData(
+  row: BackendSessionRow,
+  assets: BackendAssetRow[],
+  evidence: EvidenceAssets,
+): DraftData {
   const ef = row.extracted_fields ?? {};
   const draft: DraftData = {
     clientName:      (ef.clientName as string)   ?? undefined,
@@ -99,6 +185,28 @@ function reconstructDraftData(row: BackendSessionRow): DraftData {
     extractionSource:    row.extraction_source ?? undefined,
     extractionConfidence: row.extraction_confidence ?? undefined,
   };
+
+  // ── DEPRECATED: scattered evidence fields ──
+  // These are populated from the canonical AssetReference objects in
+  // ctx.evidence for backward compatibility with downstream code that
+  // still reads draftData.cardFrontAssetId etc.  New code should read
+  // from ctx.evidence instead.  Do not remove until all consumers migrate.
+  if (evidence.businessCard.front) {
+    draft.cardFrontAssetId = evidence.businessCard.front.assetId;
+    (draft as DraftData).cardFrontStoragePath = evidence.businessCard.front.storagePath ?? undefined;
+  }
+  if (evidence.businessCard.back) {
+    draft.cardBackAssetId = evidence.businessCard.back.assetId;
+    (draft as DraftData).cardBackStoragePath = evidence.businessCard.back.storagePath ?? undefined;
+  }
+  if (evidence.qr) {
+    draft.rawQr = evidence.qr.storagePath ?? evidence.qr.localAssetId ?? undefined;
+  }
+  if (evidence.notesImage) {
+    draft.notesImageDataUrl = draft.notesImageDataUrl ?? evidence.notesImage.storagePath ?? undefined;
+  }
+  // voice_note duration is read from the session row, not the asset row
+
   return draft;
 }
 
@@ -159,7 +267,39 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     return { outcome: 'completed', leadId: row.promoted_lead_id, error: null, result: null };
   }
 
-  const draftData    = reconstructDraftData(row);
+  // 1b. Load all capture_assets for this session to hydrate evidence references
+  const assets = await fetchBackendAssets(backendSessionId);
+
+  // ── TEMPORARY DIAGNOSTICS: Asset hydration ──
+  console.log('[ALPE DIAG] Assets loaded:', {
+    count: assets.length,
+    assets: assets.map(a => ({
+      id:           a.id,
+      asset_type:   a.asset_type,
+      side:         a.asset_side ?? a.side,
+      local_id:     a.local_asset_id,
+      storage_path:  a.storage_path,
+      bucket:       a.storage_bucket,
+      upload_status: a.storage_upload_status,
+    })),
+  });
+  try {
+    supabase.from('alpe_runtime_dumps').insert({
+      id: `assets_${backendSessionId}`,
+      job_id: backendSessionId,
+      dump_point: 'ASSETS_LOADED',
+      dump_data: {
+        count: assets.length,
+        assets: assets.map(a => ({
+          id: a.id, asset_type: a.asset_type, side: a.asset_side ?? a.side,
+          local_id: a.local_asset_id, storage_path: a.storage_path,
+        })),
+      },
+    }).then(() => {}, () => {});
+  } catch { /* ignore */ }
+
+  const evidence      = buildEvidence(assets);
+  const draftData    = reconstructDraftData(row, assets, evidence);
   const captureMethod = parseCaptureMethod(row.capture_method);
   const profile       = resolveProfile();
   const strategies    = getProfileStrategies(profile);
@@ -190,7 +330,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
       lastSyncedAt:       null,
       pendingOps:         0,
       lastError:          null,
-      backendAssetIds:    {},
+      backendAssetIds:    Object.fromEntries(assets.map(a => [a.local_asset_id, a.id])),
       backendExtractionIds: {},
     },
   };
@@ -203,7 +343,49 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     eventName,
     completedLeadId:  backendSessionId,
     plan,
+    evidence,
   };
+
+  // ── TEMPORARY DIAGNOSTICS: Final hydrated ProcessingContext ──
+  const hydratedDump = {
+    backendSessionId:     ctx.backendSessionId,
+    captureMethod:        ctx.session.captureMethod,
+    // Canonical AssetReference objects
+    evidence: {
+      businessCard: {
+        front: ctx.evidence.businessCard.front,
+        back:  ctx.evidence.businessCard.back,
+      },
+      qr:         ctx.evidence.qr,
+      notesImage: ctx.evidence.notesImage,
+      audio:      ctx.evidence.audio,
+    },
+    // Deprecated scattered fields (for backward compat verification)
+    cardFrontAssetId:     ctx.session.draftData.cardFrontAssetId ?? null,
+    cardBackAssetId:      ctx.session.draftData.cardBackAssetId ?? null,
+    cardFrontStoragePath: (ctx.session.draftData as Record<string, unknown>).cardFrontStoragePath ?? null,
+    cardBackStoragePath:  (ctx.session.draftData as Record<string, unknown>).cardBackStoragePath ?? null,
+    rawQr:                ctx.session.draftData.rawQr ?? null,
+    notesImageDataUrl:    ctx.session.draftData.notesImageDataUrl ?? null,
+    voiceNoteDurationMs:  ctx.session.draftData.voiceNoteDurationMs ?? null,
+    clientName:           ctx.session.draftData.clientName ?? null,
+    company:              ctx.session.draftData.company ?? null,
+    phone:                ctx.session.draftData.phone ?? null,
+    phoneNumbers:         ctx.session.draftData.phoneNumbers ?? null,
+    emails:               ctx.session.draftData.emails ?? null,
+    extractionSource:     ctx.session.draftData.extractionSource ?? null,
+    extractionConfidence: ctx.session.draftData.extractionConfidence ?? null,
+    backendAssetIds:      ctx.session.sync.backendAssetIds,
+  };
+  console.log('[ALPE DIAG] Hydrated ProcessingContext:', hydratedDump);
+  try {
+    supabase.from('alpe_runtime_dumps').insert({
+      id: `hydrated_${backendSessionId}`,
+      job_id: backendSessionId,
+      dump_point: 'HYDRATED_CONTEXT',
+      dump_data: hydratedDump,
+    }).then(() => {}, () => {});
+  } catch { /* ignore */ }
 
   // 5. Run the existing pipeline
   try {
