@@ -11,6 +11,7 @@ import {
 import { getPendingCount, flushQueue } from './capture/captureOfflineQueue';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { getAlpeRuntimeState, subscribeAlpeRuntime } from './alpe/diagnostics';
+import { subscribeCompletedLeads, getCompletedLeadsVersion } from './capture/completedLeadsStorage';
 
 // ─── Status config ─────────────────────────────────────────────────────────────
 
@@ -705,6 +706,18 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
   }, []);
 
   useEffect(() => { reload(); }, [reload]);
+
+  // ── Reactivity: reload when completed_leads changes ──────────────────────
+  // The ALPE pipeline writes `synced` status to completed_leads in IndexedDB
+  // after a successful promotion. Without this subscription the Queue page
+  // would only see the change on a manual refresh. useSyncExternalStore gives
+  // us a version number that bumps on every write; when it changes, we reload.
+  const completedLeadsVersion = useSyncExternalStore(
+    subscribeCompletedLeads,
+    getCompletedLeadsVersion,
+    () => 0,
+  );
+  useEffect(() => { reload(); }, [completedLeadsVersion, reload]);
 
   // Filter + search
   const filtered = useMemo(() => {

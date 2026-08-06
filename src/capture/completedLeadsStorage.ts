@@ -5,6 +5,29 @@
 
 import type { CaptureMethod, DraftData } from './types';
 
+// ─── Change notification ─────────────────────────────────────────────────────
+// Lightweight pub/sub so subscribers (e.g. LeadQueuePage) can react to
+// status transitions without polling. Every write (put/remove) emits a
+// change event. useSyncExternalStore-compatible interface.
+
+type Listener = () => void;
+const listeners = new Set<Listener>();
+let version = 0;
+
+export function subscribeCompletedLeads(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+export function getCompletedLeadsVersion(): number {
+  return version;
+}
+
+function notify(): void {
+  version++;
+  listeners.forEach(l => l());
+}
+
 export type CompletedLeadStatus =
   | 'local_only'      // captured, not yet attempted to sync
   | 'pending_sync'    // sync ops queued, waiting to flush
@@ -126,6 +149,7 @@ async function remove(id: string): Promise<void> {
 
 export async function saveCompletedLead(lead: CompletedLead): Promise<void> {
   await put({ ...lead, updatedAt: new Date().toISOString() });
+  notify();
 }
 
 export async function loadCompletedLeads(): Promise<CompletedLead[]> {
@@ -145,10 +169,12 @@ export async function updateCompletedLeadStatus(
   const existing = await get(id);
   if (!existing) return;
   await put({ ...existing, status, updatedAt: new Date().toISOString(), ...extra });
+  notify();
 }
 
 export async function deleteCompletedLead(id: string): Promise<void> {
   await remove(id);
+  notify();
 }
 
 // ─── Build a lead record from capture session data ────────────────────────────
