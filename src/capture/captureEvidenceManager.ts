@@ -20,6 +20,7 @@ import {
   uploadNotesImage,
   reconcileAssetStorageMetadata,
 } from './assetStorageUpload';
+import type { BusinessCardUploadResult } from './assetStorageUpload';
 import { voiceEvidenceManager } from './voiceEvidenceManager';
 
 let _uploadSeq = 0;
@@ -260,28 +261,110 @@ class CaptureEvidenceManager {
   }
 
   private async _uploadBusinessCard(asset: BusinessCardAsset, timing: UploadTiming): Promise<void> {
+    const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : 'unknown';
+    const storageBucket = 'lead-evidence';
+    const storagePath = `${asset.sessionId}/${asset.id}.jpg`;
+
     _diag('UPLOAD_BUSINESS_CARD_ENTER', {
-      assetId: asset.id,
+      backendSessionId: asset.sessionId,
       localAssetId: asset.id,
-      timing,
-      sessionId: asset.sessionId,
-      isOnline: typeof navigator !== 'undefined' ? navigator.onLine : 'unknown',
-    });
-    if (timing === 'NEVER') { _diag('UPLOAD_BUSINESS_CARD_SKIP', { reason: 'NEVER' }); return; }
-    if (timing === 'ON_SAVE') { _diag('UPLOAD_BUSINESS_CARD_SKIP', { reason: 'ON_SAVE (deferred)' }); return; }
-    // IMMEDIATE
-    if (!navigator.onLine) { _diag('UPLOAD_BUSINESS_CARD_SKIP', { reason: 'offline' }); return; }
-    _diag('UPLOAD_BUSINESS_CARD_CALLING', { assetId: asset.id });
-    const result = await uploadBusinessCardAsset(asset).catch(() => null);
-    _diag('UPLOAD_BUSINESS_CARD_RESULT', {
       assetId: asset.id,
+      imageSize: asset.sizeBytes,
+      mimeType: asset.mimeType,
+      uploadTimingPolicy: timing,
+      isOnline,
+      storageBucket,
+      storagePath,
+      side: asset.side,
+      hasDataUrl: Boolean(asset.dataUrl),
+      dataUrlLength: asset.dataUrl?.length ?? 0,
+    });
+
+    if (timing === 'NEVER') {
+      _diag('UPLOAD_BUSINESS_CARD_RETURN', {
+        backendSessionId: asset.sessionId,
+        localAssetId: asset.id,
+        returnPoint: 'NEVER',
+        reason: 'upload timing policy is NEVER — upload not attempted',
+      });
+      return;
+    }
+
+    if (timing === 'ON_SAVE') {
+      _diag('UPLOAD_BUSINESS_CARD_RETURN', {
+        backendSessionId: asset.sessionId,
+        localAssetId: asset.id,
+        returnPoint: 'ON_SAVE',
+        reason: 'upload timing policy is ON_SAVE — deferred to flushPendingUploads, not uploaded here',
+      });
+      return;
+    }
+
+    // IMMEDIATE
+    if (!navigator.onLine) {
+      _diag('UPLOAD_BUSINESS_CARD_RETURN', {
+        backendSessionId: asset.sessionId,
+        localAssetId: asset.id,
+        returnPoint: 'OFFLINE',
+        reason: 'navigator.onLine is false — upload skipped',
+        isOnline: false,
+      });
+      return;
+    }
+
+    _diag('UPLOAD_BUSINESS_CARD_CALLING', {
+      backendSessionId: asset.sessionId,
+      localAssetId: asset.id,
+      storageBucket,
+      storagePath,
+    });
+
+    let result: BusinessCardUploadResult | null = null;
+    try {
+      result = await uploadBusinessCardAsset(asset);
+    } catch (err: unknown) {
+      const errObj = err as Record<string, unknown>;
+      _diag('UPLOAD_BUSINESS_CARD_ERROR', {
+        backendSessionId: asset.sessionId,
+        localAssetId: asset.id,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        errorStack: err instanceof Error ? err.stack ?? null : null,
+        errorName: err instanceof Error ? err.name : null,
+        supabaseErrorObject: errObj ?? null,
+        httpStatus: errObj?.statusCode ?? errObj?.status ?? null,
+        storageBucket,
+        storagePath,
+      });
+      // Current behaviour swallows the error (was .catch(() => null)).
+      // Preserve that: do not re-throw. result stays null.
+      result = null;
+    }
+
+    _diag('UPLOAD_BUSINESS_CARD_RESULT', {
+      backendSessionId: asset.sessionId,
+      localAssetId: asset.id,
       uploaded: result?.uploaded ?? false,
       metadataWritten: result?.metadataWritten ?? false,
       storagePath: result?.storagePath ?? null,
+      resultIsNull: result === null,
     });
+
     if (result?.uploaded && !result.metadataWritten) {
+      _diag('UPLOAD_BUSINESS_CARD_RECONCILE', {
+        backendSessionId: asset.sessionId,
+        localAssetId: asset.id,
+        reason: 'file uploaded to Storage but metadata write failed — queued for reconciliation',
+      });
       this._pendingReconciliation.push(asset);
     }
+
+    _diag('UPLOAD_BUSINESS_CARD_RETURN', {
+      backendSessionId: asset.sessionId,
+      localAssetId: asset.id,
+      returnPoint: 'NORMAL_COMPLETION',
+      uploaded: result?.uploaded ?? false,
+      metadataWritten: result?.metadataWritten ?? false,
+    });
   }
 }
 
