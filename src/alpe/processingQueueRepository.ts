@@ -12,7 +12,8 @@ const TABLE = 'processing_queue';
 // ─── Enqueue ──────────────────────────────────────────────────────────────────
 
 export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult> {
-  const corrId = getCorrelationId() ?? 'no_correlation';
+  const metaCorrId = (input.metadata as Record<string, unknown> | undefined)?.correlationId ?? null;
+  const corrId = (typeof metaCorrId === 'string' ? metaCorrId : null) ?? getCorrelationId() ?? 'no_correlation';
 
   const {
     jobId,
@@ -27,6 +28,7 @@ export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult>
 
   const ctx = {
     backendSessionId: captureSessionId,
+    correlationId:   corrId,
   };
 
   const op = logOperationStart('capture_assets repository insert/upsert — enqueueJob()', ctx);

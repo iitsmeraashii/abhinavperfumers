@@ -472,6 +472,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     completedLeadId:  backendSessionId,
     plan,
     evidence,
+    correlationId:   (job.metadata as Record<string, unknown> | null)?.correlationId as string | null ?? null,
   };
 
   // ── TEMPORARY DIAGNOSTICS: Final hydrated ProcessingContext ──

@@ -33,6 +33,10 @@ export interface SyncCallbacks {
   onSynced:     (patch: Partial<BackendSyncState>) => void;
   onSyncError:  (err: string) => void;
   onOffline:    () => void;
+  /** Immutable correlation ID for this capture session. When provided,
+   *  diagnostics use this instead of the mutable global, preventing
+   *  correlation crossing between concurrent captures. */
+  correlationId?: string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -61,6 +65,7 @@ export async function syncUpsertSession(
   const op = logOperationStart('syncUpsertSession()', {
     backendSessionId: payload.sessionId,
     captureMethod:    payload.captureMethod,
+    correlationId:    cbs.correlationId ?? null,
   });
 
   cbs.onSyncing();
@@ -164,12 +169,13 @@ export async function syncUpsertAsset(
   payload: UpsertAssetPayload,
   cbs: SyncCallbacks,
 ): Promise<void> {
-  const corrId = getCorrelationId() ?? 'no_correlation';
+  const corrId = cbs.correlationId ?? getCorrelationId() ?? 'no_correlation';
   const ctx = {
     backendSessionId: payload.backendSessionId,
     assetType:        'business_card' as const,
     assetSide:         payload.asset.side,
     localAssetId:      payload.asset.id,
+    correlationId:     cbs.correlationId ?? null,
   };
 
   logEvent('syncUpsertAsset() — entry', ctx, { corrId });

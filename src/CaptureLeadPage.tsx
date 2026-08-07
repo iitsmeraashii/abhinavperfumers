@@ -149,6 +149,13 @@ export default function CaptureLeadPage() {
   // The execution engine owns the online-vs-offline routing decision. The UI
   // layer provides these callbacks so the engine can update React state.
 
+  // Immutable correlation ID for the current capture session. Stored in a
+  // ref so it survives re-renders and is accessible inside fire-and-forget
+  // async callbacks. Set when a capture starts, cleared when it ends. This
+  // is the key fix for correlation crossing: async work from capture N reads
+  // this ref instead of a mutable global that capture N+1 has overwritten.
+  const correlationIdRef = useRef<string | null>(null);
+
   const makeRoutingCbs = useCallback((): SyncRoutingCallbacks => ({
     onBeforeSync:    () => actions.incrementPendingOps(),
     onSyncing:       () => actions.setSyncStatus('syncing'),
@@ -169,6 +176,7 @@ export default function CaptureLeadPage() {
       actions.setSyncStatus('offline');
       setPendingSyncCount(n => n + 1);
     },
+    correlationId:   correlationIdRef.current,
   }), [actions]);
 
   // Extraction sync callbacks use the same SyncRoutingCallbacks as all other
@@ -264,9 +272,12 @@ export default function CaptureLeadPage() {
   // ── Method selection ──────────────────────────────────────────────────────
   const handleMethodSelect = useCallback(async (method: CaptureMethod) => {
     const corrId = startCorrelation();
+    correlationIdRef.current = corrId;
+    evidenceManager.setCorrelationId(corrId);
     logEvent('handleMethodSelect()', {
       captureMethod: method,
       localSessionId: sessionRef.current.sync.backendSessionId ?? null,
+      correlationId: corrId,
     }, { correlationId: corrId });
     form.handleReset();
     profileEngine.resolve(sessionRef.current.captureProfile);
@@ -443,7 +454,7 @@ export default function CaptureLeadPage() {
       // starts the uploads and moves them into _uploadTrackers (which survive
       // onSessionReset). After flush, notifySessionReset is safe — the pending
       // map is already empty.
-      evidenceManager.flushPendingUploads(bsid);
+      evidenceManager.flushPendingUploads(bsid, correlationIdRef.current);
       console.log('[EVIDENCE_DIAG] CAPTURE_PAGE_FLUSH_CALLED', {
         ts: new Date().toISOString(),
         bsid,
@@ -459,6 +470,7 @@ export default function CaptureLeadPage() {
         eventName,
         plan:             null,
         isOnline,
+        correlationId:    correlationIdRef.current,
       }).then((result: AdapterResult) => {
         logOperationEnd(saveOp, {
           error: result.outcome === 'failed' ? result.error : null,
@@ -496,6 +508,8 @@ export default function CaptureLeadPage() {
       setLastOcrResult(null);
       await clearDraft();
       clearCorrelation();
+      correlationIdRef.current = null;
+      evidenceManager.setCorrelationId(null);
       setPromotionToast({ message: 'Lead saved — processing in background!', isError: false });
       setTimeout(() => setPromotionToast(null), 2000);
       return;
@@ -510,6 +524,7 @@ export default function CaptureLeadPage() {
       eventName:        selectedEvent?.name ?? null,
       plan:             p,
       isOnline,
+      correlationId:    correlationIdRef.current,
     });
 
     if (result.outcome === 'failed') {
@@ -557,6 +572,8 @@ export default function CaptureLeadPage() {
     notifySessionReset();
     await clearDraft();
     clearCorrelation();
+    correlationIdRef.current = null;
+    evidenceManager.setCorrelationId(null);
   }, [actions, form, selectedEvent, isOnline]);
 
   // ── QR scan complete ──────────────────────────────────────────────────────
@@ -661,6 +678,7 @@ export default function CaptureLeadPage() {
         onSynced:   () => { logOperationEnd(sessionOp, { sessionExistsBefore: true }); },
         onSyncError: (err) => { logOperationEnd(sessionOp, { error: new Error(err) }); },
         onOffline:  () => { logOperationEnd(sessionOp, { extra: { skipped: 'offline' } }); },
+        correlationId: correlationIdRef.current,
       }).catch((e) => { logOperationEnd(sessionOp, { error: e }); });
     }
 
