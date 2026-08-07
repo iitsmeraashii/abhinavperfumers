@@ -199,6 +199,12 @@ export interface ExtractionOutcome {
 export async function extractBusinessCard(
   resolved: ResolvedEvidence,
 ): Promise<ExtractionOutcome> {
+  console.log('[ALPE TRACE] EXTRACTION_CALL', {
+    source: 'extractBusinessCard',
+    status: resolved.status,
+    hasUrl: !!resolved.url,
+    error: resolved.error ?? null,
+  });
   if (resolved.status !== 'resolved' || !resolved.url) {
     return { source: 'manual', confidence: 0, fields: null, error: resolved.error ?? `Asset not resolved (status: ${resolved.status})` };
   }
@@ -216,6 +222,14 @@ export async function extractBusinessCard(
     // Call edge function (OpenAI Vision)
     try {
       const edgeResponse = await withTimeout(callEdgeFunction(processedBlob), REQUEST_TIMEOUT);
+      console.log('[ALPE TRACE] EXTRACTION_VISION_RESPONSE', {
+        success: edgeResponse.success,
+        confidence: edgeResponse.data?.confidence ?? null,
+        fullName: edgeResponse.data?.fullName ?? null,
+        company: edgeResponse.data?.company ?? null,
+        phoneNumbers: edgeResponse.data?.phoneNumbers ?? null,
+        error: edgeResponse.error ?? null,
+      });
       if (!edgeResponse.success || !edgeResponse.data) {
         throw new Error(edgeResponse.error ?? 'Extraction returned no data');
       }
@@ -226,8 +240,14 @@ export async function extractBusinessCard(
         error:      null,
       };
     } catch (visionErr) {
-      console.warn('[extractionService] OpenAI Vision failed, falling back to Tesseract:', visionErr);
+      console.warn('[ALPE TRACE] EXTRACTION_VISION_FAILED', { error: visionErr instanceof Error ? visionErr.message : String(visionErr) });
       const fallbackFields = await runTesseractFallback(dataUrl);
+      console.log('[ALPE TRACE] EXTRACTION_TESSERACT_RESULT', {
+        fullName: fallbackFields.fullName,
+        company: fallbackFields.company,
+        phoneNumbers: fallbackFields.phoneNumbers,
+        confidence: fallbackFields.confidence,
+      });
       return {
         source:     'tesseract_fallback',
         confidence: fallbackFields.confidence,

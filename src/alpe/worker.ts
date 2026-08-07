@@ -155,6 +155,57 @@ async function fetchBackendAssets(backendSessionId: string): Promise<BackendAsse
   return data as BackendAssetRow[];
 }
 
+/**
+ * Wait for extractable assets (business_card, qr) to finish uploading to
+ * Supabase Storage. In Exhibition mode, card uploads are deferred (ON_SAVE)
+ * and start when the rep presses Save & Next — fire-and-forget, not awaited.
+ * The processing job is enqueued immediately, so the scheduler may pick it
+ * up before the upload completes. Without this wait, the worker would see
+ * storage_path = null, evidence resolution would fail (no_storage), no AI
+ * extraction would run, and validation would reject the lead.
+ *
+ * Polls every 1s up to 30s. If the deadline expires, returns false so the
+ * caller can return a retryable failure — the scheduler will retry the job
+ * on the next poll, by which time the upload should have completed.
+ */
+const ASSET_UPLOAD_TIMEOUT_MS = 30_000;
+const ASSET_UPLOAD_POLL_MS     = 1_000;
+
+async function waitForAssetsUploaded(backendSessionId: string): Promise<boolean> {
+  const deadline = Date.now() + ASSET_UPLOAD_TIMEOUT_MS;
+  let pollNum = 0;
+  while (Date.now() < deadline) {
+    pollNum++;
+    const { data, error } = await supabase
+      .from('capture_assets')
+      .select('asset_type, storage_upload_status, storage_path, local_asset_id')
+      .eq('capture_session_id', backendSessionId)
+      .in('asset_type', ['business_card', 'qr']);
+
+    if (error) {
+      traceStage(backendSessionId, 'WAIT_ASSETS', { poll: pollNum, error: error.message, result: 'query_error' });
+      return false;
+    }
+
+    const extractable = (data ?? []) as { asset_type: string; storage_upload_status: string | null; storage_path: string | null; local_asset_id: string }[];
+    if (extractable.length === 0) {
+      traceStage(backendSessionId, 'WAIT_ASSETS', { poll: pollNum, result: 'no_extractable_assets' });
+      return true;
+    }
+
+    const allUploaded = extractable.every(a => a.storage_upload_status === 'uploaded');
+    const statuses = extractable.map(a => ({ localId: a.local_asset_id, status: a.storage_upload_status, storagePath: a.storage_path }));
+    traceStage(backendSessionId, 'WAIT_ASSETS', { poll: pollNum, allUploaded, statuses });
+
+    if (allUploaded) return true;
+
+    await new Promise<void>(resolve => setTimeout(resolve, ASSET_UPLOAD_POLL_MS));
+  }
+
+  traceStage(backendSessionId, 'WAIT_ASSETS', { result: 'TIMEOUT', polls: pollNum });
+  return false;
+}
+
 function reconstructDraftData(
   row: BackendSessionRow,
   assets: BackendAssetRow[],
@@ -223,6 +274,22 @@ function resolveProfile(): CaptureProfile {
   return 'CRM';
 }
 
+// ─── Trace helper ────────────────────────────────────────────────────────────
+
+function traceStage(backendSessionId: string, stage: string, payload: Record<string, unknown>): void {
+  const ts = new Date().toISOString();
+  const entry = { stage, ts, ...payload };
+  console.log(`[ALPE TRACE] ${stage}`, entry);
+  try {
+    supabase.from('alpe_runtime_dumps').insert({
+      id: `trace_${backendSessionId}_${stage}_${ts}`,
+      job_id: backendSessionId,
+      dump_point: `TRACE:${stage}`,
+      dump_data: entry,
+    }).then(() => {}, () => {});
+  } catch { /* ignore */ }
+}
+
 // ─── Event lookup ────────────────────────────────────────────────────────────
 
 async function fetchEventInfo(
@@ -250,24 +317,36 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
   }
 
   alpeLog('Worker start', { jobId: job.id, captureSessionId: backendSessionId });
+  traceStage(backendSessionId, 'WORKER_START', { jobId: job.id, state: job.state });
   updateAlpeRuntime({ workerState: 'running', currentPipelineStage: 'LOAD_CONTEXT' });
 
   // 1. Reconstruct the capture session from the backend row
+  traceStage(backendSessionId, 'LOAD_SESSION', { started: true });
   const row = await fetchBackendSession(backendSessionId);
   if (!row) {
+    traceStage(backendSessionId, 'LOAD_SESSION', { result: 'NOT_FOUND' });
     alpeError('Worker error — capture session not found', { backendSessionId });
     updateAlpeRuntime({ workerState: null, lastWorkerError: 'Capture session not found', currentPipelineStage: null });
     return { outcome: 'failed', leadId: null, error: 'Capture session not found', result: null };
   }
+  traceStage(backendSessionId, 'LOAD_SESSION', {
+    result: 'OK',
+    captureMethod: row.capture_method,
+    sessionStatus: row.session_status,
+    promotedLeadId: row.promoted_lead_id,
+    extractedFields: row.extracted_fields,
+  });
 
   // Already promoted — nothing to do
   if (row.promoted_lead_id) {
+    traceStage(backendSessionId, 'ALREADY_PROMOTED', { leadId: row.promoted_lead_id });
     alpeLog('Worker — session already promoted', { leadId: row.promoted_lead_id });
     updateAlpeRuntime({ workerState: null, currentPipelineStage: null });
     return { outcome: 'completed', leadId: row.promoted_lead_id, error: null, result: null };
   }
 
   // 1b. Load all capture_assets for this session to hydrate evidence references
+  traceStage(backendSessionId, 'LOAD_ASSETS', { started: true });
   const assets = await fetchBackendAssets(backendSessionId);
 
   // ── TEMPORARY DIAGNOSTICS: Asset hydration ──
@@ -298,20 +377,68 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     }).then(() => {}, () => {});
   } catch { /* ignore */ }
 
+  // 1c. Wait for extractable assets (business_card, qr) to finish uploading.
+  // In Exhibition mode, card uploads are deferred (ON_SAVE) and start when the
+  // rep presses Save & Next — fire-and-forget. The processing job is enqueued
+  // immediately, so uploads may still be in-flight when the scheduler claims
+  // the job. Without this wait, evidence resolution would fail (no_storage),
+  // no AI extraction would run, and validation would reject the lead.
+  const hasExtractableAssets = assets.some(
+    a => a.asset_type === 'business_card' || a.asset_type === 'qr',
+  );
+  if (hasExtractableAssets) {
+    traceStage(backendSessionId, 'WAIT_ASSETS_START', { timeoutMs: ASSET_UPLOAD_TIMEOUT_MS });
+    const ready = await waitForAssetsUploaded(backendSessionId);
+    if (!ready) {
+      traceStage(backendSessionId, 'WAIT_ASSETS_RESULT', { ready: false, willRetry: true });
+      alpeLog('Worker — assets not uploaded yet, will retry');
+      return {
+        outcome: 'failed',
+        leadId:  null,
+        error:   'Assets not yet uploaded to storage, will retry',
+        result:  null,
+      };
+    }
+    traceStage(backendSessionId, 'WAIT_ASSETS_RESULT', { ready: true });
+    // Re-fetch assets now that uploads have completed so evidence references
+    // have the correct storage_path.
+    assets.length = 0;
+    assets.push(...await fetchBackendAssets(backendSessionId));
+  }
+
   const evidence      = buildEvidence(assets);
   const draftData    = reconstructDraftData(row, assets, evidence);
   const captureMethod = parseCaptureMethod(row.capture_method);
   const profile       = resolveProfile();
   const strategies    = getProfileStrategies(profile);
 
+  traceStage(backendSessionId, 'ASSET_REFERENCES', {
+    businessCardFront: evidence.businessCard.front,
+    businessCardBack: evidence.businessCard.back,
+    qr: evidence.qr,
+    notesImage: evidence.notesImage,
+    audio: evidence.audio,
+  });
+
+  traceStage(backendSessionId, 'DRAFT_DATA', {
+    clientName: draftData.clientName ?? null,
+    company: draftData.company ?? null,
+    phone: draftData.phone ?? null,
+    email: draftData.email ?? null,
+    captureMethod,
+    profile,
+  });
+
   updateAlpeRuntime({ currentCaptureProfile: profile });
 
   // 2. Resolve event info
   const { eventCode, eventName } = await fetchEventInfo(row.event_id);
+  traceStage(backendSessionId, 'EVENT_INFO', { eventCode, eventName });
 
   // 3. Build the execution plan via the existing factory
   const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
   const plan = executionEngine.buildPlan(profile, strategies, isOnline);
+  traceStage(backendSessionId, 'PLAN_BUILT', { isOnline, promotion: plan.promotion, review: plan.review });
 
   updateAlpeRuntime({ queuePolicy: plan.queue });
 
@@ -388,8 +515,10 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
   } catch { /* ignore */ }
 
   // 5. Run the existing pipeline
+  traceStage(backendSessionId, 'PIPELINE_START', {});
   try {
     const result = await processCaptureSession(ctx);
+    traceStage(backendSessionId, 'PIPELINE_COMPLETE', { outcome: result.outcome, leadId: result.leadId, error: result.error });
     alpeLog('Worker — pipeline complete', { outcome: result.outcome, leadId: result.leadId });
     updateAlpeRuntime({ workerState: null, currentPipelineStage: null });
     return {
@@ -400,6 +529,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    traceStage(backendSessionId, 'PIPELINE_ERROR', { error: msg, stack: err instanceof Error ? err.stack : null });
     alpeError('Worker error', err);
     updateAlpeRuntime({ workerState: null, currentPipelineStage: null, lastWorkerError: msg });
     return { outcome: 'failed', leadId: null, error: msg, result: null };

@@ -33,6 +33,7 @@ import {
 import type { AdapterResult } from './capture/captureProcessingAdapter';
 import { useAlpeProcessing, notifyAlpeReconnect, notifyAlpeOffline } from './alpe';
 import { profileEngine } from './capture/captureProfileEngine';
+import { evidenceManager } from './capture/captureEvidenceManager';
 import { executionEngine } from './capture/CaptureExecutionEngine';
 import {
   startCorrelation, clearCorrelation,
@@ -429,6 +430,26 @@ export default function CaptureLeadPage() {
       const eventId   = selectedEvent?.id ?? null;
       const eventName = selectedEvent?.name ?? null;
 
+      // Flush deferred (ON_SAVE) business card uploads BEFORE resetting the
+      // UI. In Exhibition mode, cardUploadTiming is ON_SAVE, so the evidence
+      // manager holds the asset bytes in _pendingCardUploads. If we reset the
+      // session first, notifySessionReset() clears that map and the deferred
+      // uploads are lost — storage_path never gets written and the processing
+      // job fails evidence resolution. Flushing here starts the uploads
+      // immediately so their promises are tracked and survive the reset.
+      // Flush deferred (ON_SAVE) business card uploads BEFORE resetting the
+      // UI. In Exhibition mode, cardUploadTiming is ON_SAVE, so the evidence
+      // manager holds the asset bytes in _pendingCardUploads. flushPendingUploads
+      // starts the uploads and moves them into _uploadTrackers (which survive
+      // onSessionReset). After flush, notifySessionReset is safe — the pending
+      // map is already empty.
+      evidenceManager.flushPendingUploads(bsid);
+      console.log('[EVIDENCE_DIAG] CAPTURE_PAGE_FLUSH_CALLED', {
+        ts: new Date().toISOString(),
+        bsid,
+      });
+      notifySessionReset();
+
       // Fire the processing job in the background. Do NOT await.
       submitCaptureSession({
         session:          sessionSnapshot,
@@ -447,7 +468,6 @@ export default function CaptureLeadPage() {
         if (result.outcome === 'failed') {
           const err = result.error ?? '';
           addEntryRef.current('Save & Next — background submission failed', err, 'warn');
-          // Show a toast but do NOT block — the session is already reset.
           setPromotionToast({ message: `Background save failed: ${err}`, isError: true });
           setTimeout(() => setPromotionToast(null), 8000);
         } else if (result.outcome === 'queued') {
@@ -474,7 +494,6 @@ export default function CaptureLeadPage() {
       setCardSessionId('');
       setCardAssets({ front: null, back: null });
       setLastOcrResult(null);
-      notifySessionReset();
       await clearDraft();
       clearCorrelation();
       setPromotionToast({ message: 'Lead saved — processing in background!', isError: false });
@@ -813,7 +832,7 @@ export default function CaptureLeadPage() {
           sessionStatus: 'CAPTURING',
           localDraftKey:  'active_capture_draft',
           eventId:       selectedEvent?.id ?? null,
-        }, makeRoutingCbs());
+        }, bsid, makeRoutingCbs());
         const lead = buildCompletedLead(
           bsid, 'BUSINESS_CARD', newDraft as import('./capture/types').DraftData,
           bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,

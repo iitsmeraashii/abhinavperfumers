@@ -266,7 +266,10 @@ export async function syncUpsertAsset(
     logEvent('syncUpsertAsset() — awaiting capture_assets upsert', ctx, { corrId });
     const { data, error, count } = await supabase
       .from('capture_assets')
-      .upsert(upsertPayload, { onConflict: 'capture_session_id,local_asset_id' })
+      .upsert(upsertPayload, {
+        onConflict: 'capture_session_id,local_asset_id',
+        defaultToNull: false,
+      })
       .select('id')
       .maybeSingle();
     logEvent('syncUpsertAsset() — capture_assets upsert resolved', ctx, {
@@ -288,6 +291,35 @@ export async function syncUpsertAsset(
 
     const confirmedId = data?.id ?? asset.id;
     logEvent('syncUpsertAsset() — confirmedId computed', ctx, { corrId, confirmedId, dbReturnedId: data?.id ?? null, fellBackToAssetId: !data?.id });
+
+    // ── Readback: verify whether storage_path survived this upsert.
+    // syncUpsertAsset does NOT send storage_path. If _writeAssetStorageMeta
+    // already wrote one, defaultToNull:false should preserve it. This readback
+    // confirms that — if storage_path is null here, either (a) the upload
+    // hadn't completed yet, or (b) defaultToNull:false didn't protect it.
+    try {
+      const { data: rbSync, error: rbSyncErr } = await supabase
+        .from('capture_assets')
+        .select('id, storage_path, storage_bucket, storage_upload_status')
+        .eq('capture_session_id', backendSessionId)
+        .eq('local_asset_id', asset.id)
+        .maybeSingle();
+      if (rbSyncErr) {
+        logEvent('syncUpsertAsset() — readback ERROR', ctx, { corrId, error: rbSyncErr.message });
+      } else {
+        const rb = rbSync as { id: string; storage_path: string | null; storage_bucket: string | null; storage_upload_status: string | null } | null;
+        logEvent('syncUpsertAsset() — READBACK', ctx, {
+          corrId,
+          rowId: rb?.id ?? null,
+          storage_path: rb?.storage_path ?? null,
+          storage_bucket: rb?.storage_bucket ?? null,
+          storage_upload_status: rb?.storage_upload_status ?? null,
+          note: 'syncUpsertAsset does not write storage_path — null here means upload not yet complete or defaultToNull:false failed',
+        });
+      }
+    } catch (rbErr) {
+      logEvent('syncUpsertAsset() — readback threw', ctx, { corrId, error: String(rbErr) });
+    }
 
     logOperationEnd(op, {
       payload: upsertPayload,

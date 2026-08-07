@@ -24,6 +24,13 @@ export function registerCardEvidence(
   uploadTiming: UploadTiming,
 ): void {
   const { front, back } = assets;
+  console.log('[EVIDENCE_DIAG] REGISTER_CARD_EVIDENCE_CALL', {
+    ts: new Date().toISOString(),
+    sessionId,
+    uploadTiming,
+    frontId: front?.id ?? null,
+    backId: back?.id ?? null,
+  });
   if (front) evidenceManager.register({ type: 'business_card_front', sessionId, asset: front, uploadTiming });
   if (back)  evidenceManager.register({ type: 'business_card_back',  sessionId, asset: back,  uploadTiming });
 }

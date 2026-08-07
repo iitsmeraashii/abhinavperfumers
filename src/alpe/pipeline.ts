@@ -25,6 +25,20 @@ import { buildCompletedLead, saveCompletedLead } from '../capture/completedLeads
 import type { CaptureSession } from '../capture/types';
 import { alpeLog, updateAlpeRuntime } from './diagnostics';
 import { supabase } from '../supabaseClient';
+
+function traceStage(backendSessionId: string, stage: string, payload: Record<string, unknown>): void {
+  const ts = new Date().toISOString();
+  const entry = { stage, ts, ...payload };
+  console.log(`[ALPE TRACE] ${stage}`, entry);
+  try {
+    supabase.from('alpe_runtime_dumps').insert({
+      id: `trace_${backendSessionId}_${stage}_${ts}`,
+      job_id: backendSessionId,
+      dump_point: `TRACE:${stage}`,
+      dump_data: entry,
+    }).then(() => {}, () => {});
+  } catch { /* ignore */ }
+}
 import type { EvidenceAssets } from './assetReference';
 import type { ResolvedEvidenceGroup } from './evidenceResolver';
 import { resolveAllEvidence } from './evidenceResolver';
@@ -90,6 +104,16 @@ async function executeEvidenceResolutionStage(ctx: ProcessingContext): Promise<v
   alpeLog('Pipeline stage → EVIDENCE_RESOLUTION');
   updateAlpeRuntime({ currentPipelineStage: 'EVIDENCE_RESOLUTION' });
 
+  traceStage(ctx.backendSessionId, 'EVIDENCE_RESOLUTION_START', {
+    evidenceInput: {
+      front: ctx.evidence.businessCard.front,
+      back: ctx.evidence.businessCard.back,
+      qr: ctx.evidence.qr,
+      notesImage: ctx.evidence.notesImage,
+      audio: ctx.evidence.audio,
+    },
+  });
+
   const resolved = await resolveAllEvidence(ctx.evidence);
   ctx.resolvedEvidence = resolved;
 
@@ -117,6 +141,7 @@ async function executeEvidenceResolutionStage(ctx: ProcessingContext): Promise<v
     })),
   };
   console.log('[ALPE DIAG] Evidence Resolution:', logEntry);
+  traceStage(ctx.backendSessionId, 'EVIDENCE_RESOLUTION_COMPLETE', logEntry);
   try {
     supabase.from('alpe_runtime_dumps').insert({
       id: `evidence_resolved_${ctx.backendSessionId}`,
@@ -132,6 +157,12 @@ async function executeExtractionStage(ctx: ProcessingContext): Promise<void> {
   updateAlpeRuntime({ currentPipelineStage: 'AI_EXTRACTION' });
 
   const resolved = ctx.resolvedEvidence;
+  traceStage(ctx.backendSessionId, 'AI_EXTRACTION_START', {
+    hasResolved: !!resolved,
+    frontStatus: resolved?.businessCard.front.status ?? null,
+    backStatus: resolved?.businessCard.back.status ?? null,
+    qrStatus: resolved?.qr.status ?? null,
+  });
   const diag: {
     started: boolean;
     evidenceType: string | null;
@@ -258,6 +289,7 @@ function logExtractionDiagnostics(
     ctxExtractionConfidence: ctx.extractionConfidence ?? null,
   };
   console.log('[ALPE DIAG] AI Extraction:', logEntry);
+  traceStage(ctx.backendSessionId, 'AI_EXTRACTION_COMPLETE', logEntry);
   try {
     supabase.from('alpe_runtime_dumps').insert({
       id: `extraction_${ctx.backendSessionId}`,
@@ -273,7 +305,15 @@ function executeValidationStage(ctx: ProcessingContext): void {
   updateAlpeRuntime({ currentPipelineStage: 'VALIDATION' });
 
   const strategies = ctx.plan.strategies;
-  const result = strategies.validation.validate(ctx.session.draftData);
+  const draftData = ctx.session.draftData;
+  traceStage(ctx.backendSessionId, 'VALIDATION_START', {
+    clientName: draftData.clientName ?? null,
+    company: draftData.company ?? null,
+    phone: draftData.phone ?? null,
+    email: draftData.email ?? null,
+  });
+  const result = strategies.validation.validate(draftData);
+  traceStage(ctx.backendSessionId, 'VALIDATION_RESULT', { valid: result.valid, error: result.error?.message ?? null });
   if (!result.valid) {
     ctx.result = {
       outcome: 'failed',
@@ -287,6 +327,7 @@ function executeReviewStage(ctx: ProcessingContext): void {
   alpeLog('Pipeline stage → DECISION (review)');
   updateAlpeRuntime({ currentPipelineStage: 'DECISION' });
   if (ctx.plan.review === 'SKIP') {
+    traceStage(ctx.backendSessionId, 'REVIEW', { skipped: true });
     ctx.review = { required: false, reason: null, confidence: null } as ReviewResult;
     return;
   }
@@ -300,6 +341,7 @@ function executeReviewStage(ctx: ProcessingContext): void {
       : null;
 
   ctx.review = strategies.review.evaluate(ctx.session.draftData, confidencePercent);
+  traceStage(ctx.backendSessionId, 'REVIEW', { required: ctx.review.required, reason: ctx.review.reason, confidence: ctx.review.confidence });
 }
 
 async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
@@ -309,6 +351,8 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
   const { session, backendSessionId, eventCode, eventId, eventName, completedLeadId, plan } = ctx;
   const strategies = plan.strategies;
   const isOnline = plan.isOnline;
+
+  traceStage(backendSessionId, 'PROMOTION_START', { promotion: plan.promotion, isOnline, queue: plan.queue });
 
   if (plan.promotion === 'SKIP') {
     ctx.result = { outcome: 'queued', leadId: null, error: null };
@@ -362,6 +406,7 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
   }
 
   ctx.result = { outcome: 'success', leadId: result.leadId, error: null };
+  traceStage(backendSessionId, 'PROMOTION_COMPLETE', { outcome: 'success', leadId: result.leadId });
   alpeLog('Promotion completion', { outcome: 'success', leadId: result.leadId });
 }
 

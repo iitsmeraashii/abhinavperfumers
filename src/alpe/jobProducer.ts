@@ -19,6 +19,7 @@ import { buildCompletedLead, saveCompletedLead } from '../capture/completedLeads
 import { syncUpsertSession } from '../capture/captureBackendSync';
 import { logOperationStart, logOperationEnd, logEvent } from '../capture/assetSyncDiagnostics';
 import { evidenceManager } from '../capture/captureEvidenceManager';
+import { waitForAssetStorageReady } from '../capture/assetStorageUpload';
 import type { CaptureMethod, DraftData } from '../capture/types';
 import { enqueueJob } from './processingQueueRepository';
 import type { EnqueueResult } from './types';
@@ -96,6 +97,12 @@ export async function produceProcessingJob(
     backendSessionId,
     captureMethod,
   });
+  console.log('[EVIDENCE_DIAG] PRODUCER_PRECHECK', {
+    ts: new Date().toISOString(),
+    stage: 'before_flush',
+    backendSessionId,
+    captureMethod,
+  });
   evidenceManager.flushPendingUploads(backendSessionId);
   logEvent('produceProcessingJob() — awaiting evidence uploads', {
     backendSessionId,
@@ -107,12 +114,31 @@ export async function produceProcessingJob(
     captureMethod,
   });
 
+  const requiredAssetIds = captureMethod === 'BUSINESS_CARD'
+    ? [draftData.cardFrontAssetId, draftData.cardBackAssetId].filter((id): id is string => Boolean(id))
+    : [];
+  if (requiredAssetIds.length > 0) {
+    const assetsReady = await waitForAssetStorageReady(backendSessionId, requiredAssetIds);
+    if (!assetsReady) {
+      const error = 'Evidence upload did not complete; processing was not queued';
+      logOperationEnd(op, { error: new Error(error) });
+      return { outcome: 'failed', jobId: null, error };
+    }
+  }
+
   const jobId = crypto.randomUUID();
 
   logEvent('produceProcessingJob() — enqueueJob', {
     backendSessionId,
     captureMethod,
   }, { jobId });
+  console.log('[EVIDENCE_DIAG] JOB_ENQUEUE', {
+    ts: new Date().toISOString(),
+    backendSessionId,
+    jobId,
+    captureMethod,
+    requiredAssetIds,
+  });
   const result: EnqueueResult = await enqueueJob({
     jobId,
     captureSessionId: backendSessionId,

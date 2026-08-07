@@ -22,6 +22,12 @@ import {
 } from './assetStorageUpload';
 import { voiceEvidenceManager } from './voiceEvidenceManager';
 
+let _uploadSeq = 0;
+function _diag(stage: string, payload: Record<string, unknown>): void {
+  const ts = new Date().toISOString();
+  console.log(`[EVIDENCE_DIAG] ${stage}`, { ts, ...payload });
+}
+
 // ─── Evidence model ───────────────────────────────────────────────────────────
 
 export type EvidenceType =
@@ -69,11 +75,31 @@ class CaptureEvidenceManager {
     switch (evidence.type) {
       case 'business_card_front':
       case 'business_card_back': {
+        const sizeBefore = this._pendingCardUploads.get(evidence.sessionId)?.length ?? 0;
+        const trackedBefore = this._uploadTrackers.get(evidence.sessionId)?.length ?? 0;
+        _diag('REGISTER_START', {
+          assetType: evidence.type,
+          assetSide: evidence.asset.side,
+          assetId: evidence.asset.id,
+          localAssetId: evidence.asset.id,
+          sessionId: evidence.sessionId,
+          uploadTiming: evidence.uploadTiming,
+          pendingUploadCountBefore: sizeBefore,
+          trackedUploadCountBefore: trackedBefore,
+          pendingKeysBefore: Array.from(this._pendingCardUploads.keys()),
+        });
         if (evidence.uploadTiming === 'ON_SAVE') {
           const arr = this._pendingCardUploads.get(evidence.sessionId) ?? [];
           arr.push(evidence.asset);
           this._pendingCardUploads.set(evidence.sessionId, arr);
+          const sizeAfter = this._pendingCardUploads.get(evidence.sessionId)?.length ?? 0;
+          _diag('REGISTER_RESULT', {
+            inserted: true,
+            pendingUploadCountAfter: sizeAfter,
+            pendingKeysAfter: Array.from(this._pendingCardUploads.keys()),
+          });
         } else {
+          _diag('REGISTER_RESULT', { inserted: false, reason: 'IMMEDIATE timing — not deferred to ON_SAVE' });
           const p = this._uploadBusinessCard(evidence.asset, evidence.uploadTiming);
           this._trackUpload(evidence.sessionId, p);
         }
@@ -134,22 +160,66 @@ class CaptureEvidenceManager {
    */
   flushPendingUploads(sessionId: string): void {
     const pending = this._pendingCardUploads.get(sessionId);
-    if (!pending || pending.length === 0) return;
+    const trackedBefore = this._uploadTrackers.get(sessionId)?.length ?? 0;
+    _diag('FLUSH_BEGIN', {
+      sessionId,
+      pendingUploadCount: pending?.length ?? 0,
+      trackedUploadCount: trackedBefore,
+      pendingAssetIds: pending?.map(a => a.id) ?? [],
+      pendingKeys: Array.from(this._pendingCardUploads.keys()),
+    });
+    if (!pending || pending.length === 0) {
+      _diag('FLUSH_BEGIN_RESULT', { skipped: true, reason: 'no pending uploads for this sessionId' });
+      return;
+    }
     this._pendingCardUploads.delete(sessionId);
     for (const asset of pending) {
+      _diag('FLUSH_ITERATION', {
+        assetId: asset.id,
+        localAssetId: asset.id,
+        side: asset.side,
+        sessionId,
+      });
       const p = this._uploadBusinessCard(asset, 'IMMEDIATE');
+      const seq = ++_uploadSeq;
+      _diag('UPLOAD_PROMISE_CREATED', {
+        assetId: asset.id,
+        promiseSeq: seq,
+        trackedUploadCount: (this._uploadTrackers.get(sessionId)?.length ?? 0) + 1,
+      });
       this._trackUpload(sessionId, p);
     }
+    const trackedAfter = this._uploadTrackers.get(sessionId)?.length ?? 0;
+    _diag('FLUSH_COMPLETE', {
+      sessionId,
+      pendingUploads: (this._pendingCardUploads.get(sessionId)?.length ?? 0),
+      trackedUploads: trackedAfter,
+    });
   }
 
   async waitForUploads(sessionId: string): Promise<void> {
     const trackers = this._uploadTrackers.get(sessionId);
-    if (!trackers || trackers.length === 0) return;
+    _diag('WAIT_UPLOADS', {
+      sessionId,
+      trackedUploads: trackers?.length ?? 0,
+      hasTrackers: !!trackers,
+      trackerKeys: Array.from(this._uploadTrackers.keys()),
+    });
+    if (!trackers || trackers.length === 0) {
+      _diag('WAIT_UPLOADS_RESULT', { result: 'NO_TRACKERS — Promise.all([]) equivalent (immediate return)' });
+      return;
+    }
+    _diag('WAIT_UPLOADS_RESULT', { result: 'AWAITING', count: trackers.length });
     await Promise.allSettled(trackers);
+    _diag('WAIT_UPLOADS_SETTLED', { sessionId, count: trackers.length });
     this._uploadTrackers.delete(sessionId);
   }
 
   onSessionReset(): void {
+    _diag('SESSION_RESET', {
+      pendingUploadsBefore: Array.from(this._pendingCardUploads.keys()).map(k => ({ key: k, count: this._pendingCardUploads.get(k)?.length ?? 0 })),
+      trackedUploadsBefore: Array.from(this._uploadTrackers.keys()).map(k => ({ key: k, count: this._uploadTrackers.get(k)?.length ?? 0 })),
+    });
     this._pendingNotes = null;
     this._pendingReconciliation = [];
     this._pendingCardUploads.clear();
@@ -164,14 +234,29 @@ class CaptureEvidenceManager {
     const arr = this._uploadTrackers.get(sessionId) ?? [];
     arr.push(p);
     this._uploadTrackers.set(sessionId, arr);
+    _diag('TRACK_UPLOAD', { sessionId, trackedCount: arr.length });
   }
 
   private async _uploadBusinessCard(asset: BusinessCardAsset, timing: UploadTiming): Promise<void> {
-    if (timing === 'NEVER') return;
-    if (timing === 'ON_SAVE') return; // deferred to flushPendingUploads
+    _diag('UPLOAD_BUSINESS_CARD_ENTER', {
+      assetId: asset.id,
+      localAssetId: asset.id,
+      timing,
+      sessionId: asset.sessionId,
+      isOnline: typeof navigator !== 'undefined' ? navigator.onLine : 'unknown',
+    });
+    if (timing === 'NEVER') { _diag('UPLOAD_BUSINESS_CARD_SKIP', { reason: 'NEVER' }); return; }
+    if (timing === 'ON_SAVE') { _diag('UPLOAD_BUSINESS_CARD_SKIP', { reason: 'ON_SAVE (deferred)' }); return; }
     // IMMEDIATE
-    if (!navigator.onLine) return;
+    if (!navigator.onLine) { _diag('UPLOAD_BUSINESS_CARD_SKIP', { reason: 'offline' }); return; }
+    _diag('UPLOAD_BUSINESS_CARD_CALLING', { assetId: asset.id });
     const result = await uploadBusinessCardAsset(asset).catch(() => null);
+    _diag('UPLOAD_BUSINESS_CARD_RESULT', {
+      assetId: asset.id,
+      uploaded: result?.uploaded ?? false,
+      metadataWritten: result?.metadataWritten ?? false,
+      storagePath: result?.storagePath ?? null,
+    });
     if (result?.uploaded && !result.metadataWritten) {
       this._pendingReconciliation.push(asset);
     }
