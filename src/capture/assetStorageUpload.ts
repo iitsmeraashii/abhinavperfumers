@@ -52,8 +52,10 @@ export async function uploadBusinessCardAsset(
   asset: BusinessCardAsset,
 ): Promise<BusinessCardUploadResult> {
   const corrId = getCorrelationId() ?? 'no_correlation';
+  const ts0 = new Date().toISOString();
+
   console.log('[EVIDENCE_DIAG] UPLOAD_FUNCTION_ENTERED', {
-    ts: new Date().toISOString(),
+    ts: ts0,
     assetId: asset.id,
     localAssetId: asset.id,
     sessionId: asset.sessionId,
@@ -64,15 +66,13 @@ export async function uploadBusinessCardAsset(
     hasDataUrl: Boolean(asset.dataUrl),
     dataUrlLength: asset.dataUrl?.length ?? 0,
   });
+
   const ctx = {
     backendSessionId: asset.sessionId,
     assetType: 'business_card' as const,
     assetSide: asset.side,
     localAssetId: asset.id,
   };
-
-  const expectedStoragePath = `${userId}/${asset.id}.jpg`;
-  logEvent('uploadBusinessCardAsset() — entry', ctx, { corrId, expectedStoragePath, hasDataUrl: Boolean(asset.dataUrl), dataUrlLength: asset.dataUrl?.length ?? 0 });
   const op = logOperationStart('Storage Upload — uploadBusinessCardAsset()', ctx);
 
   if (!navigator.onLine) {
@@ -80,48 +80,115 @@ export async function uploadBusinessCardAsset(
     return UPLOAD_FAIL;
   }
 
+  let userId: string | null;
   try {
-    const userId = await getAuthUserId();
-    if (!userId) {
-      logOperationEnd(op, { error: new Error('Not authenticated') });
-      return UPLOAD_FAIL;
-    }
-
-    const storagePath = `${userId}/${asset.id}.jpg`;
-    const blob = dataUrlToBlob(asset.dataUrl);
-    console.log('[EVIDENCE_DIAG] SUPABASE_UPLOAD_BEGIN', {
-      ts: new Date().toISOString(),
-      bucket: BUCKET,
-      path: storagePath,
-      assetId: asset.id,
-      sessionId: asset.sessionId,
-      blobSize: blob.size,
-      blobType: blob.type,
-    });
-    const { error: uploadError } = await supabase.storage
-      .from(BUCKET)
-      .upload(storagePath, blob, { contentType: 'image/jpeg', upsert: true });
-
-    console.log('[EVIDENCE_DIAG] SUPABASE_UPLOAD_RESULT', {
-      ts: new Date().toISOString(),
-      assetId: asset.id,
-      sessionId: asset.sessionId,
-      success: !uploadError,
-      error: uploadError ? { message: uploadError.message, name: uploadError.name, statusCode: (uploadError as Record<string, unknown>).statusCode ?? null } : null,
-      path: storagePath,
-    });
-    if (uploadError) {
-      logOperationEnd(op, { error: uploadError });
-      return UPLOAD_FAIL;
-    }
-
-    const metadataWritten = await _writeAssetStorageMeta(asset, userId, storagePath);
-    logOperationEnd(op, { extra: { storagePath, metadataWritten } });
-    return { uploaded: true, metadataWritten, storagePath };
+    userId = await getAuthUserId();
   } catch (err) {
+    console.error('[EVIDENCE_DIAG] GET_AUTH_USER_THREW', {
+      ts: new Date().toISOString(),
+      assetId: asset.id,
+      sessionId: asset.sessionId,
+      error: err instanceof Error ? { message: err.message, stack: err.stack, name: err.name } : { String: String(err) },
+    });
     logOperationEnd(op, { error: err });
+    throw err;
+  }
+  if (!userId) {
+    logOperationEnd(op, { error: new Error('Not authenticated') });
     return UPLOAD_FAIL;
   }
+
+  const storagePath = `${userId}/${asset.id}.jpg`;
+  const blob = dataUrlToBlob(asset.dataUrl);
+
+  logEvent('uploadBusinessCardAsset() — entry', ctx, {
+    corrId,
+    expectedStoragePath: storagePath,
+    hasDataUrl: Boolean(asset.dataUrl),
+    dataUrlLength: asset.dataUrl?.length ?? 0,
+  });
+
+  // ── Pre-upload summary ──
+  console.log('[EVIDENCE_DIAG] PRE_UPLOAD_SUMMARY', {
+    ts: new Date().toISOString(),
+    bucket: BUCKET,
+    storagePath,
+    fileSize: blob.size,
+    mimeType: blob.type,
+    assetId: asset.id,
+    sessionId: asset.sessionId,
+    uploadOptions: { contentType: 'image/jpeg', upsert: true },
+  });
+
+  // ── Immediately before the Storage SDK call ──
+  const uploadStartMs = Date.now();
+  console.log('[EVIDENCE_DIAG] STORAGE_UPLOAD_BEGIN', {
+    ts: new Date().toISOString(),
+    bucket: BUCKET,
+    storagePath,
+    fileSize: blob.size,
+    mimeType: blob.type,
+    assetId: asset.id,
+    sessionId: asset.sessionId,
+    sdkCall: 'supabase.storage.from(BUCKET).upload(storagePath, blob, { contentType: image/jpeg, upsert: true })',
+  });
+
+  let uploadData: unknown;
+  let uploadError: unknown;
+  try {
+    const result = await supabase.storage
+      .from(BUCKET)
+      .upload(storagePath, blob, { contentType: 'image/jpeg', upsert: true });
+    uploadData = result.data;
+    uploadError = result.error;
+  } catch (err) {
+    const uploadEndMs = Date.now();
+    const durationMs = uploadEndMs - uploadStartMs;
+    console.error('[EVIDENCE_DIAG] STORAGE_UPLOAD_THREW', {
+      ts: new Date().toISOString(),
+      assetId: asset.id,
+      sessionId: asset.sessionId,
+      bucket: BUCKET,
+      storagePath,
+      uploadDurationMs: durationMs,
+      error: err instanceof Error
+        ? { message: err.message, stack: err.stack, name: err.name }
+        : { String: String(err) },
+    });
+    logOperationEnd(op, { error: err });
+    throw err;
+  }
+
+  // ── Immediately after the Storage SDK call ──
+  const uploadEndMs = Date.now();
+  const durationMs = uploadEndMs - uploadStartMs;
+  console.log('[EVIDENCE_DIAG] STORAGE_UPLOAD_RESULT', {
+    ts: new Date().toISOString(),
+    assetId: asset.id,
+    sessionId: asset.sessionId,
+    bucket: BUCKET,
+    storagePath,
+    uploadDurationMs: durationMs,
+    returnedData: uploadData,
+    returnedError: uploadError
+      ? {
+          message: (uploadError as { message?: string }).message ?? null,
+          name: (uploadError as { name?: string }).name ?? null,
+          statusCode: (uploadError as Record<string, unknown>).statusCode ?? null,
+          raw: uploadError,
+        }
+      : null,
+    success: !uploadError,
+  });
+
+  if (uploadError) {
+    logOperationEnd(op, { error: uploadError });
+    return UPLOAD_FAIL;
+  }
+
+  const metadataWritten = await _writeAssetStorageMeta(asset, userId, storagePath);
+  logOperationEnd(op, { extra: { storagePath, metadataWritten } });
+  return { uploaded: true, metadataWritten, storagePath };
 }
 
 /** Waits until every required asset row has a storage path and uploaded status. */
