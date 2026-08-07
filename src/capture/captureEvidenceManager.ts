@@ -161,47 +161,69 @@ class CaptureEvidenceManager {
   flushPendingUploads(sessionId: string): void {
     const pending = this._pendingCardUploads.get(sessionId);
     const trackedBefore = this._uploadTrackers.get(sessionId)?.length ?? 0;
+    const pendingCount = pending?.length ?? 0;
+
     _diag('FLUSH_BEGIN', {
-      sessionId,
-      pendingUploadCount: pending?.length ?? 0,
-      trackedUploadCount: trackedBefore,
-      pendingAssetIds: pending?.map(a => a.id) ?? [],
+      backendSessionId: sessionId,
+      pendingUploadCountBefore: pendingCount,
+      trackedUploadCountBefore: trackedBefore,
+      pendingLocalAssetIds: pending?.map(a => a.id) ?? [],
       pendingKeys: Array.from(this._pendingCardUploads.keys()),
+      trackerKeys: Array.from(this._uploadTrackers.keys()),
     });
+
     if (!pending || pending.length === 0) {
-      _diag('FLUSH_BEGIN_RESULT', { skipped: true, reason: 'no pending uploads for this sessionId' });
+      _diag('FLUSH_SKIPPED', {
+        backendSessionId: sessionId,
+        reason: 'ZERO_PENDING_UPLOADS — no deferred business card assets registered for this sessionId; upload phase will be skipped',
+        pendingUploadCountBefore: 0,
+        trackedUploadCountBefore: trackedBefore,
+        pendingKeys: Array.from(this._pendingCardUploads.keys()),
+        trackerKeys: Array.from(this._uploadTrackers.keys()),
+      });
       return;
     }
+
     this._pendingCardUploads.delete(sessionId);
+
+    let uploadInvocations = 0;
     for (const asset of pending) {
       _diag('FLUSH_ITERATION', {
-        assetId: asset.id,
+        backendSessionId: sessionId,
         localAssetId: asset.id,
         side: asset.side,
-        sessionId,
+        uploadInvoked: true,
       });
       const p = this._uploadBusinessCard(asset, 'IMMEDIATE');
+      uploadInvocations++;
       const seq = ++_uploadSeq;
       _diag('UPLOAD_PROMISE_CREATED', {
-        assetId: asset.id,
+        backendSessionId: sessionId,
+        localAssetId: asset.id,
         promiseSeq: seq,
-        trackedUploadCount: (this._uploadTrackers.get(sessionId)?.length ?? 0) + 1,
+        trackedUploadCountAfterThisAsset: (this._uploadTrackers.get(sessionId)?.length ?? 0) + 1,
       });
       this._trackUpload(sessionId, p);
     }
+
     const trackedAfter = this._uploadTrackers.get(sessionId)?.length ?? 0;
     _diag('FLUSH_COMPLETE', {
-      sessionId,
-      pendingUploads: (this._pendingCardUploads.get(sessionId)?.length ?? 0),
-      trackedUploads: trackedAfter,
+      backendSessionId: sessionId,
+      pendingUploadCountBefore: pendingCount,
+      uploadInvocations,
+      trackedUploadCountAfter: trackedAfter,
+      remainingPendingUploads: this._pendingCardUploads.get(sessionId)?.length ?? 0,
+      trackerKeys: Array.from(this._uploadTrackers.keys()),
     });
   }
 
   async waitForUploads(sessionId: string): Promise<void> {
     const trackers = this._uploadTrackers.get(sessionId);
+    const promiseCount = trackers?.length ?? 0;
     _diag('WAIT_UPLOADS', {
-      sessionId,
-      trackedUploads: trackers?.length ?? 0,
+      backendSessionId: sessionId,
+      promiseCountPassedIntoPromiseAllSettled: promiseCount,
+      trackedUploads: promiseCount,
       hasTrackers: !!trackers,
       trackerKeys: Array.from(this._uploadTrackers.keys()),
     });
