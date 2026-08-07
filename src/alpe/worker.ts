@@ -445,6 +445,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
   // 4. Build the processing context
   const session: CaptureSession = {
     captureMethod,
+    originalCaptureMethod: captureMethod,
     sessionStatus:    'DRAFT',
     captureProfile:   profile,
     createdAt:        null,

@@ -15,6 +15,7 @@ const DRAFT_KEY = 'active_capture_draft';
 export interface PersistedDraft {
   id:                   string;
   captureMethod:        CaptureSession['captureMethod'];
+  originalCaptureMethod: CaptureSession['originalCaptureMethod'];
   sessionStatus:        CaptureSession['sessionStatus'];
   captureProfile:       CaptureSession['captureProfile'];
   draftData:            CaptureSession['draftData'];
@@ -32,6 +33,7 @@ function toRecord(session: CaptureSession): PersistedDraft {
   return {
     id:                   DRAFT_KEY,
     captureMethod:        session.captureMethod,
+    originalCaptureMethod: session.originalCaptureMethod,
     sessionStatus:        session.sessionStatus,
     captureProfile:       session.captureProfile,
     draftData:            session.draftData,
@@ -47,8 +49,9 @@ function toRecord(session: CaptureSession): PersistedDraft {
 
 function fromRecord(record: PersistedDraft): CaptureSession {
   return {
-    captureMethod:     record.captureMethod,
-    sessionStatus:     record.sessionStatus,
+    captureMethod:         record.captureMethod,
+    originalCaptureMethod: record.originalCaptureMethod ?? record.captureMethod,
+    sessionStatus:         record.sessionStatus,
     // Fall back to default for drafts saved before captureProfile was introduced
     captureProfile:    record.captureProfile ?? DEFAULT_CAPTURE_PROFILE,
     draftData:         record.draftData ?? {},

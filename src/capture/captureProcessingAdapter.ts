@@ -51,7 +51,7 @@ export async function submitCaptureSession(params: SubmitParams): Promise<Adapte
     await enqueueOp('enqueue_processing_job', backendSessionId, {
       backendSessionId,
       draftData:     session.draftData,
-      captureMethod: session.captureMethod,
+      captureMethod: session.originalCaptureMethod ?? session.captureMethod,
       eventId,
       eventName,
     });
@@ -61,7 +61,7 @@ export async function submitCaptureSession(params: SubmitParams): Promise<Adapte
   const result: ProduceJobResult = await produceProcessingJob({
     backendSessionId,
     draftData:     session.draftData,
-    captureMethod:  session.captureMethod,
+    captureMethod:  session.originalCaptureMethod ?? session.captureMethod,
     eventId,
     eventName,
   });

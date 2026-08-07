@@ -220,7 +220,7 @@ export default function CaptureLeadPage() {
         isOnline,
         {
           sessionId:     normalised.sync.backendSessionId,
-          captureMethod: (normalised.captureMethod ?? 'MANUAL') as CaptureMethod,
+          captureMethod: (normalised.originalCaptureMethod ?? normalised.captureMethod ?? 'MANUAL') as CaptureMethod,
           draftData:     normalised.draftData,
           sessionStatus: normalised.sessionStatus,
           localDraftKey: 'active_capture_draft',
@@ -604,7 +604,7 @@ export default function CaptureLeadPage() {
 
       // Persist to completed_leads so the Queue screen can show it
       const lead = buildCompletedLead(
-        bsid, 'QR', draft as import('./capture/types').DraftData,
+        bsid, sessionRef.current.originalCaptureMethod ?? 'QR', draft as import('./capture/types').DraftData,
         bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
       );
       lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
@@ -645,11 +645,13 @@ export default function CaptureLeadPage() {
       const { syncUpsertSession } = await import('./capture/captureBackendSync');
       const sessionOp = logOperationStart('syncUpsertSession (pre-asset)', {
         backendSessionId: bsid,
-        captureMethod: sessionRef.current.captureMethod ?? 'MANUAL',
+        captureMethod: sessionRef.current.originalCaptureMethod
+          ?? sessionRef.current.captureMethod ?? 'MANUAL',
       });
       await syncUpsertSession({
         sessionId:     bsid,
-        captureMethod: sessionRef.current.captureMethod ?? 'MANUAL',
+        captureMethod: sessionRef.current.originalCaptureMethod
+          ?? sessionRef.current.captureMethod ?? 'MANUAL',
         draftData:     sessionRef.current.draftData,
         sessionStatus: sessionRef.current.sessionStatus,
         localDraftKey: 'active_capture_draft',
@@ -815,6 +817,13 @@ export default function CaptureLeadPage() {
     // jumping straight to the manual form. The session stays in CAPTURING
     // with captureMethod BUSINESS_CARD so the card UI is unmounted and the
     // post-capture overlay takes over.
+    // Capture the original method before startCaptureWithDraft flips
+    // captureMethod to MANUAL for UI routing. This ensures all backend
+    // sync calls attribute the session to the original capture method.
+    const originalMethod = sessionRef.current.originalCaptureMethod
+      ?? sessionRef.current.captureMethod
+      ?? 'MANUAL';
+
     if (profileEngine.getProfile() === 'EXHIBITION') {
       // Stash the draft so Add More Details can pick it up later.
       actions.startCaptureWithDraft('MANUAL', newDraft);
@@ -827,14 +836,14 @@ export default function CaptureLeadPage() {
         // so the row may not exist when the card completes.
         executionEngine.routeSessionSync(queue, isOnline, {
           sessionId:     bsid,
-          captureMethod: 'MANUAL',
+          captureMethod: originalMethod,
           draftData:     newDraft as import('./capture/types').DraftData,
           sessionStatus: 'CAPTURING',
           localDraftKey:  'active_capture_draft',
           eventId:       selectedEvent?.id ?? null,
         }, bsid, makeRoutingCbs());
         const lead = buildCompletedLead(
-          bsid, 'BUSINESS_CARD', newDraft as import('./capture/types').DraftData,
+          bsid, originalMethod, newDraft as import('./capture/types').DraftData,
           bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
         );
         lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
@@ -851,7 +860,7 @@ export default function CaptureLeadPage() {
 
       // Persist to completed_leads so the Queue screen can show it
       const lead = buildCompletedLead(
-        bsid, 'BUSINESS_CARD', newDraft as import('./capture/types').DraftData,
+        bsid, originalMethod, newDraft as import('./capture/types').DraftData,
         bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
       );
       lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
