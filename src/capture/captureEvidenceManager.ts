@@ -141,7 +141,28 @@ class CaptureEvidenceManager {
     // Voice evidence is handled by VoiceEvidenceManager — it manages its own
     // online/offline routing, so it must be called before the navigator.onLine
     // gate that applies to notes and reconciliation.
-    voiceEvidenceManager.onSaveAndNext(sessionId);
+    const _voiceMgrExists = !!voiceEvidenceManager;
+    const _onSaveExists = typeof voiceEvidenceManager?.onSaveAndNext === 'function';
+    _diag('VOICE_ONSAVEANDNEXT_PRE', {
+      backendSessionId: sessionId,
+      voiceEvidenceManagerExists: _voiceMgrExists,
+      onSaveAndNextExists: _onSaveExists,
+      branch: _voiceMgrExists && _onSaveExists ? 'WILL_CALL' : 'SKIP',
+    });
+    if (_voiceMgrExists && _onSaveExists) {
+      voiceEvidenceManager.onSaveAndNext(sessionId);
+      _diag('VOICE_ONSAVEANDNEXT_POST', {
+        backendSessionId: sessionId,
+        branch: 'CALLED',
+      });
+    } else {
+      _diag('VOICE_ONSAVEANDNEXT_SKIPPED', {
+        backendSessionId: sessionId,
+        voiceEvidenceManagerExists: _voiceMgrExists,
+        onSaveAndNextExists: _onSaveExists,
+        reason: 'voiceEvidenceManager or onSaveAndNext method not available',
+      });
+    }
 
     if (!navigator.onLine) return;
 
@@ -181,6 +202,15 @@ class CaptureEvidenceManager {
       pendingLocalAssetIds: pending?.map(a => a.id) ?? [],
       pendingKeys: Array.from(this._pendingCardUploads.keys()),
       trackerKeys: Array.from(this._uploadTrackers.keys()),
+    });
+
+    _diag('VOICE_FLUSH_DIAG', {
+      backendSessionId: sessionId,
+      voiceEvidenceManagerExists: !!voiceEvidenceManager,
+      onSaveAndNextExists: typeof voiceEvidenceManager?.onSaveAndNext === 'function',
+      pendingVoiceNoteCount: 0,
+      branch: 'flushPendingUploads does not call voiceEvidenceManager.onSaveAndNext — voice uploads are handled in onSaveAndNext() or via IMMEDIATE timing in register()',
+      reason: 'flushPendingUploads only handles deferred business card assets; voice notes are never enqueued here',
     });
 
     if (!pending || pending.length === 0) {
