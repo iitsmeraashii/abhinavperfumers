@@ -165,7 +165,7 @@ class CaptureExecutionEngine {
     return {
       businessCard: strategies.upload.uploadCardsImmediately ? 'IMMEDIATE' : 'ON_SAVE',
       notesImage:   strategies.upload.uploadNotesOnSave      ? 'ON_SAVE'   : 'NEVER',
-      voiceNote:    strategies.upload.uploadVoiceOnSave      ? 'ON_SAVE'   : 'NEVER',
+      voiceNote:    strategies.upload.uploadVoiceOnSave      ? 'IMMEDIATE' : 'NEVER',
     };
   }
 

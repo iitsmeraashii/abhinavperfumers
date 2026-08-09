@@ -123,7 +123,9 @@ export async function syncUpsertSession(
       benchmark:              draftData.benchmark?.length ? draftData.benchmark : null,
       notes_image_url:        draftData.notesImageDataUrl ?? null,
       voice_note_duration_ms: draftData.voiceNoteDurationMs ?? null,
-      voice_note_transcript:  draftData.voiceNoteTranscript ?? null,
+      // voice_note_transcript is intentionally NOT synced here — it is owned
+      // by the transcription edge function. Syncing the draft value (which is
+      // '' during capture) would clobber the real transcript after it's written.
       // Legacy columns
       client_name:      draftData.clientName ?? null,
       company:          draftData.company    ?? null,
@@ -550,7 +552,7 @@ export async function syncUpdateSessionFields(
         benchmark:              draftData.benchmark?.length ? draftData.benchmark : null,
         notes_image_url:        draftData.notesImageDataUrl ?? null,
         voice_note_duration_ms: draftData.voiceNoteDurationMs ?? null,
-        voice_note_transcript:  draftData.voiceNoteTranscript ?? null,
+        // voice_note_transcript is NOT synced here — see syncUpsertSession for rationale.
         synced_at:        new Date().toISOString(),
       })
       .eq('id', backendSessionId)

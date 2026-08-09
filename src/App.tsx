@@ -296,7 +296,14 @@ function Layout() {
   const initialLeadId   = params.get('lead');
   const initialFollowUp = params.get('followup');
 
-  const [tab,                setTab]                = useState<Tab>(isAdmin ? 'dashboard' : 'capture');
+  const [tab,                setTab]                = useState<Tab>(() => {
+    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'templates', 'events', 'notifications', 'account'];
+    const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'account'];
+    const allowed = isAdmin ? adminTabs : repTabs;
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
+    if (saved && allowed.includes(saved)) return saved;
+    return isAdmin ? 'dashboard' : 'capture';
+  });
   const [selectedLeadId,     setSelectedLeadId]     = useState<string | null>(initialLeadId);
   const [leadsEventFilter,   setLeadsEventFilter]   = useState<string | undefined>(undefined);
   const [leadsInitialFilters,setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
@@ -322,6 +329,7 @@ function Layout() {
   function handleSelectLead(id: string) {
     setSelectedLeadId(id);
     setTab('leads');
+    localStorage.setItem('activeTab', 'leads');
     const url = new URL(window.location.href);
     url.searchParams.set('lead', id);
     window.history.pushState({}, '', url.toString());
@@ -338,6 +346,7 @@ function Layout() {
     setTab(t);
     setSelectedLeadId(null);
     setMoreDrawerOpen(false);
+    localStorage.setItem('activeTab', t);
     const url = new URL(window.location.href);
     url.search = '';
     window.history.pushState({}, '', url.toString());
@@ -356,6 +365,7 @@ function Layout() {
     setLeadsEventFilter(eventCode);
     setLeadsInitialFilters(undefined);
     setTab('leads');
+    localStorage.setItem('activeTab', 'leads');
     setSelectedLeadId(null);
     const url = new URL(window.location.href);
     url.searchParams.delete('lead');
@@ -366,6 +376,7 @@ function Layout() {
     setLeadsEventFilter(undefined);
     setLeadsInitialFilters(filter);
     setTab('leads');
+    localStorage.setItem('activeTab', 'leads');
     setSelectedLeadId(null);
     const url = new URL(window.location.href);
     url.search = '';

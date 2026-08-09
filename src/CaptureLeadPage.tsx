@@ -91,7 +91,7 @@ export default function CaptureLeadPage() {
   const queue: QueuePolicy = plan?.queue ?? 'ONLINE_FIRST';
   const extractionPolicy: ExtractionPolicy = plan?.extraction ?? 'IMMEDIATE';
   const cardUploadTiming: UploadTiming = plan?.upload.businessCard ?? 'IMMEDIATE';
-  const voiceUploadTiming: UploadTiming = plan?.upload.voiceNote ?? 'ON_SAVE';
+  const voiceUploadTiming: UploadTiming = plan?.upload.voiceNote ?? 'IMMEDIATE';
 
   const qrSectionRef = useRef<HTMLDivElement>(null);
   const cardSectionRef = useRef<HTMLDivElement>(null);
