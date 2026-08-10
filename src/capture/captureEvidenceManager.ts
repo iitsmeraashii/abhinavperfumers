@@ -42,6 +42,7 @@ interface BusinessCardEvidence {
   sessionId:    string;
   asset:        BusinessCardAsset;
   uploadTiming: UploadTiming;
+  correlationId?: string | null;
 }
 
 interface NotesImageEvidence {
@@ -49,6 +50,7 @@ interface NotesImageEvidence {
   sessionId:    string;
   dataUrl:      string;
   uploadTiming: UploadTiming;
+  correlationId?: string | null;
 }
 
 interface VoiceNoteEvidence {
@@ -58,6 +60,7 @@ interface VoiceNoteEvidence {
   durationMs:   number;
   mimeType:     string;
   uploadTiming: UploadTiming;
+  correlationId?: string | null;
 }
 
 export type CaptureEvidence = BusinessCardEvidence | NotesImageEvidence | VoiceNoteEvidence;
@@ -69,6 +72,12 @@ class CaptureEvidenceManager {
   private _pendingReconciliation: BusinessCardAsset[] = [];
   private _pendingCardUploads: Map<string, BusinessCardAsset[]> = new Map();
   private _uploadTrackers: Map<string, Promise<void>[]> = new Map();
+  private _correlationId: string | null = null;
+  private _reconciliationCorrelationId: string | null = null;
+
+  setCorrelationId(corrId: string | null): void {
+    this._correlationId = corrId;
+  }
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -101,7 +110,7 @@ class CaptureEvidenceManager {
           });
         } else {
           _diag('REGISTER_RESULT', { inserted: false, reason: 'IMMEDIATE timing — not deferred to ON_SAVE' });
-          const p = this._uploadBusinessCard(evidence.asset, evidence.uploadTiming);
+          const p = this._uploadBusinessCard(evidence.asset, evidence.uploadTiming, evidence.correlationId);
           this._trackUpload(evidence.sessionId, p);
         }
         break;
@@ -128,25 +137,46 @@ class CaptureEvidenceManager {
     }
   }
 
-  onSaveAndNext(sessionId: string): void {
+  onSaveAndNext(sessionId: string, correlationId?: string | null): void {
     // Voice evidence is handled by VoiceEvidenceManager — it manages its own
     // online/offline routing, so it must be called before the navigator.onLine
     // gate that applies to notes and reconciliation.
-    voiceEvidenceManager.onSaveAndNext(sessionId);
+    const _voiceMgrExists = !!voiceEvidenceManager;
+    const _onSaveExists = typeof voiceEvidenceManager?.onSaveAndNext === 'function';
+    _diag('VOICE_ONSAVEANDNEXT_PRE', {
+      backendSessionId: sessionId,
+      voiceEvidenceManagerExists: _voiceMgrExists,
+      onSaveAndNextExists: _onSaveExists,
+      branch: _voiceMgrExists && _onSaveExists ? 'WILL_CALL' : 'SKIP',
+    });
+    if (_voiceMgrExists && _onSaveExists) {
+      voiceEvidenceManager.onSaveAndNext(sessionId);
+      _diag('VOICE_ONSAVEANDNEXT_POST', {
+        backendSessionId: sessionId,
+        branch: 'CALLED',
+      });
+    } else {
+      _diag('VOICE_ONSAVEANDNEXT_SKIPPED', {
+        backendSessionId: sessionId,
+        voiceEvidenceManagerExists: _voiceMgrExists,
+        onSaveAndNextExists: _onSaveExists,
+        reason: 'voiceEvidenceManager or onSaveAndNext method not available',
+      });
+    }
 
     if (!navigator.onLine) return;
 
     if (this._pendingNotes?.sessionId === sessionId) {
       const { dataUrl } = this._pendingNotes;
       this._pendingNotes = null;
-      const p = uploadNotesImage(sessionId, dataUrl).catch(() => {});
+      const p = uploadNotesImage(sessionId, dataUrl, correlationId).catch(() => {});
       this._trackUpload(sessionId, p);
     }
 
     if (this._pendingReconciliation.length > 0) {
       const toReconcile = this._pendingReconciliation.splice(0);
       for (const asset of toReconcile) {
-        const p = reconcileAssetStorageMetadata(asset).then(ok => {
+        const p = reconcileAssetStorageMetadata(asset, correlationId).then(ok => {
           if (!ok) console.warn('[evidenceManager] reconciliation still failing for asset', asset.id);
         }).catch(() => {});
         this._trackUpload(sessionId, p);
@@ -159,7 +189,8 @@ class CaptureEvidenceManager {
    * track their promises. Must be called before waitForUploads() so the
    * upload promises exist.
    */
-  flushPendingUploads(sessionId: string): void {
+  flushPendingUploads(sessionId: string, correlationId?: string | null): void {
+    if (correlationId) this._correlationId = correlationId;
     const pending = this._pendingCardUploads.get(sessionId);
     const trackedBefore = this._uploadTrackers.get(sessionId)?.length ?? 0;
     const pendingCount = pending?.length ?? 0;
@@ -171,6 +202,15 @@ class CaptureEvidenceManager {
       pendingLocalAssetIds: pending?.map(a => a.id) ?? [],
       pendingKeys: Array.from(this._pendingCardUploads.keys()),
       trackerKeys: Array.from(this._uploadTrackers.keys()),
+    });
+
+    _diag('VOICE_FLUSH_DIAG', {
+      backendSessionId: sessionId,
+      voiceEvidenceManagerExists: !!voiceEvidenceManager,
+      onSaveAndNextExists: typeof voiceEvidenceManager?.onSaveAndNext === 'function',
+      pendingVoiceNoteCount: 0,
+      branch: 'flushPendingUploads does not call voiceEvidenceManager.onSaveAndNext — voice uploads are handled in onSaveAndNext() or via IMMEDIATE timing in register()',
+      reason: 'flushPendingUploads only handles deferred business card assets; voice notes are never enqueued here',
     });
 
     if (!pending || pending.length === 0) {
@@ -195,7 +235,7 @@ class CaptureEvidenceManager {
         side: asset.side,
         uploadInvoked: true,
       });
-      const p = this._uploadBusinessCard(asset, 'IMMEDIATE');
+      const p = this._uploadBusinessCard(asset, 'IMMEDIATE', this._correlationId);
       uploadInvocations++;
       const seq = ++_uploadSeq;
       _diag('UPLOAD_PROMISE_CREATED', {
@@ -260,7 +300,7 @@ class CaptureEvidenceManager {
     _diag('TRACK_UPLOAD', { sessionId, trackedCount: arr.length });
   }
 
-  private async _uploadBusinessCard(asset: BusinessCardAsset, timing: UploadTiming): Promise<void> {
+  private async _uploadBusinessCard(asset: BusinessCardAsset, timing: UploadTiming, correlationId?: string | null): Promise<void> {
     const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : 'unknown';
     const storageBucket = 'lead-evidence';
     const storagePath = `${asset.sessionId}/${asset.id}.jpg`;
@@ -321,7 +361,7 @@ class CaptureEvidenceManager {
 
     let result: BusinessCardUploadResult | null = null;
     try {
-      result = await uploadBusinessCardAsset(asset);
+      result = await uploadBusinessCardAsset(asset, correlationId);
     } catch (err: unknown) {
       const errObj = err as Record<string, unknown>;
       _diag('UPLOAD_BUSINESS_CARD_ERROR', {
@@ -356,6 +396,7 @@ class CaptureEvidenceManager {
         reason: 'file uploaded to Storage but metadata write failed — queued for reconciliation',
       });
       this._pendingReconciliation.push(asset);
+      this._reconciliationCorrelationId = correlationId ?? null;
     }
 
     _diag('UPLOAD_BUSINESS_CARD_RETURN', {

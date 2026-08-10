@@ -30,6 +30,7 @@ export interface ProduceJobParams {
   captureMethod:    CaptureMethod | null;
   eventId:          string | null;
   eventName:        string | null;
+  correlationId?:  string | null;
 }
 
 export interface ProduceJobResult {
@@ -41,11 +42,12 @@ export interface ProduceJobResult {
 export async function produceProcessingJob(
   params: ProduceJobParams,
 ): Promise<ProduceJobResult> {
-  const { backendSessionId, draftData, captureMethod, eventId, eventName } = params;
+  const { backendSessionId, draftData, captureMethod, eventId, eventName, correlationId } = params;
 
   const op = logOperationStart('produceProcessingJob()', {
     backendSessionId,
     captureMethod,
+    correlationId: correlationId ?? null,
   });
 
   const identity = await getAuthIdentity();
@@ -77,7 +79,7 @@ export async function produceProcessingJob(
       sessionStatus: 'CAPTURING',
       eventId,
     },
-    silentCbs,
+    { ...silentCbs, correlationId: correlationId ?? null },
   );
 
   // ── Evidence Readiness Gate ──────────────────────────────────────────────
@@ -150,6 +152,7 @@ export async function produceProcessingJob(
       captureMethod,
       repCode: identity.repCode,
       eventName,
+      correlationId: correlationId ?? null,
     },
   });
 

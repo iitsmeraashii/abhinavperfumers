@@ -125,6 +125,9 @@ export interface SyncRoutingCallbacks {
   onSyncError:      (err: string) => void;
   onOffline:        () => void;
   onOfflineQueued:  () => void;
+  /** Immutable correlation ID for this capture session. Threaded through
+   *  to all sync functions so diagnostics don't read the mutable global. */
+  correlationId?:   string | null;
 }
 
 // ─── Execution Engine ──────────────────────────────────────────────────────────
@@ -162,7 +165,7 @@ class CaptureExecutionEngine {
     return {
       businessCard: strategies.upload.uploadCardsImmediately ? 'IMMEDIATE' : 'ON_SAVE',
       notesImage:   strategies.upload.uploadNotesOnSave      ? 'ON_SAVE'   : 'NEVER',
-      voiceNote:    strategies.upload.uploadVoiceOnSave      ? 'ON_SAVE'   : 'NEVER',
+      voiceNote:    strategies.upload.uploadVoiceOnSave      ? 'IMMEDIATE' : 'NEVER',
     };
   }
 
@@ -212,6 +215,7 @@ class CaptureExecutionEngine {
     logEvent('routeSessionSync() started', {
       backendSessionId: bsid,
       captureMethod: payload.captureMethod,
+      correlationId:    cbs.correlationId ?? null,
     }, { queue, isOnline });
     if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
@@ -233,9 +237,10 @@ class CaptureExecutionEngine {
       assetType:        'business_card' as const,
       assetSide:         payload.asset.side,
       localAssetId:      payload.asset.id,
+      correlationId:     cbs.correlationId ?? null,
     };
     const op = logOperationStart('routeAssetSync()', ctx, { queue, isOnline });
-    const corrId = getCorrelationId() ?? 'no_correlation';
+    const corrId = cbs.correlationId ?? getCorrelationId() ?? 'no_correlation';
 
     logEvent('routeAssetSync() — entry', ctx, { queue, isOnline, corrId });
 
@@ -471,6 +476,7 @@ class CaptureExecutionEngine {
       onSynced:    cbs.onSynced,
       onSyncError: cbs.onSyncError,
       onOffline:   cbs.onOffline,
+      correlationId: cbs.correlationId,
     };
   }
 
@@ -480,6 +486,7 @@ class CaptureExecutionEngine {
       onSynced:    () => {},
       onSyncError: () => {},
       onOffline:   () => {},
+      correlationId: null,
     };
   }
 

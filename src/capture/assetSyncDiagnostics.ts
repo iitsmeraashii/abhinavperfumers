@@ -46,6 +46,12 @@ export interface AssetSyncLogContext {
   assetType?:        string | null;
   assetSide?:        string | null;
   localAssetId?:     string | null;
+  /** Immutable correlation ID for this operation. When provided, overrides
+   *  the global correlation state — this is the key fix for correlation
+   *  crossing: fire-and-forget async ops carry their own correlation ID
+   *  instead of reading a shared global that may have been overwritten by
+   *  the next capture. */
+  correlationId?:    string | null;
 }
 
 export interface AssetSyncLogEntry {
@@ -162,7 +168,7 @@ export function logOperationStart(
   context:      AssetSyncLogContext,
   extra?:       Record<string, unknown>,
 ): AssetSyncLogEntry {
-  const corrId = _correlationId ?? 'no_correlation';
+  const corrId = context.correlationId ?? _correlationId ?? 'no_correlation';
   const now = new Date().toISOString();
   const perf = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
@@ -265,7 +271,7 @@ export function logEvent(
   context:      AssetSyncLogContext,
   extra?:       Record<string, unknown>,
 ): void {
-  const corrId = _correlationId ?? 'no_correlation';
+  const corrId = context.correlationId ?? _correlationId ?? 'no_correlation';
   const now = new Date().toISOString();
   const perf = typeof performance !== 'undefined' ? performance.now() : Date.now();
 

@@ -14,8 +14,9 @@ import { DEFAULT_CAPTURE_PROFILE } from './captureProfile';
 // ─── Idle session ─────────────────────────────────────────────────────────────
 
 const IDLE_SESSION: CaptureSession = {
-  captureMethod:     null,
-  sessionStatus:     'IDLE',
+  captureMethod:         null,
+  originalCaptureMethod: null,
+  sessionStatus:         'IDLE',
   captureProfile:    DEFAULT_CAPTURE_PROFILE,
   createdAt:         null,
   updatedAt:         null,
@@ -69,13 +70,14 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
     const now = new Date();
     const backendSessionId = genStableId();
     setSession(prev => ({
-      captureMethod:     method,
-      sessionStatus:     'CAPTURING',
-      captureProfile:    prev.captureProfile,
-      createdAt:         now,
-      updatedAt:         now,
-      draftData:         {},
-      hasUnsavedChanges: false,
+      captureMethod:         method,
+      originalCaptureMethod: method,
+      sessionStatus:         'CAPTURING',
+      captureProfile:        prev.captureProfile,
+      createdAt:             now,
+      updatedAt:              now,
+      draftData:              {},
+      hasUnsavedChanges:      false,
       sync: {
         ...INITIAL_SYNC_STATE,
         backendSessionId,
@@ -89,9 +91,15 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
     const now = new Date();
     setSession(prev => {
       const existingBackendId = prev.sync.backendSessionId;
+      // Preserve the original capture method when transitioning (e.g.
+      // BUSINESS_CARD → MANUAL after card extraction). The session's
+      // originalCaptureMethod is set on the first startCapture call and
+      // must not change on subsequent startCaptureWithDraft calls.
+      const originalMethod = prev.originalCaptureMethod ?? method;
       return {
-        captureMethod:     method,
-        sessionStatus:     'CAPTURING',
+        captureMethod:         method,
+        originalCaptureMethod: originalMethod,
+        sessionStatus:         'CAPTURING',
         captureProfile:    prev.captureProfile,
         createdAt:         prev.createdAt ?? now,
         updatedAt:         now,

@@ -33,6 +33,10 @@ export interface SyncCallbacks {
   onSynced:     (patch: Partial<BackendSyncState>) => void;
   onSyncError:  (err: string) => void;
   onOffline:    () => void;
+  /** Immutable correlation ID for this capture session. When provided,
+   *  diagnostics use this instead of the mutable global, preventing
+   *  correlation crossing between concurrent captures. */
+  correlationId?: string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -61,6 +65,7 @@ export async function syncUpsertSession(
   const op = logOperationStart('syncUpsertSession()', {
     backendSessionId: payload.sessionId,
     captureMethod:    payload.captureMethod,
+    correlationId:    cbs.correlationId ?? null,
   });
 
   cbs.onSyncing();
@@ -118,7 +123,9 @@ export async function syncUpsertSession(
       benchmark:              draftData.benchmark?.length ? draftData.benchmark : null,
       notes_image_url:        draftData.notesImageDataUrl ?? null,
       voice_note_duration_ms: draftData.voiceNoteDurationMs ?? null,
-      voice_note_transcript:  draftData.voiceNoteTranscript ?? null,
+      // voice_note_transcript is intentionally NOT synced here — it is owned
+      // by the transcription edge function. Syncing the draft value (which is
+      // '' during capture) would clobber the real transcript after it's written.
       // Legacy columns
       client_name:      draftData.clientName ?? null,
       company:          draftData.company    ?? null,
@@ -164,12 +171,13 @@ export async function syncUpsertAsset(
   payload: UpsertAssetPayload,
   cbs: SyncCallbacks,
 ): Promise<void> {
-  const corrId = getCorrelationId() ?? 'no_correlation';
+  const corrId = cbs.correlationId ?? getCorrelationId() ?? 'no_correlation';
   const ctx = {
     backendSessionId: payload.backendSessionId,
     assetType:        'business_card' as const,
     assetSide:         payload.asset.side,
     localAssetId:      payload.asset.id,
+    correlationId:     cbs.correlationId ?? null,
   };
 
   logEvent('syncUpsertAsset() — entry', ctx, { corrId });
@@ -544,7 +552,7 @@ export async function syncUpdateSessionFields(
         benchmark:              draftData.benchmark?.length ? draftData.benchmark : null,
         notes_image_url:        draftData.notesImageDataUrl ?? null,
         voice_note_duration_ms: draftData.voiceNoteDurationMs ?? null,
-        voice_note_transcript:  draftData.voiceNoteTranscript ?? null,
+        // voice_note_transcript is NOT synced here — see syncUpsertSession for rationale.
         synced_at:        new Date().toISOString(),
       })
       .eq('id', backendSessionId)

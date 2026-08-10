@@ -189,6 +189,7 @@ async function executeOp(op: PendingOp): Promise<void> {
         captureMethod:    string | null;
         eventId:          string | null;
         eventName:        string | null;
+        correlationId?:   string | null;
       };
       await produceProcessingJob({
         backendSessionId: p.backendSessionId,
@@ -196,6 +197,7 @@ async function executeOp(op: PendingOp): Promise<void> {
         captureMethod:    p.captureMethod as import('./types').CaptureMethod | null,
         eventId:          p.eventId,
         eventName:        p.eventName,
+        correlationId:    p.correlationId ?? null,
       });
       break;
     }

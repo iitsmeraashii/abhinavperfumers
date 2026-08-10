@@ -42,7 +42,21 @@ export function registerVoiceNoteEvidence(
   mimeType: string,
   uploadTiming: UploadTiming,
 ): void {
+  console.log('[VOICE_DIAG] registerVoiceNoteEvidence ENTRY', {
+    ts: new Date().toISOString(),
+    backendSessionId: sessionId,
+    localSessionId: null,
+    uploadTiming,
+    blobSize: audioBlob?.size ?? null,
+    mimeType,
+    durationMs,
+  });
   evidenceManager.register({ type: 'voice_note', sessionId, audioBlob, durationMs, mimeType, uploadTiming });
+  console.log('[VOICE_DIAG] registerVoiceNoteEvidence EXIT', {
+    ts: new Date().toISOString(),
+    backendSessionId: sessionId,
+    uploadTiming,
+  });
 }
 
 export function notifySessionReset(): void {

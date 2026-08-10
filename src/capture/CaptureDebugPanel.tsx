@@ -885,11 +885,12 @@ function DebugOverlay({
   const d = session.draftData;
 
   const sessionDisplay = {
-    captureMethod:     session.captureMethod,
-    sessionStatus:     session.sessionStatus,
-    hasUnsavedChanges: session.hasUnsavedChanges,
-    createdAt:         session.createdAt?.toISOString() ?? null,
-    updatedAt:         session.updatedAt?.toISOString() ?? null,
+    captureMethod:         session.captureMethod,
+    originalCaptureMethod: session.originalCaptureMethod,
+    sessionStatus:         session.sessionStatus,
+    hasUnsavedChanges:     session.hasUnsavedChanges,
+    createdAt:             session.createdAt?.toISOString() ?? null,
+    updatedAt:             session.updatedAt?.toISOString() ?? null,
   };
 
   const uiFlags = {

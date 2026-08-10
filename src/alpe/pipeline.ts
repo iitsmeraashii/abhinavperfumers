@@ -61,6 +61,9 @@ export interface ProcessingContext {
   eventName:        string | null;
   completedLeadId:  string;
   plan:             ExecutionPlan;
+  /** Immutable correlation ID threaded from the capture session through
+   *  to the pipeline so diagnostics don't read a mutable global. */
+  correlationId?:  string | null;
 
   /** Canonical evidence references hydrated from capture_assets by the Worker. */
   evidence: EvidenceAssets;
@@ -97,7 +100,7 @@ function executeEvidenceStage(ctx: ProcessingContext): void {
       uploadTiming: plan.upload.notesImage,
     });
   }
-  evidenceManager.onSaveAndNext(backendSessionId);
+  evidenceManager.onSaveAndNext(backendSessionId, ctx.correlationId);
 }
 
 async function executeEvidenceResolutionStage(ctx: ProcessingContext): Promise<void> {

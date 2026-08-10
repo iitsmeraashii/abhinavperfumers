@@ -91,7 +91,7 @@ export default function CaptureLeadPage() {
   const queue: QueuePolicy = plan?.queue ?? 'ONLINE_FIRST';
   const extractionPolicy: ExtractionPolicy = plan?.extraction ?? 'IMMEDIATE';
   const cardUploadTiming: UploadTiming = plan?.upload.businessCard ?? 'IMMEDIATE';
-  const voiceUploadTiming: UploadTiming = plan?.upload.voiceNote ?? 'ON_SAVE';
+  const voiceUploadTiming: UploadTiming = plan?.upload.voiceNote ?? 'IMMEDIATE';
 
   const qrSectionRef = useRef<HTMLDivElement>(null);
   const cardSectionRef = useRef<HTMLDivElement>(null);
@@ -149,6 +149,13 @@ export default function CaptureLeadPage() {
   // The execution engine owns the online-vs-offline routing decision. The UI
   // layer provides these callbacks so the engine can update React state.
 
+  // Immutable correlation ID for the current capture session. Stored in a
+  // ref so it survives re-renders and is accessible inside fire-and-forget
+  // async callbacks. Set when a capture starts, cleared when it ends. This
+  // is the key fix for correlation crossing: async work from capture N reads
+  // this ref instead of a mutable global that capture N+1 has overwritten.
+  const correlationIdRef = useRef<string | null>(null);
+
   const makeRoutingCbs = useCallback((): SyncRoutingCallbacks => ({
     onBeforeSync:    () => actions.incrementPendingOps(),
     onSyncing:       () => actions.setSyncStatus('syncing'),
@@ -169,6 +176,7 @@ export default function CaptureLeadPage() {
       actions.setSyncStatus('offline');
       setPendingSyncCount(n => n + 1);
     },
+    correlationId:   correlationIdRef.current,
   }), [actions]);
 
   // Extraction sync callbacks use the same SyncRoutingCallbacks as all other
@@ -220,7 +228,7 @@ export default function CaptureLeadPage() {
         isOnline,
         {
           sessionId:     normalised.sync.backendSessionId,
-          captureMethod: (normalised.captureMethod ?? 'MANUAL') as CaptureMethod,
+          captureMethod: (normalised.originalCaptureMethod ?? normalised.captureMethod ?? 'MANUAL') as CaptureMethod,
           draftData:     normalised.draftData,
           sessionStatus: normalised.sessionStatus,
           localDraftKey: 'active_capture_draft',
@@ -264,9 +272,12 @@ export default function CaptureLeadPage() {
   // ── Method selection ──────────────────────────────────────────────────────
   const handleMethodSelect = useCallback(async (method: CaptureMethod) => {
     const corrId = startCorrelation();
+    correlationIdRef.current = corrId;
+    evidenceManager.setCorrelationId(corrId);
     logEvent('handleMethodSelect()', {
       captureMethod: method,
       localSessionId: sessionRef.current.sync.backendSessionId ?? null,
+      correlationId: corrId,
     }, { correlationId: corrId });
     form.handleReset();
     profileEngine.resolve(sessionRef.current.captureProfile);
@@ -443,7 +454,7 @@ export default function CaptureLeadPage() {
       // starts the uploads and moves them into _uploadTrackers (which survive
       // onSessionReset). After flush, notifySessionReset is safe — the pending
       // map is already empty.
-      evidenceManager.flushPendingUploads(bsid);
+      evidenceManager.flushPendingUploads(bsid, correlationIdRef.current);
       console.log('[EVIDENCE_DIAG] CAPTURE_PAGE_FLUSH_CALLED', {
         ts: new Date().toISOString(),
         bsid,
@@ -459,6 +470,7 @@ export default function CaptureLeadPage() {
         eventName,
         plan:             null,
         isOnline,
+        correlationId:    correlationIdRef.current,
       }).then((result: AdapterResult) => {
         logOperationEnd(saveOp, {
           error: result.outcome === 'failed' ? result.error : null,
@@ -496,6 +508,8 @@ export default function CaptureLeadPage() {
       setLastOcrResult(null);
       await clearDraft();
       clearCorrelation();
+      correlationIdRef.current = null;
+      evidenceManager.setCorrelationId(null);
       setPromotionToast({ message: 'Lead saved — processing in background!', isError: false });
       setTimeout(() => setPromotionToast(null), 2000);
       return;
@@ -510,6 +524,7 @@ export default function CaptureLeadPage() {
       eventName:        selectedEvent?.name ?? null,
       plan:             p,
       isOnline,
+      correlationId:    correlationIdRef.current,
     });
 
     if (result.outcome === 'failed') {
@@ -557,6 +572,8 @@ export default function CaptureLeadPage() {
     notifySessionReset();
     await clearDraft();
     clearCorrelation();
+    correlationIdRef.current = null;
+    evidenceManager.setCorrelationId(null);
   }, [actions, form, selectedEvent, isOnline]);
 
   // ── QR scan complete ──────────────────────────────────────────────────────
@@ -604,7 +621,7 @@ export default function CaptureLeadPage() {
 
       // Persist to completed_leads so the Queue screen can show it
       const lead = buildCompletedLead(
-        bsid, 'QR', draft as import('./capture/types').DraftData,
+        bsid, sessionRef.current.originalCaptureMethod ?? 'QR', draft as import('./capture/types').DraftData,
         bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
       );
       lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
@@ -645,11 +662,13 @@ export default function CaptureLeadPage() {
       const { syncUpsertSession } = await import('./capture/captureBackendSync');
       const sessionOp = logOperationStart('syncUpsertSession (pre-asset)', {
         backendSessionId: bsid,
-        captureMethod: sessionRef.current.captureMethod ?? 'MANUAL',
+        captureMethod: sessionRef.current.originalCaptureMethod
+          ?? sessionRef.current.captureMethod ?? 'MANUAL',
       });
       await syncUpsertSession({
         sessionId:     bsid,
-        captureMethod: sessionRef.current.captureMethod ?? 'MANUAL',
+        captureMethod: sessionRef.current.originalCaptureMethod
+          ?? sessionRef.current.captureMethod ?? 'MANUAL',
         draftData:     sessionRef.current.draftData,
         sessionStatus: sessionRef.current.sessionStatus,
         localDraftKey: 'active_capture_draft',
@@ -659,6 +678,7 @@ export default function CaptureLeadPage() {
         onSynced:   () => { logOperationEnd(sessionOp, { sessionExistsBefore: true }); },
         onSyncError: (err) => { logOperationEnd(sessionOp, { error: new Error(err) }); },
         onOffline:  () => { logOperationEnd(sessionOp, { extra: { skipped: 'offline' } }); },
+        correlationId: correlationIdRef.current,
       }).catch((e) => { logOperationEnd(sessionOp, { error: e }); });
     }
 
@@ -815,6 +835,13 @@ export default function CaptureLeadPage() {
     // jumping straight to the manual form. The session stays in CAPTURING
     // with captureMethod BUSINESS_CARD so the card UI is unmounted and the
     // post-capture overlay takes over.
+    // Capture the original method before startCaptureWithDraft flips
+    // captureMethod to MANUAL for UI routing. This ensures all backend
+    // sync calls attribute the session to the original capture method.
+    const originalMethod = sessionRef.current.originalCaptureMethod
+      ?? sessionRef.current.captureMethod
+      ?? 'MANUAL';
+
     if (profileEngine.getProfile() === 'EXHIBITION') {
       // Stash the draft so Add More Details can pick it up later.
       actions.startCaptureWithDraft('MANUAL', newDraft);
@@ -827,14 +854,14 @@ export default function CaptureLeadPage() {
         // so the row may not exist when the card completes.
         executionEngine.routeSessionSync(queue, isOnline, {
           sessionId:     bsid,
-          captureMethod: 'MANUAL',
+          captureMethod: originalMethod,
           draftData:     newDraft as import('./capture/types').DraftData,
           sessionStatus: 'CAPTURING',
           localDraftKey:  'active_capture_draft',
           eventId:       selectedEvent?.id ?? null,
         }, bsid, makeRoutingCbs());
         const lead = buildCompletedLead(
-          bsid, 'BUSINESS_CARD', newDraft as import('./capture/types').DraftData,
+          bsid, originalMethod, newDraft as import('./capture/types').DraftData,
           bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
         );
         lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
@@ -851,7 +878,7 @@ export default function CaptureLeadPage() {
 
       // Persist to completed_leads so the Queue screen can show it
       const lead = buildCompletedLead(
-        bsid, 'BUSINESS_CARD', newDraft as import('./capture/types').DraftData,
+        bsid, originalMethod, newDraft as import('./capture/types').DraftData,
         bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
       );
       lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);

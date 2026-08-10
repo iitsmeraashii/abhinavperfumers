@@ -445,6 +445,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
   // 4. Build the processing context
   const session: CaptureSession = {
     captureMethod,
+    originalCaptureMethod: captureMethod,
     sessionStatus:    'DRAFT',
     captureProfile:   profile,
     createdAt:        null,
@@ -471,6 +472,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     completedLeadId:  backendSessionId,
     plan,
     evidence,
+    correlationId:   (job.metadata as Record<string, unknown> | null)?.correlationId as string | null ?? null,
   };
 
   // ── TEMPORARY DIAGNOSTICS: Final hydrated ProcessingContext ──

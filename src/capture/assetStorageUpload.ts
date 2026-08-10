@@ -50,8 +50,9 @@ const UPLOAD_FAIL: BusinessCardUploadResult = {
 
 export async function uploadBusinessCardAsset(
   asset: BusinessCardAsset,
+  correlationId?: string | null,
 ): Promise<BusinessCardUploadResult> {
-  const corrId = getCorrelationId() ?? 'no_correlation';
+  const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
   const ts0 = new Date().toISOString();
 
   console.log('[EVIDENCE_DIAG] UPLOAD_FUNCTION_ENTERED', {
@@ -72,6 +73,7 @@ export async function uploadBusinessCardAsset(
     assetType: 'business_card' as const,
     assetSide: asset.side,
     localAssetId: asset.id,
+    correlationId: correlationId ?? null,
   };
   const op = logOperationStart('Storage Upload — uploadBusinessCardAsset()', ctx);
 
@@ -195,10 +197,16 @@ export async function uploadBusinessCardAsset(
 export async function waitForAssetStorageReady(
   sessionId: string,
   localAssetIds: string[],
+  correlationId?: string | null,
 ): Promise<boolean> {
   if (localAssetIds.length === 0) return true;
 
-  const corrId = getCorrelationId() ?? 'no_correlation';
+  const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
+
+  const pollCtx = {
+    backendSessionId: sessionId,
+    correlationId: correlationId ?? null,
+  };
   const deadline = Date.now() + 10_000;
   let pollCount = 0;
   while (Date.now() < deadline) {
@@ -210,7 +218,7 @@ export async function waitForAssetStorageReady(
       .in('local_asset_id', localAssetIds);
 
     if (error) {
-      logEvent('waitForAssetStorageReady() — poll ERROR', { backendSessionId: sessionId }, { corrId, poll: pollCount, error: error.message });
+      logEvent('waitForAssetStorageReady() — poll ERROR', pollCtx, { corrId, poll: pollCount, error: error.message });
     } else {
       const rows = data as { id: string; local_asset_id: string; storage_path: string | null; storage_bucket: string | null; storage_upload_status: string | null }[] | null;
       const readyIds = new Set(
@@ -219,7 +227,7 @@ export async function waitForAssetStorageReady(
           .map(asset => asset.local_asset_id),
       );
       const allReady = localAssetIds.every(id => readyIds.has(id));
-      logEvent('waitForAssetStorageReady() — poll', { backendSessionId: sessionId }, {
+      logEvent('waitForAssetStorageReady() — poll', pollCtx, {
         corrId,
         poll: pollCount,
         expected: localAssetIds,
@@ -233,7 +241,7 @@ export async function waitForAssetStorageReady(
     await new Promise<void>(resolve => window.setTimeout(resolve, 250));
   }
 
-  logEvent('waitForAssetStorageReady() — TIMEOUT', { backendSessionId: sessionId }, { corrId, polls: pollCount, expected: localAssetIds });
+  logEvent('waitForAssetStorageReady() — TIMEOUT', pollCtx, { corrId, polls: pollCount, expected: localAssetIds });
   return false;
 }
 
@@ -241,8 +249,9 @@ async function _writeAssetStorageMeta(
   asset: BusinessCardAsset,
   userId: string,
   storagePath: string,
+  correlationId?: string | null,
 ): Promise<boolean> {
-  const corrId = getCorrelationId() ?? 'no_correlation';
+  const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
   const writeTs = new Date().toISOString();
 
   const upsertPayload = {
@@ -280,6 +289,7 @@ async function _writeAssetStorageMeta(
   logEvent('_writeAssetStorageMeta() — BEFORE upsert', {
     backendSessionId: asset.sessionId,
     localAssetId: asset.id,
+    correlationId: correlationId ?? null,
   }, { corrId, storagePath, payload: upsertPayload });
 
   const { data, error } = await supabase
@@ -292,6 +302,7 @@ async function _writeAssetStorageMeta(
     logEvent('_writeAssetStorageMeta() — upsert ERROR', {
       backendSessionId: asset.sessionId,
       localAssetId: asset.id,
+      correlationId: correlationId ?? null,
     }, { corrId, error: { message: error.message, code: error.code, constraint: error.constraint } });
     return false;
   }
@@ -300,6 +311,7 @@ async function _writeAssetStorageMeta(
   logEvent('_writeAssetStorageMeta() — upsert resolved', {
     backendSessionId: asset.sessionId,
     localAssetId: asset.id,
+    correlationId: correlationId ?? null,
   }, { corrId, writtenRowId, returnedRows: data?.length ?? 0 });
 
   // ── Immediate read-back: verify the row has the storage_path we just wrote.
@@ -317,6 +329,7 @@ async function _writeAssetStorageMeta(
       logEvent('_writeAssetStorageMeta() — readback ERROR', {
         backendSessionId: asset.sessionId,
         localAssetId: asset.id,
+        correlationId: correlationId ?? null,
       }, { corrId, error: { message: rbError.message, code: rbError.code } });
     } else {
       const rb = readback as { id: string; storage_path: string | null; storage_bucket: string | null; storage_upload_status: string | null } | null;
@@ -325,6 +338,7 @@ async function _writeAssetStorageMeta(
       logEvent('_writeAssetStorageMeta() — READBACK', {
         backendSessionId: asset.sessionId,
         localAssetId: asset.id,
+        correlationId: correlationId ?? null,
       }, {
         corrId,
         rowId: rb?.id ?? null,
@@ -366,6 +380,7 @@ async function _writeAssetStorageMeta(
  logEvent('_writeAssetStorageMeta() — readback threw', {
       backendSessionId: asset.sessionId,
       localAssetId: asset.id,
+      correlationId: correlationId ?? null,
     }, { corrId, error: String(rbErr) });
   }
 
@@ -374,27 +389,30 @@ async function _writeAssetStorageMeta(
 
 export async function reconcileAssetStorageMetadata(
   asset: BusinessCardAsset,
+  correlationId?: string | null,
 ): Promise<boolean> {
   if (!navigator.onLine) return false;
   try {
     const userId = await getAuthUserId();
     if (!userId) return false;
-    return await _writeAssetStorageMeta(asset, userId, `${userId}/${asset.id}.jpg`);
+    return await _writeAssetStorageMeta(asset, userId, `${userId}/${asset.id}.jpg`, correlationId);
   } catch (err) {
     console.warn('[assetStorageUpload] reconcileAssetStorageMetadata error:', err);
     return false;
   }
 }
 
-export async function uploadNotesImage(backendSessionId: string, dataUrl: string): Promise<void> {
+export async function uploadNotesImage(backendSessionId: string, dataUrl: string, correlationId?: string | null): Promise<void> {
   if (!navigator.onLine || !dataUrl?.startsWith('data:')) return;
+  const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
+  const ctx = { backendSessionId, correlationId: correlationId ?? null };
   try {
     const userId = await getAuthUserId();
     if (!userId) return;
     const storagePath = `${userId}/${backendSessionId}/notes.jpg`;
     const blob = dataUrlToBlob(dataUrl);
     const { error: uploadError } = await supabase.storage.from(BUCKET).upload(storagePath, blob, { contentType: 'image/jpeg', upsert: true });
-    if (uploadError) return;
+    if (uploadError) { logEvent('uploadNotesImage() — storage upload error', ctx, { corrId, error: uploadError.message }); return; }
     const { data: existing } = await supabase.from('capture_assets').select('id').eq('capture_session_id', backendSessionId).eq('asset_type', 'notes_image').maybeSingle();
     await supabase.from('capture_assets').upsert({
       id: existing?.id ?? crypto.randomUUID(), capture_session_id: backendSessionId, user_id: userId,
@@ -403,32 +421,132 @@ export async function uploadNotesImage(backendSessionId: string, dataUrl: string
       stored_width: 0, stored_height: 0, width: 0, height: 0, processing_status: 'done',
       storage_provider: 'SUPABASE', storage_bucket: BUCKET, storage_path: storagePath,
       storage_upload_status: 'uploaded', storage_uploaded_at: new Date().toISOString(),
-    }, { onConflict: 'id' });
+    }, { onConflict: 'capture_session_id,local_asset_id' });
     await supabase.from('capture_sessions').update({ notes_image_url: storagePath }).eq('id', backendSessionId).eq('user_id', userId);
+    logEvent('uploadNotesImage() — completed', ctx, { corrId, storagePath });
   } catch (err) {
-    console.warn('[assetStorageUpload] uploadNotesImage error:', err);
+    logEvent('uploadNotesImage() — error', ctx, { corrId, error: String(err) });
   }
 }
 
 export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob, mimeType: string): Promise<void> {
-  if (!navigator.onLine || !audioBlob || audioBlob.size === 0) return;
+  console.log('[VOICE_DIAG] uploadVoiceNote ENTRY', {
+    ts: new Date().toISOString(),
+    backendSessionId,
+    storageBucket: BUCKET,
+    blobSize: audioBlob?.size ?? null,
+    mimeType,
+    isOnline: typeof navigator !== 'undefined' ? navigator.onLine : 'unknown',
+  });
+
+  if (!navigator.onLine || !audioBlob || audioBlob.size === 0) {
+    console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
+      backendSessionId,
+      reason: !navigator.onLine ? 'offline' : !audioBlob ? 'null blob' : 'zero-size blob',
+      storageBucket: BUCKET,
+    });
+    return;
+  }
+
   try {
     const userId = await getAuthUserId();
-    if (!userId) return;
+    console.log('[VOICE_DIAG] uploadVoiceNote AUTH_USER', {
+      backendSessionId,
+      userId: userId ?? null,
+    });
+    if (!userId) {
+      console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
+        backendSessionId,
+        reason: 'no authenticated user',
+        storageBucket: BUCKET,
+      });
+      return;
+    }
     const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm';
     const storagePath = `${userId}/${backendSessionId}/voice.${ext}`;
+    console.log('[VOICE_DIAG] uploadVoiceNote STORAGE_PATH', {
+      backendSessionId,
+      storageBucket: BUCKET,
+      storagePath,
+      blobSize: audioBlob.size,
+      mimeType,
+    });
+
+    console.log('[VOICE_DIAG] uploadVoiceNote UPLOAD_BEGIN', {
+      backendSessionId,
+      storageBucket: BUCKET,
+      storagePath,
+      blobSize: audioBlob.size,
+      mimeType,
+      uploadOptions: { contentType: mimeType, upsert: true },
+    });
+    const uploadStartMs = Date.now();
     const { error: uploadError } = await supabase.storage.from(BUCKET).upload(storagePath, audioBlob, { contentType: mimeType, upsert: true });
-    if (uploadError) return;
+    const uploadDurationMs = Date.now() - uploadStartMs;
+    console.log('[VOICE_DIAG] uploadVoiceNote UPLOAD_RESULT', {
+      backendSessionId,
+      storageBucket: BUCKET,
+      storagePath,
+      uploadDurationMs,
+      uploadError: uploadError
+        ? { message: (uploadError as { message?: string }).message ?? null, name: (uploadError as { name?: string }).name ?? null, statusCode: (uploadError as Record<string, unknown>).statusCode ?? null, raw: uploadError }
+        : null,
+    });
+    if (uploadError) {
+      console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
+        backendSessionId,
+        reason: 'storage upload error',
+        storageBucket: BUCKET,
+        storagePath,
+        uploadErrorMessage: (uploadError as { message?: string }).message ?? null,
+      });
+      return;
+    }
     const { data: existing } = await supabase.from('capture_assets').select('id').eq('capture_session_id', backendSessionId).eq('asset_type', 'voice_note').maybeSingle();
-    await supabase.from('capture_assets').upsert({
+    console.log('[VOICE_DIAG] uploadVoiceNote METADATA_WRITE_BEGIN', {
+      backendSessionId,
+      storageBucket: BUCKET,
+      storagePath,
+      existingAssetId: existing?.id ?? null,
+      upsertConflictTarget: 'capture_session_id,local_asset_id',
+    });
+    const { error: assetError } = await supabase.from('capture_assets').upsert({
       id: existing?.id ?? crypto.randomUUID(), capture_session_id: backendSessionId, user_id: userId,
       asset_type: 'voice_note', side: null, asset_side: null, local_asset_id: `${backendSessionId}_voice`,
       mime_type: mimeType, size_bytes: audioBlob.size, file_size: audioBlob.size, original_width: 0, original_height: 0,
       stored_width: 0, stored_height: 0, width: 0, height: 0, processing_status: 'done',
       storage_provider: 'SUPABASE', storage_bucket: BUCKET, storage_path: storagePath,
       storage_upload_status: 'uploaded', storage_uploaded_at: new Date().toISOString(), transcription_status: 'uploaded',
-    }, { onConflict: 'id' });
+    }, { onConflict: 'capture_session_id,local_asset_id' });
+    console.log('[VOICE_DIAG] uploadVoiceNote METADATA_WRITE_RESULT', {
+      backendSessionId,
+      storageBucket: BUCKET,
+      storagePath,
+      assetError: assetError
+        ? { message: assetError.message ?? null, code: assetError.code ?? null, constraint: assetError.constraint ?? null, raw: assetError }
+        : null,
+    });
+    if (assetError) {
+      console.warn('[assetStorageUpload] uploadVoiceNote asset upsert error:', assetError.message);
+    }
+    console.log('[VOICE_DIAG] uploadVoiceNote EXIT', {
+      backendSessionId,
+      storageBucket: BUCKET,
+      storagePath,
+      success: !assetError,
+    });
   } catch (err) {
+    const errObj = err as Record<string, unknown>;
+    console.error('[VOICE_DIAG] uploadVoiceNote EXCEPTION', {
+      backendSessionId,
+      storageBucket: BUCKET,
+      storagePath: null,
+      errorMessage: err instanceof Error ? err.message : String(err),
+      errorStack: err instanceof Error ? err.stack ?? null : null,
+      errorName: err instanceof Error ? err.name : null,
+      supabaseError: errObj ?? null,
+      httpStatus: errObj?.statusCode ?? errObj?.status ?? null,
+    });
     console.warn('[assetStorageUpload] uploadVoiceNote error:', err);
   }
 }

@@ -176,6 +176,12 @@ export const INITIAL_SYNC_STATE: BackendSyncState = {
 
 export interface CaptureSession {
   captureMethod:    CaptureMethod | null;
+  /** The method the session started with (BUSINESS_CARD, QR, or MANUAL).
+   *  Set once when the session is created and never overwritten when
+   *  captureMethod transitions to MANUAL for UI routing after card/QR
+   *  extraction. Used for backend attribution so capture_sessions.capture_method
+   *  reflects how the lead was originally captured, not which form is on screen. */
+  originalCaptureMethod: CaptureMethod | null;
   sessionStatus:    SessionStatus;
   captureProfile:   CaptureProfile;
   createdAt:        Date | null;
