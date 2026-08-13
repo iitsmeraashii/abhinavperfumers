@@ -44,6 +44,8 @@ import type { ResolvedEvidenceGroup } from './evidenceResolver';
 import { resolveAllEvidence } from './evidenceResolver';
 import { extractBusinessCard, extractQr } from './extractionService';
 import type { ExtractionOutcome } from './extractionService';
+import { persistExtractionMetadata } from './extractionMetadataPersistence';
+import type { ExtractionMetadata } from './extractionMetadataPersistence';
 
 // ─── Pipeline Contract ────────────────────────────────────────────────────────
 
@@ -73,6 +75,9 @@ export interface ProcessingContext {
 
   extractionSource?:    string | null;
   extractionConfidence?: number | null;
+  /** Extraction metadata produced by executeExtractionStage, consumed by
+   *  executeExtractionMetadataStage to persist back to capture_sessions. */
+  extractionMetadata?: ExtractionMetadata;
   review?: ReviewResult;
   result?: ProcessingResult;
 }
@@ -184,6 +189,12 @@ async function executeExtractionStage(ctx: ProcessingContext): Promise<void> {
 
   if (!resolved) {
     ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
+    ctx.extractionMetadata = {
+      source:     ctx.extractionSource,
+      status:     'skipped',
+      confidence: null,
+      draftData:  ctx.session.draftData,
+    };
     diag.error = 'No resolved evidence available';
     logExtractionDiagnostics(ctx, diag);
     return;
@@ -219,6 +230,12 @@ async function executeExtractionStage(ctx: ProcessingContext): Promise<void> {
     diag.fieldsExtracted = [];
     logExtractionDiagnostics(ctx, diag);
     ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
+    ctx.extractionMetadata = {
+      source:     ctx.extractionSource,
+      status:     'skipped',
+      confidence: null,
+      draftData:  ctx.session.draftData,
+    };
     return;
   }
 
@@ -256,9 +273,21 @@ async function executeExtractionStage(ctx: ProcessingContext): Promise<void> {
 
     ctx.extractionSource    = outcome.source;
     ctx.extractionConfidence = outcome.confidence;
+    ctx.extractionMetadata = {
+      source:     outcome.source,
+      status:     'done',
+      confidence: outcome.confidence,
+      draftData:  ctx.session.draftData,
+    };
   } else {
     ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
     if (outcome?.error) diag.error = outcome.error;
+    ctx.extractionMetadata = {
+      source:     ctx.extractionSource,
+      status:     outcome?.error ? 'failed' : 'skipped',
+      confidence: null,
+      draftData:  ctx.session.draftData,
+    };
   }
 
   logExtractionDiagnostics(ctx, diag);
@@ -301,6 +330,27 @@ function logExtractionDiagnostics(
       dump_data: logEntry,
     }).then(() => {}, () => {});
   } catch { /* ignore */ }
+}
+
+async function executeExtractionMetadataStage(ctx: ProcessingContext): Promise<void> {
+  alpeLog('Pipeline stage → PERSIST_EXTRACTION_METADATA');
+  updateAlpeRuntime({ currentPipelineStage: 'PERSIST_RESULTS' });
+  traceStage(ctx.backendSessionId, 'PERSIST_EXTRACTION_METADATA_START', {
+    hasMetadata: !!ctx.extractionMetadata,
+  });
+
+  if (!ctx.extractionMetadata) {
+    traceStage(ctx.backendSessionId, 'PERSIST_EXTRACTION_METADATA_SKIP', { reason: 'no metadata' });
+    return;
+  }
+
+  await persistExtractionMetadata(ctx.backendSessionId, ctx.extractionMetadata);
+
+  traceStage(ctx.backendSessionId, 'PERSIST_EXTRACTION_METADATA_DONE', {
+    source:     ctx.extractionMetadata.source,
+    status:     ctx.extractionMetadata.status,
+    confidence: ctx.extractionMetadata.confidence,
+  });
 }
 
 function executeValidationStage(ctx: ProcessingContext): void {
@@ -424,6 +474,7 @@ export async function processCaptureSession(
   executeEvidenceStage(ctx);
   await executeEvidenceResolutionStage(ctx);
   await executeExtractionStage(ctx);
+  await executeExtractionMetadataStage(ctx);
   executeValidationStage(ctx);
   if (ctx.result) {
     return ctx.plan.result === 'SUPPRESS_TOAST'
