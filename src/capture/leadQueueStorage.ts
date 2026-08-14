@@ -38,6 +38,11 @@ export interface QueueItem {
   lastError:        string | null;
   source:           'draft' | 'saved_draft' | 'completed';
   isSavedDraft?:    boolean;
+  // Processing failure diagnostics (from processing_queue via completed_leads)
+  failedStage:      string | null;
+  lastAttemptAt:   string | null;
+  failedAt:        string | null;
+  isExhausted:     boolean;
 }
 
 // ─── Map CompletedLeadStatus → QueueItemStatus ────────────────────────────────
@@ -76,6 +81,10 @@ export async function loadQueueItems(): Promise<QueueItem[]> {
       lastError:        null,
       source:           'saved_draft',
       isSavedDraft:     true,
+      failedStage:      null,
+      lastAttemptAt:    null,
+      failedAt:         null,
+      isExhausted:      false,
     });
   }
 
@@ -112,6 +121,10 @@ export async function loadQueueItems(): Promise<QueueItem[]> {
         retries:          0,
         lastError:        null,
         source:           'draft',
+        failedStage:      null,
+        lastAttemptAt:    null,
+        failedAt:         null,
+        isExhausted:      false,
       });
     }
   }
@@ -132,6 +145,10 @@ export async function loadQueueItems(): Promise<QueueItem[]> {
       retries:          c.retries,
       lastError:        c.lastError,
       source:           'completed',
+      failedStage:      c.failedStage ?? null,
+      lastAttemptAt:    c.lastAttemptAt ?? null,
+      failedAt:         c.failedAt ?? null,
+      isExhausted:      c.isExhausted ?? false,
     });
   }
 

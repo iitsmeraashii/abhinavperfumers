@@ -8,6 +8,8 @@ import {
   loadQueueItems, deleteQueueItem, getDisplayName, getDisplayCompany,
   getLeadTemperature, type QueueItem, type QueueItemStatus,
 } from './capture/leadQueueStorage';
+import { deleteAllSyncedCompletedLeads } from './capture/completedLeadsStorage';
+import { MAX_RETRY_COUNT } from './alpe/types';
 import { getPendingCount, flushQueue } from './capture/captureOfflineQueue';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { getAlpeRuntimeState, subscribeAlpeRuntime } from './alpe/diagnostics';
@@ -114,6 +116,34 @@ function relativeTime(iso: string): string {
   if (diff < 3_600_000)   return `${Math.round(diff / 60_000)}m ago`;
   if (diff < 86_400_000)  return `${Math.round(diff / 3_600_000)}h ago`;
   return new Date(iso).toLocaleDateString(Intl.DateTimeFormat().resolvedOptions().locale, { day: 'numeric', month: 'short', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+}
+
+function formatDateTime(iso: string | null): string {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString(Intl.DateTimeFormat().resolvedOptions().locale, {
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  });
+}
+
+const STAGE_LABELS: Record<string, string> = {
+  LOAD_CONTEXT:               'Loading context',
+  VERIFY_ASSETS:              'Verifying assets',
+  UPLOAD_ASSETS:              'Uploading assets',
+  EVIDENCE_RESOLUTION:        'Resolving evidence',
+  AI_EXTRACTION:               'AI extraction',
+  PERSIST_EXTRACTION_METADATA: 'Saving extraction data',
+  VALIDATION:                 'Validation',
+  DECISION:                   'Review decision',
+  PROMOTION:                  'Lead promotion',
+  PERSIST_RESULTS:            'Saving results',
+  COMPLETE:                   'Completion',
+};
+
+function stageLabel(stage: string | null): string {
+  if (!stage) return 'Processing';
+  return STAGE_LABELS[stage] ?? stage;
 }
 
 function MethodIcon({ method }: { method: QueueItem['captureMethod'] }) {
@@ -223,12 +253,34 @@ function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView, onVi
         </div>
       </button>
 
-      {/* Error message for failed items — always visible */}
-      {isFailed && item.lastError && (
-        <div className="px-4 pb-3 -mt-1">
-          <p className="text-[11px] text-red-600 bg-red-50 rounded-lg px-3 py-2 leading-snug">
-            {item.lastError.length > 120 ? item.lastError.slice(0, 120) + '…' : item.lastError}
-          </p>
+      {/* Failure diagnostics for failed items — always visible */}
+      {isFailed && (
+        <div className="px-4 pb-3 -mt-1 space-y-1.5">
+          {/* Attempt count + retry status */}
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="font-semibold text-red-700">
+              Attempt {item.retries || 0} / {MAX_RETRY_COUNT}
+            </span>
+            <span className="text-stone-300">|</span>
+            {item.isExhausted ? (
+              <span className="text-stone-500 font-medium">Maximum retry attempts reached</span>
+            ) : (
+              <span className="text-amber-600 font-medium">Will retry automatically</span>
+            )}
+          </div>
+          {/* Failure reason */}
+          {item.lastError && (
+            <div className="text-[11px] text-red-600 bg-red-50 rounded-lg px-3 py-2 leading-snug">
+              <span className="font-medium">{stageLabel(item.failedStage)}:</span>{' '}
+              {item.lastError.length > 120 ? item.lastError.slice(0, 120) + '…' : item.lastError}
+            </div>
+          )}
+          {/* Last attempted timestamp */}
+          {item.lastAttemptAt && (
+            <p className="text-[10px] text-stone-400">
+              Last attempted: {formatDateTime(item.lastAttemptAt)}
+            </p>
+          )}
         </div>
       )}
 
@@ -266,7 +318,7 @@ function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView, onVi
             <Edit3 className="w-3.5 h-3.5" /> Continue
           </button>
         )}
-        {isFailed && (
+        {isFailed && !item.isExhausted && (
           <button
             onClick={() => onRetry(item)}
             disabled={!isOnline}
@@ -275,6 +327,15 @@ function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView, onVi
               text-white text-sm font-semibold transition-all disabled:opacity-40"
           >
             <RotateCcw className="w-3.5 h-3.5" /> Retry
+          </button>
+        )}
+        {isFailed && item.isExhausted && (
+          <button
+            disabled
+            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl
+              bg-stone-100 text-stone-400 text-sm font-medium cursor-not-allowed"
+          >
+            <AlertCircle className="w-3.5 h-3.5" /> Max retries reached
           </button>
         )}
         {isSynced && (
@@ -339,12 +400,14 @@ interface SectionProps {
   onDelete:    (item: QueueItem) => void;
   onView:      (item: QueueItem) => void;
   onViewLead?: (item: QueueItem) => void;
+  onBulkDeleteSynced?: () => void;
 }
 
-function QueueSection({ title, count, items, isOnline, defaultOpen, onContinue, onRetry, onDelete, onView, onViewLead }: SectionProps) {
+function QueueSection({ title, count, items, isOnline, defaultOpen, onContinue, onRetry, onDelete, onView, onViewLead, onBulkDeleteSynced }: SectionProps) {
   const [open, setOpen] = useState(defaultOpen);
+  const isSyncedSection = title === 'Synced';
 
-  if (items.length === 0) return null;
+  if (items.length === 0 && !isSyncedSection) return null;
 
   return (
     <div>
@@ -357,9 +420,23 @@ function QueueSection({ title, count, items, isOnline, defaultOpen, onContinue, 
           <span className="text-sm font-semibold text-stone-700">{title}</span>
           <span className="text-xs font-medium text-stone-400 bg-stone-100 rounded-full px-2 py-0.5">{count}</span>
         </div>
-        {open
-          ? <ChevronDown className="w-4 h-4 text-stone-400" />
-          : <ChevronRight className="w-4 h-4 text-stone-400" />}
+        <div className="flex items-center gap-2">
+          {isSyncedSection && items.length > 0 && onBulkDeleteSynced && (
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(e) => { e.stopPropagation(); onBulkDeleteSynced(); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onBulkDeleteSynced(); } }}
+              className="flex items-center gap-1 text-[11px] font-medium text-stone-400 hover:text-red-500
+                px-2 py-1 rounded-lg hover:bg-red-50 transition-colors cursor-pointer"
+            >
+              <Trash2 className="w-3 h-3" /> Delete All
+            </span>
+          )}
+          {open
+            ? <ChevronDown className="w-4 h-4 text-stone-400" />
+            : <ChevronRight className="w-4 h-4 text-stone-400" />}
+        </div>
       </button>
 
       {open && (
@@ -416,6 +493,47 @@ function DeleteSheet({ item, onConfirm, onCancel }: {
             className="flex-1 py-3.5 rounded-xl bg-red-600 hover:bg-red-700
               text-white text-sm font-semibold transition-colors">
             Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Bulk delete synced confirmation ──────────────────────────────────────────
+
+function BulkDeleteSyncedSheet({ onConfirm, onCancel, deleting }: {
+  onConfirm: () => void;
+  onCancel:  () => void;
+  deleting:  boolean;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center md:items-center p-4">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={onCancel} />
+      <div className="relative z-10 w-full max-w-sm bg-white rounded-2xl shadow-2xl overflow-hidden
+        animate-in slide-in-from-bottom-4 md:zoom-in-95 duration-200">
+        <div className="px-5 pt-5 pb-4 border-b border-stone-100 flex items-start gap-3">
+          <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center shrink-0">
+            <Trash2 className="w-5 h-5 text-red-600" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-stone-900">Delete all synced entries?</h3>
+            <p className="text-xs text-stone-500 mt-0.5 leading-relaxed">
+              This will remove synced entries from this device's processing history. The leads already saved to the server will NOT be deleted.
+            </p>
+          </div>
+        </div>
+        <div className="p-4 flex gap-3">
+          <button onClick={onCancel} disabled={deleting}
+            className="flex-1 py-3.5 rounded-xl border border-stone-200 text-sm font-medium
+              text-stone-700 hover:bg-stone-50 active:bg-stone-100 transition-colors disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={onConfirm} disabled={deleting}
+            className="flex-1 py-3.5 rounded-xl bg-red-600 hover:bg-red-700
+              text-white text-sm font-semibold transition-colors disabled:opacity-60 flex items-center justify-center gap-1.5">
+            {deleting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {deleting ? 'Deleting…' : 'Delete All'}
           </button>
         </div>
       </div>
@@ -704,6 +822,9 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
   const [isFlushing,  setIsFlushing]  = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<QueueItem | null>(null);
   const [detailTarget, setDetailTarget] = useState<QueueItem | null>(null);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkDeleteMsg, setBulkDeleteMsg] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
 
   const setFilter = useCallback((f: FilterTab) => {
@@ -802,6 +923,26 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
     setItems(prev => prev.filter(i => i.id !== item.id));
     setDeleteTarget(null);
   }, []);
+
+  const handleBulkDeleteSynced = useCallback(async () => {
+    setBulkDeleting(true);
+    setBulkDeleteMsg('');
+    try {
+      const deleted = await deleteAllSyncedCompletedLeads();
+      if (deleted === 0) {
+        setBulkDeleteMsg('No synced entries found to remove.');
+      } else {
+        setBulkDeleteMsg(`Synced entries removed from this device.`);
+      }
+      setBulkDeleteOpen(false);
+      await reload();
+      setTimeout(() => setBulkDeleteMsg(''), 4000);
+    } catch {
+      setBulkDeleteMsg('Failed to remove synced entries. Please try again.');
+    } finally {
+      setBulkDeleting(false);
+    }
+  }, [reload]);
 
   const handleRetry = useCallback(async (item: QueueItem) => {
     if (!isOnline) return;
@@ -986,6 +1127,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
                 onDelete={(item) => setDeleteTarget(item)}
                 onView={handleView}
                 onViewLead={handleViewLead}
+                onBulkDeleteSynced={section.title === 'Synced' ? () => setBulkDeleteOpen(true) : undefined}
               />
             ))}
           </div>
@@ -1019,6 +1161,22 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
           onConfirm={() => handleDelete(deleteTarget)}
           onCancel={() => setDeleteTarget(null)}
         />
+      )}
+
+      {/* ── Bulk delete synced confirmation ── */}
+      {bulkDeleteOpen && (
+        <BulkDeleteSyncedSheet
+          onConfirm={handleBulkDeleteSynced}
+          onCancel={() => setBulkDeleteOpen(false)}
+          deleting={bulkDeleting}
+        />
+      )}
+
+      {/* ── Bulk delete success/error message ── */}
+      {bulkDeleteMsg && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 rounded-xl bg-stone-900 text-white text-sm font-medium shadow-lg whitespace-nowrap">
+          {bulkDeleteMsg}
+        </div>
       )}
 
       {/* ── Queue item detail sheet ── */}

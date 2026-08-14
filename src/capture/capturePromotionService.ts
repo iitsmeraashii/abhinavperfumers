@@ -134,6 +134,9 @@ export async function executePromotion(
       .eq('id', backendSessionId)
       .eq('user_id', userId);
 
+    // ── Log CREATED activity (fire-and-forget, non-blocking) ────────────────
+    await supabase.rpc('log_lead_created', { p_lead_id: leadId });
+
     // ── Update / create completed_leads ────────────────────────────────────
     await _updateCompletedLead(
       completedLeadId, captureMethod, draftData, backendSessionId,

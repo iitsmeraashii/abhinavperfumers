@@ -81,6 +81,35 @@ export interface QueueEntry {
   recovery_count:        number;
   metadata:              Record<string, unknown>;
   updated_at:            string;
+  last_attempt_at:       string | null;
+  failed_at:              string | null;
+  failed_stage:          string | null;
+  error_code:            string | null;
+  error_message:          string | null;
+}
+
+// ─── Retry policy ──────────────────────────────────────────────────────────────
+
+/** Maximum processing attempts before a job is considered exhausted. */
+export const MAX_RETRY_COUNT = 3;
+
+/**
+ * Returns true if a failed/RETRYING job is still eligible for another attempt.
+ * retry_count = 0, 1, 2 → eligible (will become 1, 2, 3 after the next attempt)
+ * retry_count >= 3       → exhausted, not eligible
+ */
+export function isRetryEligible(retryCount: number): boolean {
+  return retryCount < MAX_RETRY_COUNT;
+}
+
+/**
+ * Returns true if a job is in a state the scheduler should pick up.
+ * QUEUED jobs and RETRYING jobs within the retry limit are eligible.
+ */
+export function isSchedulable(state: ProcessingState, retryCount: number): boolean {
+  if (state === 'QUEUED') return true;
+  if (state === 'RETRYING') return isRetryEligible(retryCount);
+  return false;
 }
 
 // ─── Processing Job (derived from a QueueEntry, enriched with context) ─────────

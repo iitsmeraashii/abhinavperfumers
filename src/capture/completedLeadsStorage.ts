@@ -49,6 +49,11 @@ export interface CompletedLead {
   syncedAt:         string | null;
   retries:          number;
   lastError:        string | null;
+  // Processing failure diagnostics (from processing_queue)
+  failedStage:      string | null;
+  lastAttemptAt:   string | null;
+  failedAt:        string | null;
+  isExhausted:     boolean;  // true when retry_count >= MAX_RETRY_COUNT
 }
 
 const DB_NAME    = 'capture_app';
@@ -164,7 +169,7 @@ export async function getCompletedLead(id: string): Promise<CompletedLead | null
 export async function updateCompletedLeadStatus(
   id: string,
   status: CompletedLeadStatus,
-  extra?: Partial<Pick<CompletedLead, 'syncedAt' | 'retries' | 'lastError' | 'backendSessionId'>>,
+  extra?: Partial<Pick<CompletedLead, 'syncedAt' | 'retries' | 'lastError' | 'backendSessionId' | 'failedStage' | 'lastAttemptAt' | 'failedAt' | 'isExhausted'>>,
 ): Promise<void> {
   const existing = await get(id);
   if (!existing) return;
@@ -175,6 +180,30 @@ export async function updateCompletedLeadStatus(
 export async function deleteCompletedLead(id: string): Promise<void> {
   await remove(id);
   notify();
+}
+
+/**
+ * Delete ALL completed_leads records whose status is 'synced'.
+ *
+ * This is a local-only cleanup: it removes the IndexedDB cache entries that
+ * power the "Synced" section of the Queue page. It does NOT touch:
+ *   - Supabase lead_entries
+ *   - capture_sessions
+ *   - processing_queue
+ *   - pending_ops / drafts / assets
+ *   - records in any status other than 'synced'
+ *
+ * Returns the count of deleted records.
+ */
+export async function deleteAllSyncedCompletedLeads(): Promise<number> {
+  try {
+    const all = await getAll();
+    const synced = all.filter(r => r.status === 'synced');
+    if (synced.length === 0) return 0;
+    await Promise.all(synced.map(r => remove(r.id)));
+    notify();
+    return synced.length;
+  } catch { return 0; }
 }
 
 // ─── Build a lead record from capture session data ────────────────────────────
@@ -203,5 +232,9 @@ export function buildCompletedLead(
     syncedAt:         null,
     retries:          0,
     lastError:        null,
+    failedStage:      null,
+    lastAttemptAt:    null,
+    failedAt:         null,
+    isExhausted:      false,
   };
 }

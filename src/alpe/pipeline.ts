@@ -42,6 +42,7 @@ function traceStage(backendSessionId: string, stage: string, payload: Record<str
 }
 import type { EvidenceAssets } from './assetReference';
 import type { ResolvedEvidenceGroup } from './evidenceResolver';
+import type { PipelineStage } from './types';
 import { resolveAllEvidence } from './evidenceResolver';
 import { extractBusinessCard, extractQr } from './extractionService';
 import type { ExtractionOutcome } from './extractionService';
@@ -91,9 +92,10 @@ export interface ProcessingContext {
 export type ProcessingOutcome = 'success' | 'queued' | 'failed';
 
 export interface ProcessingResult {
-  outcome: ProcessingOutcome;
-  leadId:  string | null;
-  error:   string | null;
+  outcome:     ProcessingOutcome;
+  leadId:      string | null;
+  error:       string | null;
+  failedStage: PipelineStage | null;
 }
 
 // ─── Pipeline stages ──────────────────────────────────────────────────────────
@@ -379,9 +381,10 @@ function executeValidationStage(ctx: ProcessingContext): void {
   traceStage(ctx.backendSessionId, 'VALIDATION_RESULT', { valid: result.valid, error: result.error?.message ?? null });
   if (!result.valid) {
     ctx.result = {
-      outcome: 'failed',
-      leadId:  null,
-      error:   result.error?.message ?? 'Capture has no data to save',
+      outcome:     'failed',
+      leadId:      null,
+      error:       result.error?.message ?? 'Capture has no data to save',
+      failedStage: 'VALIDATION',
     };
   }
 }
@@ -454,7 +457,7 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
   traceStage(backendSessionId, 'PROMOTION_START', { promotion: plan.promotion, isOnline, queue: plan.queue });
 
   if (plan.promotion === 'SKIP') {
-    ctx.result = { outcome: 'queued', leadId: null, error: null };
+    ctx.result = { outcome: 'queued', leadId: null, error: null, failedStage: null };
     return;
   }
 
@@ -477,7 +480,7 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
     lead.status = 'pending_sync';
     await saveCompletedLead(lead);
     await executionEngine.routePromotion(plan.queue, false, backendSessionId, promotionOptions);
-    ctx.result = { outcome: 'queued', leadId: null, error: null };
+    ctx.result = { outcome: 'queued', leadId: null, error: null, failedStage: null };
   };
 
   const routeResult = await executionEngine.routePromotion(plan.queue, isOnline, backendSessionId, promotionOptions);
@@ -497,14 +500,14 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
       result.error.includes('permission');
 
     if (isNonRetryable) {
-      ctx.result = { outcome: 'failed', leadId: null, error: result.error };
+      ctx.result = { outcome: 'failed', leadId: null, error: result.error, failedStage: 'PROMOTION' };
     } else {
       await _queuePromotion();
     }
     return;
   }
 
-  ctx.result = { outcome: 'success', leadId: result.leadId, error: null };
+  ctx.result = { outcome: 'success', leadId: result.leadId, error: null, failedStage: null };
   traceStage(backendSessionId, 'PROMOTION_COMPLETE', { outcome: 'success', leadId: result.leadId });
   alpeLog('Promotion completion', { outcome: 'success', leadId: result.leadId });
 }

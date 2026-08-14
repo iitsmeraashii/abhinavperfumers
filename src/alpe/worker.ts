@@ -30,10 +30,11 @@ import type { AssetReference, EvidenceAssets } from './assetReference';
 import { EMPTY_EVIDENCE } from './assetReference';
 
 export interface WorkerResult {
-  outcome:   'completed' | 'failed' | 'requires_review' | 'queued';
-  leadId:    string | null;
-  error:     string | null;
-  result:    ProcessingResult | null;
+  outcome:     'completed' | 'failed' | 'requires_review' | 'queued';
+  leadId:      string | null;
+  error:       string | null;
+  failedStage: string | null;
+  result:      ProcessingResult | null;
 }
 
 // ─── Session reconstruction ──────────────────────────────────────────────────
@@ -313,7 +314,7 @@ async function fetchEventInfo(
 export async function processJob(job: QueueEntry): Promise<WorkerResult> {
   const backendSessionId = job.capture_session_id;
   if (!backendSessionId) {
-    return { outcome: 'failed', leadId: null, error: 'No capture_session_id on job', result: null };
+    return { outcome: 'failed', leadId: null, error: 'No capture_session_id on job', failedStage: 'LOAD_CONTEXT', result: null };
   }
 
   alpeLog('Worker start', { jobId: job.id, captureSessionId: backendSessionId });
@@ -327,7 +328,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     traceStage(backendSessionId, 'LOAD_SESSION', { result: 'NOT_FOUND' });
     alpeError('Worker error — capture session not found', { backendSessionId });
     updateAlpeRuntime({ workerState: null, lastWorkerError: 'Capture session not found', currentPipelineStage: null });
-    return { outcome: 'failed', leadId: null, error: 'Capture session not found', result: null };
+    return { outcome: 'failed', leadId: null, error: 'Capture session not found', failedStage: 'LOAD_CONTEXT', result: null };
   }
   traceStage(backendSessionId, 'LOAD_SESSION', {
     result: 'OK',
@@ -342,7 +343,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     traceStage(backendSessionId, 'ALREADY_PROMOTED', { leadId: row.promoted_lead_id });
     alpeLog('Worker — session already promoted', { leadId: row.promoted_lead_id });
     updateAlpeRuntime({ workerState: null, currentPipelineStage: null });
-    return { outcome: 'completed', leadId: row.promoted_lead_id, error: null, result: null };
+    return { outcome: 'completed', leadId: row.promoted_lead_id, error: null, failedStage: null, result: null };
   }
 
   // 1b. Load all capture_assets for this session to hydrate evidence references
@@ -393,10 +394,11 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
       traceStage(backendSessionId, 'WAIT_ASSETS_RESULT', { ready: false, willRetry: true });
       alpeLog('Worker — assets not uploaded yet, will retry');
       return {
-        outcome: 'failed',
-        leadId:  null,
-        error:   'Assets not yet uploaded to storage, will retry',
-        result:  null,
+        outcome:     'failed',
+        leadId:      null,
+        error:       'Assets not yet uploaded to storage, will retry',
+        failedStage: 'VERIFY_ASSETS',
+        result:      null,
       };
     }
     traceStage(backendSessionId, 'WAIT_ASSETS_RESULT', { ready: true });
@@ -524,9 +526,10 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     alpeLog('Worker — pipeline complete', { outcome: result.outcome, leadId: result.leadId });
     updateAlpeRuntime({ workerState: null, currentPipelineStage: null });
     return {
-      outcome: result.outcome === 'success' ? 'completed' : result.outcome === 'queued' ? 'queued' : 'failed',
-      leadId:  result.leadId,
-      error:   result.error,
+      outcome:     result.outcome === 'success' ? 'completed' : result.outcome === 'queued' ? 'queued' : 'failed',
+      leadId:      result.leadId,
+      error:       result.error,
+      failedStage: result.failedStage ?? null,
       result,
     };
   } catch (err) {
@@ -534,6 +537,6 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     traceStage(backendSessionId, 'PIPELINE_ERROR', { error: msg, stack: err instanceof Error ? err.stack : null });
     alpeError('Worker error', err);
     updateAlpeRuntime({ workerState: null, currentPipelineStage: null, lastWorkerError: msg });
-    return { outcome: 'failed', leadId: null, error: msg, result: null };
+    return { outcome: 'failed', leadId: null, error: msg, failedStage: 'COMPLETE', result: null };
   }
 }

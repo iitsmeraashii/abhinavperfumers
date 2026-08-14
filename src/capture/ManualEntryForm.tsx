@@ -666,8 +666,9 @@ function PreviousRepSelect({
       <button
         type="button"
         onClick={handleOpen}
-        className={`w-full flex items-center justify-between gap-2 px-4 py-3.5 bg-white
-          border border-stone-200 rounded-xl text-sm hover:border-stone-300 transition-colors`}
+        className={`w-full flex items-start justify-between gap-3 px-4 py-3.5 bg-white
+          border border-stone-200 rounded-xl text-sm text-left whitespace-normal min-h-[52px]
+          hover:border-stone-300 transition-colors`}
       >
         <span className={value ? 'text-stone-900 font-medium' : 'text-stone-400'}>
           {selectedRep ? `${selectedRep.name} (${selectedRep.rep_code})` : 'Select rep…'}
@@ -677,7 +678,7 @@ function PreviousRepSelect({
 
       {open && (
         <div className="absolute z-30 top-full mt-1.5 inset-x-0 bg-white border border-stone-200
-          rounded-xl shadow-xl overflow-hidden max-h-56">
+          rounded-xl shadow-xl overflow-hidden max-h-[min(70vh,28rem)]">
           <div className="px-3 pt-3 pb-2">
             <input
               type="text"
@@ -689,7 +690,7 @@ function PreviousRepSelect({
                 focus:outline-none focus:ring-1 focus:ring-stone-300"
             />
           </div>
-          <div className="max-h-40 overflow-y-auto">
+          <div className="max-h-[min(55vh,20rem)] overflow-y-auto overscroll-contain">
             {filtered.length === 0 ? (
               <p className="px-4 py-3 text-sm text-stone-400">No reps found</p>
             ) : (
@@ -1004,7 +1005,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
       <div className="space-y-4">
 
         {/* ═══ Section 1 — Lead Classification (highlighted) ═══ */}
-        <div className="bg-amber-50/60 rounded-2xl border border-amber-200/70 shadow-sm overflow-hidden">
+        <div className="relative z-20 bg-amber-50/60 rounded-2xl border border-amber-200/70 shadow-sm overflow-visible">
           <div className="px-5 pt-5 pb-4 border-b border-amber-100">
             <SectionHeader title="Lead Classification" subtitle="Is this a new or existing lead? How hot is it?" step={1} sectionKey="contact" />
           </div>

@@ -269,7 +269,7 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
               <KpiCard icon={<PhoneCall className="w-5 h-5" />}    label="Contacted" value={data.contacted_leads} color="yellow"
                 sub={`${pct(data.contacted_leads, data.total_leads)}% of total`}
                 onClick={() => nav({ leadStatus: 'CONTACTED' })} />
-              <KpiCard icon={<Star className="w-5 h-5" />}         label="Qualified" value={data.qualified_leads} color="yellow"
+              <KpiCard icon={<Star className="w-5 h-5" />}         label="Samples Sent" value={data.qualified_leads} color="yellow"
                 sub={`${pct(data.qualified_leads, data.total_leads)}% of total`}
                 onClick={() => nav({ leadStatus: 'QUALIFIED' })} />
               <KpiCard icon={<CheckCircle2 className="w-5 h-5" />} label="Converted" value={data.converted_leads} color="green"
@@ -290,7 +290,7 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
                   onClick={() => nav({ leadStatus: 'NEW' })} />
                 <FunnelStep label="Contacted" value={data.contacted_leads} total={funnelTotal} color="text-yellow-600" bar="bg-yellow-400"
                   onClick={() => nav({ leadStatus: 'CONTACTED' })} />
-                <FunnelStep label="Qualified" value={data.qualified_leads} total={funnelTotal} color="text-teal-600"   bar="bg-teal-400"
+                <FunnelStep label="Samples Sent" value={data.qualified_leads} total={funnelTotal} color="text-teal-600"   bar="bg-teal-400"
                   onClick={() => nav({ leadStatus: 'QUALIFIED' })} />
                 <FunnelStep label="Converted" value={data.converted_leads} total={funnelTotal} color="text-green-600"  bar="bg-green-400" isLast
                   onClick={() => nav({ leadStatus: 'CONVERTED' })} />
@@ -302,7 +302,7 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
                   Contact rate: <strong className="text-stone-600">{pct(data.contacted_leads, data.new_leads || 1)}%</strong>
                 </span>
                 <span className="text-xs text-stone-400">
-                  Qualify rate: <strong className="text-stone-600">{pct(data.qualified_leads, data.contacted_leads || 1)}%</strong>
+                  Sample rate: <strong className="text-stone-600">{pct(data.qualified_leads, data.contacted_leads || 1)}%</strong>
                 </span>
                 <span className="text-xs text-stone-400">
                   Close rate: <strong className="text-stone-600">{pct(data.converted_leads, data.qualified_leads || 1)}%</strong>
