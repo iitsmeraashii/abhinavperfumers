@@ -15,13 +15,15 @@ import FollowUpCompleteModal from './FollowUpCompleteModal';
 import CaptureLeadPage from './CaptureLeadPage';
 import LeadQueuePage from './LeadQueuePage';
 import MyAccountPage from './MyAccountPage';
+import SalesRepsPage from './SalesRepsPage';
+import { supabase } from './supabaseClient';
 import {
   LogOut, Loader2,
   LayoutDashboard, List, FileText, CalendarDays, Bell, PlusCircle,
-  MoreHorizontal, X, User, ChevronDown, Layers,
+  MoreHorizontal, X, User, ChevronDown, Layers, Users,
 } from 'lucide-react';
 
-type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'templates' | 'events' | 'notifications' | 'account';
+type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'templates' | 'events' | 'notifications' | 'salesreps' | 'account';
 
 // ─── Mobile bottom nav tabs ───────────────────────────────────────────────────
 
@@ -130,7 +132,7 @@ interface MobileNavProps {
 
 function MobileBottomNav({ tab, isAdmin, onTabChange, onMorePress }: MobileNavProps) {
   const visibleTabs = MOBILE_TABS.filter(t => !t.adminOnly || isAdmin);
-  const moreActive  = tab === 'templates' || tab === 'notifications' || tab === 'account';
+  const moreActive  = tab === 'templates' || tab === 'notifications' || tab === 'salesreps' || tab === 'account';
 
   return (
     <nav
@@ -222,6 +224,7 @@ function MobileMoreDrawer({
       ? [
           { id: 'templates' as Tab,     label: 'Templates',     icon: <FileText className="w-5 h-5" /> },
           { id: 'notifications' as Tab, label: 'Notifications', icon: <Bell className="w-5 h-5" /> },
+          { id: 'salesreps' as Tab,      label: 'Sales Reps',     icon: <Users className="w-5 h-5" /> },
         ]
       : []),
   ];
@@ -297,7 +300,7 @@ function Layout() {
   const initialFollowUp = params.get('followup');
 
   const [tab,                setTab]                = useState<Tab>(() => {
-    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'templates', 'events', 'notifications', 'account'];
+    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'templates', 'events', 'notifications', 'salesreps', 'account'];
     const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'account'];
     const allowed = isAdmin ? adminTabs : repTabs;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
@@ -309,6 +312,7 @@ function Layout() {
   const [leadsInitialFilters,setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
   const [moreDrawerOpen,     setMoreDrawerOpen]     = useState(false);
+  const [resumeDraftId,      setResumeDraftId]      = useState<string | null>(null);
 
   // Kick off event validation once on mount (auth is already resolved at this point)
   useEffect(() => {
@@ -346,6 +350,7 @@ function Layout() {
     setTab(t);
     setSelectedLeadId(null);
     setMoreDrawerOpen(false);
+    if (t !== 'capture') setResumeDraftId(null);
     localStorage.setItem('activeTab', t);
     const url = new URL(window.location.href);
     url.search = '';
@@ -370,6 +375,15 @@ function Layout() {
     const url = new URL(window.location.href);
     url.searchParams.delete('lead');
     window.history.pushState({}, '', url.toString());
+  }
+
+  async function handleViewLeadFromQueue(captureSessionId: string) {
+    const { data } = await supabase
+      .from('lead_entries')
+      .select('id')
+      .eq('capture_session_id', captureSessionId)
+      .maybeSingle();
+    if (data) handleSelectLead(data.id);
   }
 
   function handleNavigateFromDashboard(filter: DashboardFilter) {
@@ -465,6 +479,15 @@ function Layout() {
                 <Bell className="w-4 h-4" /> Notifications
               </button>
             )}
+            {isAdmin && (
+              <button
+                onClick={() => handleTabChange('salesreps')}
+                className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                  ${tab === 'salesreps' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+              >
+                <Users className="w-4 h-4" /> Sales Reps
+              </button>
+            )}
           </nav>
         </div>
 
@@ -512,12 +535,16 @@ function Layout() {
             )}
             {tab === 'templates' && isAdmin && !selectedLeadId && <TemplatesPage />}
             {tab === 'notifications' && isAdmin && !selectedLeadId && <SystemNotificationsPage />}
-            {tab === 'capture' && !selectedLeadId && <CaptureLeadPage />}
+            {tab === 'salesreps' && isAdmin && !selectedLeadId && <SalesRepsPage />}
+            {tab === 'capture' && !selectedLeadId && <CaptureLeadPage key={resumeDraftId ?? 'capture'} resumeDraftId={resumeDraftId} />}
             {tab === 'queue' && !selectedLeadId && (
               <LeadQueuePage
                 onCapture={() => handleTabChange('capture')}
-                onContinueDraft={() => handleTabChange('capture')}
-                onViewLead={undefined}
+                onContinueDraft={(draftId?: string) => {
+                  setResumeDraftId(draftId ?? null);
+                  handleTabChange('capture');
+                }}
+                onViewLead={handleViewLeadFromQueue}
               />
             )}
             {tab === 'leads' && !selectedLeadId && (

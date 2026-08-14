@@ -666,8 +666,9 @@ function PreviousRepSelect({
       <button
         type="button"
         onClick={handleOpen}
-        className={`w-full flex items-center justify-between gap-2 px-4 py-3.5 bg-white
-          border border-stone-200 rounded-xl text-sm hover:border-stone-300 transition-colors`}
+        className={`w-full flex items-start justify-between gap-3 px-4 py-3.5 bg-white
+          border border-stone-200 rounded-xl text-sm text-left whitespace-normal min-h-[52px]
+          hover:border-stone-300 transition-colors`}
       >
         <span className={value ? 'text-stone-900 font-medium' : 'text-stone-400'}>
           {selectedRep ? `${selectedRep.name} (${selectedRep.rep_code})` : 'Select rep…'}
@@ -677,7 +678,7 @@ function PreviousRepSelect({
 
       {open && (
         <div className="absolute z-30 top-full mt-1.5 inset-x-0 bg-white border border-stone-200
-          rounded-xl shadow-xl overflow-hidden max-h-56">
+          rounded-xl shadow-xl overflow-hidden max-h-[min(70vh,28rem)]">
           <div className="px-3 pt-3 pb-2">
             <input
               type="text"
@@ -689,7 +690,7 @@ function PreviousRepSelect({
                 focus:outline-none focus:ring-1 focus:ring-stone-300"
             />
           </div>
-          <div className="max-h-40 overflow-y-auto">
+          <div className="max-h-[min(55vh,20rem)] overflow-y-auto overscroll-contain">
             {filtered.length === 0 ? (
               <p className="px-4 py-3 text-sm text-stone-400">No reps found</p>
             ) : (
@@ -787,13 +788,14 @@ interface Props {
   onBack:        () => void;
   onDiscard:     () => Promise<void>;
   onSaveAndNext?: () => Promise<{ error?: string } | void>;
+  onSaveAsDraft?: () => Promise<void>;
   onVoiceNoteRecorded?: (blob: Blob, durationMs: number, mimeType: string) => void;
   /** When true, contact fields are optional because evidence (card/QR)
    *  satisfies the minimum save requirement. Used in Exhibition mode. */
   contactDetailsOptional?: boolean;
 }
 
-export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onVoiceNoteRecorded, contactDetailsOptional }: Props) {
+export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
@@ -826,7 +828,13 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const website         = String(d.website ?? '');
   const address         = String(d.address  ?? '');
 
-  const hasDraftData = !!(clientName || company || phone || notes || notesImage);
+  const hasDraftData = !!(clientName || company || phone || email || designation || notes || notesImage
+    || d.cardFrontAssetId || d.cardBackAssetId || d.rawQr
+    || (d.voiceNoteDurationMs && d.voiceNoteDurationMs > 0)
+    || (d.application && d.application.length) || (d.quickKeywords && d.quickKeywords.length)
+    || (d.targetMarket && d.targetMarket.length) || (d.certification && d.certification.length)
+    || (d.benchmark && d.benchmark.length) || d.leadType || d.leadTemperature
+    || d.previousRepCode || d.priceRange || d.website || d.address);
   const hasIdentifier = !!(clientName.trim() || company.trim() || phone.trim());
   // In Exhibition mode, evidence (card/QR) satisfies the minimum requirement.
   const hasEvidence = !!(d.cardFrontAssetId || d.rawQr);
@@ -958,6 +966,15 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
     setSaving(false);
   }, [handleSaveDraft, session]);
 
+  const handleSaveAsDraftClick = useCallback(async () => {
+    setSaving(true);
+    // The parent's onSaveAsDraft handles saving the saved draft AND resetting
+    // the session. We must NOT call handleSaveDraft here — that writes to the
+    // active_capture_draft recovery key, which the parent then has to clear.
+    if (onSaveAsDraft) await onSaveAsDraft();
+    setSaving(false);
+  }, [onSaveAsDraft]);
+
   async function handleDiscardConfirm() {
     setShowDiscardDialog(false);
     await onDiscard();
@@ -988,7 +1005,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
       <div className="space-y-4">
 
         {/* ═══ Section 1 — Lead Classification (highlighted) ═══ */}
-        <div className="bg-amber-50/60 rounded-2xl border border-amber-200/70 shadow-sm overflow-hidden">
+        <div className="relative z-20 bg-amber-50/60 rounded-2xl border border-amber-200/70 shadow-sm overflow-visible">
           <div className="px-5 pt-5 pb-4 border-b border-amber-100">
             <SectionHeader title="Lead Classification" subtitle="Is this a new or existing lead? How hot is it?" step={1} sectionKey="contact" />
           </div>
@@ -1253,8 +1270,8 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
         <div className="max-w-lg mx-auto flex gap-3">
           <button
             type="button"
-            onClick={handleContinueEnrich}
-            disabled={saving}
+            onClick={onSaveAsDraft ? handleSaveAsDraftClick : handleContinueEnrich}
+            disabled={saving || (onSaveAsDraft && !hasDraftData)}
             className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl
               border border-stone-200 bg-white text-stone-700 text-sm font-semibold
               hover:bg-stone-50 active:bg-stone-100 active:scale-[0.98]

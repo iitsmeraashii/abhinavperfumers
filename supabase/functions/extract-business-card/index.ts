@@ -8,6 +8,28 @@ const corsHeaders = {
 
 // ─── Extraction schema ────────────────────────────────────────────────────────
 
+interface FieldConfidenceReport {
+  fullName?:     number;
+  company?:      number;
+  designation?:  number;
+  website?:      number;
+  address?:      number;
+  phoneNumbers?: number[];
+  emails?:       number[];
+}
+
+type FieldExtractionStatus = 'extracted' | 'absent' | 'uncertain';
+
+interface FieldStatusReport {
+  fullName?:     FieldExtractionStatus;
+  company?:      FieldExtractionStatus;
+  designation?:  FieldExtractionStatus;
+  website?:      FieldExtractionStatus;
+  address?:      FieldExtractionStatus;
+  phoneNumbers?: FieldExtractionStatus[];
+  emails?:       FieldExtractionStatus[];
+}
+
 interface ExtractionResult {
   fullName:       string;
   firstName:      string;
@@ -21,6 +43,10 @@ interface ExtractionResult {
   confidence:     number;
   notes:          string;
   rawText:        string;
+  /** Model-reported per-field confidence. Optional — absent until the
+   *  prompt is extended to request it. */
+  fieldConfidence?: FieldConfidenceReport;
+  fieldStatus?: FieldStatusReport;
 }
 
 const EMPTY_RESULT: ExtractionResult = {
@@ -39,6 +65,105 @@ function normalizeEmail(email: string): string | null {
 function normalizePhone(phone: string): string {
   // Keep digits, +, -, spaces, parens — strip everything else
   return phone.replace(/[^\d+\-\s()]/g, "").trim();
+}
+
+function clamp01(v: unknown): number | undefined {
+  if (typeof v !== "number" || !isFinite(v)) return undefined;
+  return Math.min(1, Math.max(0, v));
+}
+
+function normalizeConfidenceArray(
+  arr: unknown,
+  expectedLength: number,
+): number[] | undefined {
+  if (!Array.isArray(arr)) return undefined;
+  const out: number[] = [];
+  for (let i = 0; i < Math.min(arr.length, expectedLength); i++) {
+    const c = clamp01(arr[i]);
+    if (c !== undefined) out.push(c);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function normalizeFieldConfidence(
+  raw: unknown,
+  emails: string[],
+  phoneNumbers: string[],
+): FieldConfidenceReport | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const report: FieldConfidenceReport = {};
+
+  const fc = clamp01(r.fullName);
+  if (fc !== undefined) report.fullName = fc;
+
+  const cc = clamp01(r.company);
+  if (cc !== undefined) report.company = cc;
+
+  const dc = clamp01(r.designation);
+  if (dc !== undefined) report.designation = dc;
+
+  const wc = clamp01(r.website);
+  if (wc !== undefined) report.website = wc;
+
+  const ac = clamp01(r.address);
+  if (ac !== undefined) report.address = ac;
+
+  const pc = normalizeConfidenceArray(r.phoneNumbers, phoneNumbers.length);
+  if (pc !== undefined) report.phoneNumbers = pc;
+
+  const ec = normalizeConfidenceArray(r.emails, emails.length);
+  if (ec !== undefined) report.emails = ec;
+
+  return Object.keys(report).length > 0 ? report : undefined;
+}
+
+function normalizeFieldStatus(
+  raw: unknown,
+  emails: string[],
+  phoneNumbers: string[],
+): FieldStatusReport | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const report: FieldStatusReport = {};
+
+  const valid: FieldExtractionStatus[] = ['extracted', 'absent', 'uncertain'];
+
+  const check = (v: unknown): FieldExtractionStatus | undefined =>
+    typeof v === 'string' && valid.includes(v as FieldExtractionStatus)
+      ? v as FieldExtractionStatus
+      : undefined;
+
+  const fs = check(r.fullName);
+  if (fs) report.fullName = fs;
+  const cs = check(r.company);
+  if (cs) report.company = cs;
+  const ds = check(r.designation);
+  if (ds) report.designation = ds;
+  const ws = check(r.website);
+  if (ws) report.website = ws;
+  const as_ = check(r.address);
+  if (as_) report.address = as_;
+
+  if (Array.isArray(r.phoneNumbers)) {
+    const arr: FieldExtractionStatus[] = [];
+    for (let i = 0; i < r.phoneNumbers.length; i++) {
+      const s = check(r.phoneNumbers[i]);
+      if (s) arr.push(s);
+    }
+    if (arr.length > 0) report.phoneNumbers = arr;
+  }
+
+  if (Array.isArray(r.emails)) {
+    const arr: FieldExtractionStatus[] = [];
+    for (let i = 0; i < r.emails.length; i++) {
+      const s = check(r.emails[i]);
+      if (s) arr.push(s);
+    }
+    if (arr.length > 0) report.emails = arr;
+  }
+
+  return Object.keys(report).length > 0 ? report : undefined;
 }
 
 function validateAndNormalize(raw: Partial<ExtractionResult>): ExtractionResult {
@@ -70,6 +195,8 @@ function validateAndNormalize(raw: Partial<ExtractionResult>): ExtractionResult 
     emails,
     phoneNumbers,
     confidence:   Math.min(1, Math.max(0, raw.confidence ?? 0)),
+    fieldConfidence: normalizeFieldConfidence(raw.fieldConfidence, emails, phoneNumbers),
+    fieldStatus: normalizeFieldStatus(raw.fieldStatus, emails, phoneNumbers),
   };
 }
 
@@ -113,6 +240,18 @@ Rules:
 - If uncertain about a field, leave it as empty string or empty array
 - rawText should contain ALL visible text on the card, line by line
 
+CRITICAL — Do NOT fabricate obscured or partial phone numbers:
+- Never reconstruct missing phone digits.
+- Never guess obscured, masked, blurred, cropped, or partially unreadable digits.
+- If a phone number is partially visible (e.g. "+91 98 XXXX 344"), do NOT invent
+  the missing digits to produce an apparently complete number.
+- Do not convert partially visible or masked phone numbers into apparently
+  complete phone numbers.
+- If you cannot reliably read the complete phone number, either omit it entirely
+  (empty array) or return only the digits you can clearly see, but do NOT present
+  an invented complete number.
+- Returning no phone number is always better than returning a fabricated one.
+
 Phone number ordering — CRITICAL:
 The first entry in phoneNumbers MUST be the best primary contact number for WhatsApp/mobile use.
 Apply this priority order when sorting phoneNumbers:
@@ -133,6 +272,72 @@ Apply this priority order when sorting phoneNumbers:
 Within each priority tier, preserve the original card order.
 If only one number exists, place it first regardless of type.
 
+Field-level confidence — IMPORTANT:
+In addition to the overall "confidence" field, you MUST include a "fieldConfidence" object
+that reports your confidence in the correctness of EACH extracted value individually.
+
+The overall "confidence" reflects the extraction as a whole.
+fieldConfidence values reflect whether THIS SPECIFIC extracted value is correct.
+
+DO NOT simply copy the overall confidence into every field.
+A field can have a much lower confidence than the overall score if the evidence
+for that specific field is ambiguous, partially obscured, or difficult to read.
+For example, it is valid and expected to return overall confidence 0.90 but
+fieldConfidence.phoneNumbers[0] = 0.45 if the phone number is hard to read.
+
+If a phone number, email, or website is blurred, masked, or partially unreadable
+and you decide to include it, its fieldConfidence MUST be low (e.g. below 0.6)
+to reflect that the value may be incomplete or unreliable.
+
+fieldConfidence rules:
+- Every value must be a number between 0.0 and 1.0.
+- Only include keys for fields that were actually extracted (non-empty).
+- If a field was not extracted (empty string or empty array), omit its key entirely.
+  Do NOT invent confidence values for missing fields.
+- For array fields (phoneNumbers, emails), return exactly one confidence value
+  per extracted entry, in the same order as the array.
+  phoneNumbers[0] confidence corresponds to phoneNumbers[0] value.
+  emails[0] confidence corresponds to emails[0] value.
+- If a field has a single clear value that is easy to read, confidence should be high (e.g. 0.9+).
+- If a field value is ambiguous, partially cut off, or requires inference, confidence should be lower.
+- Do NOT change whether a field is extracted based on confidence.
+  If the existing rules say to leave a field empty when uncertain, keep it empty.
+  fieldConfidence exposes uncertainty in extracted values — it does not encourage
+  extracting uncertain values.
+
+Field extraction status — IMPORTANT:
+In addition to "fieldConfidence", you MUST include a "fieldStatus" object that
+classifies each field's extraction outcome as one of:
+  - "extracted": The field is present on the card AND a usable value was extracted.
+  - "absent":    The field is genuinely not present on the card at all.
+  - "uncertain": The field appears to be present on the card, but the value cannot
+                 be reliably determined because it is blurry, obscured, partially
+                 visible, illegible, or ambiguous.
+
+CRITICAL — uncertain fields:
+If a phone number, email, or website is visibly present but cannot be confidently
+read, DO NOT invent or reconstruct the missing characters. Instead:
+  - Return an empty value (empty string or empty array) for that field.
+  - Mark the field as "uncertain" in fieldStatus.
+  - This signals that a human reviewer should check the original card.
+
+For array fields (phoneNumbers, emails):
+  - Provide one fieldStatus entry per attempted field on the card.
+  - If the card has one phone number that is unclear:
+      phoneNumbers: []
+      fieldStatus.phoneNumbers: ["uncertain"]
+  - If the card has two phone numbers, one clear and one unclear:
+      phoneNumbers: ["+919876543210"]
+      fieldStatus.phoneNumbers: ["extracted", "uncertain"]
+  - If the card genuinely has no phone number:
+      phoneNumbers: []
+      fieldStatus.phoneNumbers: ["absent"]
+  - If the card has no phone number at all, omit the phoneNumbers key from fieldStatus entirely,
+    OR set it to ["absent"].
+
+Do NOT mark a field as "uncertain" if it is simply not on the card — use "absent" instead.
+Do NOT mark a field as "absent" if it IS on the card but hard to read — use "uncertain" instead.
+
 Return ONLY valid JSON matching this exact schema:
 {
   "fullName": "",
@@ -146,7 +351,25 @@ Return ONLY valid JSON matching this exact schema:
   "address": "",
   "confidence": 0.0,
   "notes": "",
-  "rawText": ""
+  "rawText": "",
+  "fieldConfidence": {
+    "fullName": 0.0,
+    "company": 0.0,
+    "designation": 0.0,
+    "website": 0.0,
+    "address": 0.0,
+    "phoneNumbers": [0.0],
+    "emails": [0.0]
+  },
+  "fieldStatus": {
+    "fullName": "extracted",
+    "company": "extracted",
+    "designation": "extracted",
+    "website": "extracted",
+    "address": "extracted",
+    "phoneNumbers": ["extracted"],
+    "emails": ["extracted"]
+  }
 }`;
 
 async function callOpenAIVision(
@@ -184,7 +407,7 @@ async function callOpenAIVision(
           ],
         },
       ],
-      max_tokens: 1024,
+      max_tokens: 1400,
       temperature: 0.1,
     }),
   });

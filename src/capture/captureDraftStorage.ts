@@ -2,13 +2,35 @@
 // Sits between the raw db layer and the React hooks.
 // Swap the db import to migrate to Capacitor SQLite or any other backend.
 
-import { dbGet, dbPut, dbDelete } from './db';
+import { dbGet, dbPut, dbDelete, dbGetAllInStore } from './db';
 import type { CaptureSession } from './types';
 import { INITIAL_SYNC_STATE } from './types';
 import { DEFAULT_CAPTURE_PROFILE } from './captureProfile';
 
 const STORE = 'drafts';
 const DRAFT_KEY = 'active_capture_draft';
+
+// ─── Saved-draft pub/sub ─────────────────────────────────────────────────────
+// Mirrors the completedLeadsStorage pattern so LeadQueuePage can react to
+// saved-draft writes without polling.
+
+type Listener = () => void;
+const listeners = new Set<Listener>();
+let version = 0;
+
+export function subscribeSavedDrafts(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+export function getSavedDraftsVersion(): number {
+  return version;
+}
+
+function notifySavedDrafts(): void {
+  version++;
+  listeners.forEach(l => l());
+}
 
 // Serialisable snapshot of CaptureSession — persisted to IndexedDB.
 // Includes backend sync IDs so the session reconnects to its DB row on restore.
@@ -99,4 +121,66 @@ export async function loadDraft(): Promise<CaptureSession | null> {
 
 export async function clearDraft(): Promise<void> {
   await dbDelete(STORE, DRAFT_KEY);
+}
+
+// ─── Saved drafts (explicitly named, multiple) ──────────────────────────────
+// Saved drafts live in the same 'drafts' IndexedDB store but use a unique
+// 'saved_draft:<uuid>' key instead of DRAFT_KEY. This keeps them in the same
+// store so the upgrade logic doesn't change, while remaining separate from
+// the automatic recovery draft.
+
+const SAVED_DRAFT_PREFIX = 'saved_draft:';
+
+function toSavedRecord(session: CaptureSession, draftId: string): PersistedDraft {
+  return {
+    ...toRecord(session),
+    id: draftId,
+  };
+}
+
+function isValidSavedDraft(record: unknown): record is PersistedDraft {
+  if (!record || typeof record !== 'object') return false;
+  const r = record as Partial<PersistedDraft>;
+  return (
+    typeof r.id === 'string' &&
+    r.id.startsWith(SAVED_DRAFT_PREFIX) &&
+    r.captureMethod != null &&
+    r.sessionStatus != null &&
+    typeof r.draftData === 'object'
+  );
+}
+
+export async function saveSavedDraft(session: CaptureSession): Promise<string> {
+  const draftId = `${SAVED_DRAFT_PREFIX}${crypto.randomUUID()}`;
+  await dbPut(STORE, toSavedRecord(session, draftId));
+  notifySavedDrafts();
+  return draftId;
+}
+
+export async function loadSavedDraft(draftId: string): Promise<CaptureSession | null> {
+  const raw = await dbGet<PersistedDraft>(STORE, draftId);
+  if (!isValidSavedDraft(raw)) return null;
+  try {
+    return fromRecord(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function loadAllSavedDrafts(): Promise<{ id: string; session: CaptureSession; createdAt: string | null; updatedAt: string | null }[]> {
+  const all = await dbGetAllInStore<PersistedDraft>(STORE);
+  return all
+    .filter(isValidSavedDraft)
+    .map(r => ({
+      id: r.id,
+      session: fromRecord(r),
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }))
+    .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+}
+
+export async function deleteSavedDraft(draftId: string): Promise<void> {
+  await dbDelete(STORE, draftId);
+  notifySavedDrafts();
 }

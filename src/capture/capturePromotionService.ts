@@ -93,6 +93,7 @@ export async function executePromotion(
 
     const { error: insertError } = await supabase.from('lead_entries').insert({
       id:                      leadId,
+      capture_session_id:      backendSessionId,
       client_name:             draftData.clientName?.trim()      || null,
       company:                 draftData.company?.trim()         || null,
       designation:             draftData.designation?.trim()     || null,
@@ -132,6 +133,9 @@ export async function executePromotion(
       .update({ promoted_lead_id: leadId, session_status: 'promoted' })
       .eq('id', backendSessionId)
       .eq('user_id', userId);
+
+    // ── Log CREATED activity (fire-and-forget, non-blocking) ────────────────
+    await supabase.rpc('log_lead_created', { p_lead_id: leadId });
 
     // ── Update / create completed_leads ────────────────────────────────────
     await _updateCompletedLead(

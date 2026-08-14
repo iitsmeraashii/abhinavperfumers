@@ -4,6 +4,7 @@ import { useAuth } from './AuthContext';
 import {
   ChevronLeft, ChevronRight, Loader2, Inbox,
   Search, X, ChevronDown, SlidersHorizontal, Download,
+  Trash2, AlertTriangle, ShieldAlert,
 } from 'lucide-react';
 import { formatDateTime, nowFormatted } from './utils/dateFormat';
 
@@ -66,28 +67,39 @@ const TEMP_COLORS: Record<string, string> = {
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  new:       'bg-stone-100 text-stone-600',
-  contacted: 'bg-sky-100 text-sky-700',
-  qualified: 'bg-teal-100 text-teal-700',
-  lost:      'bg-red-100 text-red-600',
-  converted: 'bg-green-100 text-green-700',
+  new:             'bg-stone-100 text-stone-600',
+  contacted:       'bg-sky-100 text-sky-700',
+  qualified:       'bg-teal-100 text-teal-700',
+  lost:            'bg-red-100 text-red-600',
+  converted:       'bg-green-100 text-green-700',
+  requires_review: 'bg-amber-100 text-amber-800 border border-amber-300',
 };
+
+const STATUS_LABELS: Record<string, string> = {
+  qualified:       'Samples Sent',
+  requires_review: 'Review Required',
+};
+
+function statusLabel(value: string): string {
+  return STATUS_LABELS[value.toLowerCase()] ?? value;
+}
 
 const STATUS_OPTIONS: { label: string; value: string }[] = [
   { label: 'New',       value: 'NEW' },
   { label: 'Contacted', value: 'CONTACTED' },
-  { label: 'Qualified', value: 'QUALIFIED' },
+  { label: 'Samples Sent', value: 'QUALIFIED' },
   { label: 'Lost',      value: 'LOST' },
   { label: 'Converted', value: 'CONVERTED' },
 ];
 
-function badge(value: string | null, colorMap?: Record<string, string>) {
+function badge(value: string | null, colorMap?: Record<string, string>, icon?: React.ReactNode) {
   if (!value) return <span className="text-stone-400">—</span>;
   const key = value.toLowerCase();
   const cls = colorMap?.[key] ?? 'bg-stone-100 text-stone-600';
   return (
-    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
-      {value}
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
+      {icon}
+      {statusLabel(value)}
     </span>
   );
 }
@@ -143,6 +155,7 @@ function SelectField({ label, value, onChange, options, placeholder = 'Any' }: S
 function readParams(): {
   page: number;
   search: string;
+  companySearch: string;
   dateFilter: DateFilter;
   eventFilter: string;
   repFilter: string;
@@ -157,6 +170,7 @@ function readParams(): {
   return {
     page,
     search: p.get('search') ?? '',
+    companySearch: p.get('companySearch') ?? '',
     dateFilter,
     eventFilter: p.get('event') ?? '',
     repFilter: p.get('rep') ?? '',
@@ -176,6 +190,7 @@ function readParams(): {
 function buildParams(
   page: number,
   search: string,
+  companySearch: string,
   dateFilter: DateFilter,
   eventFilter: string,
   repFilter: string,
@@ -188,6 +203,7 @@ function buildParams(
 
   set('page', page > 0 ? String(page + 1) : '');
   set('search', search);
+  set('companySearch', companySearch);
   set('date', dateFilter ?? '');
   set('event', eventFilter);
   set('rep', repFilter);
@@ -241,6 +257,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   // Quick filters — initialFilters (from dashboard tile click) win over URL params on first mount
   const [searchInput, setSearchInput] = useState(init.search);
   const [searchTerm, setSearchTerm] = useState(init.search);
+  const [companySearchInput, setCompanySearchInput] = useState(init.companySearch);
+  const [companySearchTerm, setCompanySearchTerm] = useState(init.companySearch);
   const [dateFilter, setDateFilter] = useState<DateFilter>(initialFilters?.dateFilter ?? init.dateFilter);
   // initialEventCode (from parent Dashboard click) wins over URL param only on first load
   const [eventFilter, setEventFilter] = useState(initialEventCode ?? init.eventFilter);
@@ -266,7 +284,16 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
 
   const [exporting, setExporting] = useState(false);
 
+  // Bulk selection (admin only)
+  const isAdmin = user?.role === 'admin';
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteSuccess, setDeleteSuccess] = useState<string | null>(null);
+
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const companyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventDropdownRef = useRef<HTMLDivElement>(null);
   const repDropdownRef = useRef<HTMLDivElement>(null);
   const [eventDropdownOpen, setEventDropdownOpen] = useState(false);
@@ -278,8 +305,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   // Sync state → URL whenever anything changes
   useEffect(() => {
     const advWithStatus = { ...applied, leadStatus: statusFilter || applied.leadStatus };
-    pushParams(buildParams(page, searchTerm, dateFilter, eventFilter, repFilter, advWithStatus));
-  }, [page, searchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter]);
+    pushParams(buildParams(page, searchTerm, companySearchTerm, dateFilter, eventFilter, repFilter, advWithStatus));
+  }, [page, searchTerm, companySearchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter]);
 
   // Fetch static option lists
   useEffect(() => {
@@ -322,6 +349,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   const fetchLeads = useCallback(async (
     pageIndex: number,
     term: string,
+    companyTerm: string,
     dateFilt: DateFilter,
     eventFilt: string,
     repFilt: string,
@@ -347,6 +375,21 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     }
     if (term.trim()) {
       query = query.ilike('search_text', `%${term.trim()}%`);
+    }
+
+    // Company search: call the search_companies RPC to get matching lead IDs,
+    // then filter the leads_list_view query by those IDs (AND with other filters).
+    if (companyTerm.trim()) {
+      const { data: companyIds, error: rpcError } = await supabase
+        .rpc('search_companies', { search_term: companyTerm.trim() });
+      if (rpcError || !companyIds || companyIds.length === 0) {
+        setLeads([]);
+        setTotal(0);
+        setLoading(false);
+        return;
+      }
+      const ids = (companyIds as { lead_id: string }[]).map(r => r.lead_id);
+      query = query.in('id', ids);
     }
 
     const quickDateStart = getDateFilterStart(dateFilt);
@@ -393,6 +436,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     setPage(0);
     setSearchInput('');
     setSearchTerm('');
+    setCompanySearchInput('');
+    setCompanySearchTerm('');
     setDateFilter(null);
     setEventFilter(initialEventCode ?? '');
     setRepFilter('');
@@ -402,8 +447,9 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    fetchLeads(page, searchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter);
-  }, [page, searchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter, fetchLeads]);
+    setSelectedIds(new Set());
+    fetchLeads(page, searchTerm, companySearchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter);
+  }, [page, searchTerm, companySearchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter, fetchLeads]);
 
   async function exportCSV() {
     if (!user) return;
@@ -511,6 +557,18 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (debounceRef.current) clearTimeout(debounceRef.current);
   }
 
+  function handleCompanySearchChange(value: string) {
+    setCompanySearchInput(value);
+    if (companyDebounceRef.current) clearTimeout(companyDebounceRef.current);
+    companyDebounceRef.current = setTimeout(() => { setCompanySearchTerm(value); setPage(0); }, 300);
+  }
+  function clearCompanySearch() {
+    setCompanySearchInput('');
+    setCompanySearchTerm('');
+    setPage(0);
+    if (companyDebounceRef.current) clearTimeout(companyDebounceRef.current);
+  }
+
   // Quick filters
   function toggleDateFilter(f: DateFilter) {
     setDateFilter(prev => prev === f ? null : f);
@@ -526,6 +584,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     setEventFilter('');
     setRepFilter('');
     setStatusFilter('');
+    setCompanySearchInput('');
+    setCompanySearchTerm('');
     setPage(0);
   }
 
@@ -573,7 +633,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
 
   // Build the URL for a lead detail link (preserves all current list params)
   function leadHref(id: string): string {
-    const p = buildParams(page, searchTerm, dateFilter, eventFilter, repFilter, applied);
+    const p = buildParams(page, searchTerm, companySearchTerm, dateFilter, eventFilter, repFilter, applied);
     p.set('lead', id);
     // remove page from the lead detail URL — not needed there
     // but we keep all filter params so opening in new tab shows the list in context
@@ -582,7 +642,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
 
   const rangeStart = total === 0 ? 0 : page * PAGE_SIZE + 1;
   const rangeEnd = Math.min((page + 1) * PAGE_SIZE, total);
-  const hasQuickFilters = dateFilter !== null || eventFilter !== '' || repFilter !== '' || statusFilter !== '';
+  const hasQuickFilters = dateFilter !== null || eventFilter !== '' || repFilter !== '' || statusFilter !== '' || companySearchTerm !== '';
   const selectedEvent = events.find(e => e.event_code === eventFilter);
   const eventButtonLabel = eventFilter ? (selectedEvent?.name ?? eventFilter) : 'Event';
   const selectedRep = salesReps.find(r => r.rep_code === repFilter);
@@ -618,20 +678,38 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
           </p>
         </div>
 
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
-          <input
-            type="text"
-            value={searchInput}
-            onChange={e => handleSearchChange(e.target.value)}
-            placeholder="Search by name, company, phone, email"
-            className="pl-9 pr-8 py-2 text-sm border border-stone-200 rounded-lg bg-white text-stone-800 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent w-72 transition"
-          />
-          {searchInput && (
-            <button onClick={clearSearch} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600 transition">
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={e => handleSearchChange(e.target.value)}
+              placeholder="Search by name, company, phone, email"
+              className="pl-9 pr-8 py-2 text-sm border border-stone-200 rounded-lg bg-white text-stone-800 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent w-72 transition"
+            />
+            {searchInput && (
+              <button onClick={clearSearch} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600 transition">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
+            <input
+              type="text"
+              value={companySearchInput}
+              onChange={e => handleCompanySearchChange(e.target.value)}
+              placeholder="Search company..."
+              className="pl-9 pr-8 py-2 text-sm border border-stone-200 rounded-lg bg-white text-stone-800 placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent w-56 transition"
+            />
+            {companySearchInput && (
+              <button onClick={clearCompanySearch} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600 transition">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -812,12 +890,64 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
         </div>
       )}
 
+      {/* Bulk action bar (admin only) */}
+      {isAdmin && selectedIds.size > 0 && (
+        <div className="flex items-center gap-3 mb-3 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+          <span className="text-sm font-medium text-amber-800">
+            {selectedIds.size} selected
+          </span>
+          <button
+            onClick={() => setDeleteModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-red-600 text-white hover:bg-red-700 transition"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            Delete Selected
+          </button>
+          <button
+            onClick={() => setSelectedIds(new Set())}
+            className="text-xs text-stone-500 hover:text-stone-700 transition"
+          >
+            Clear selection
+          </button>
+        </div>
+      )}
+
+      {/* Success message */}
+      {deleteSuccess && (
+        <div className="mb-3 px-4 py-2.5 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">
+          {deleteSuccess}
+        </div>
+      )}
+
+      {/* Error message */}
+      {deleteError && (
+        <div className="mb-3 px-4 py-2.5 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+          {deleteError}
+        </div>
+      )}
+
       {/* Table */}
       <div className="bg-white border border-stone-200 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-stone-100 bg-stone-50">
+                {isAdmin && (
+                  <th className="text-left px-4 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={leads.length > 0 && selectedIds.size === leads.length}
+                      onChange={() => {
+                        if (selectedIds.size === leads.length) {
+                          setSelectedIds(new Set());
+                        } else {
+                          setSelectedIds(new Set(leads.map(l => l.id)));
+                        }
+                      }}
+                      className="w-4 h-4 rounded border-stone-300 text-amber-600 focus:ring-amber-500 cursor-pointer"
+                    />
+                  </th>
+                )}
                 <th className="text-left px-4 py-3 font-medium text-stone-500">Client</th>
                 <th className="text-left px-4 py-3 font-medium text-stone-500">Company</th>
                 <th className="text-left px-4 py-3 font-medium text-stone-500">Phone</th>
@@ -832,29 +962,49 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="py-16 text-center">
+                  <td colSpan={isAdmin ? 10 : 9} className="py-16 text-center">
                     <Loader2 className="w-5 h-5 text-amber-600 animate-spin mx-auto" />
                   </td>
                 </tr>
               ) : leads.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-16 text-center">
+                  <td colSpan={isAdmin ? 10 : 9} className="py-16 text-center">
                     <Inbox className="w-8 h-8 text-stone-300 mx-auto mb-2" />
                     <p className="text-stone-400 text-sm">No leads found</p>
                   </td>
                 </tr>
               ) : (
                 leads.map(lead => {
+                  const isReviewRequired = lead.lead_status?.toUpperCase() === 'REQUIRES_REVIEW';
                   const rowBg =
+                    isReviewRequired                          ? 'bg-amber-50 hover:bg-amber-100' :
                     lead.system_status === 'INVALID_LEAD'    ? 'bg-red-50 hover:bg-red-100' :
                     lead.system_status === 'WHATSAPP_FAILED' ? 'bg-yellow-50 hover:bg-yellow-100' :
                     lead.system_status === 'WHATSAPP_SENT'   ? 'bg-green-50 hover:bg-green-100' :
                     'bg-white hover:bg-stone-50';
+                  const isSelected = selectedIds.has(lead.id);
                   return (
                     <tr
                       key={lead.id}
-                      className={`border-b border-stone-100 last:border-0 transition-colors ${rowBg}`}
+                      className={`border-b border-stone-100 last:border-0 transition-colors ${rowBg} ${isReviewRequired ? 'border-l-4 border-l-amber-300' : ''} ${isSelected ? 'ring-1 ring-inset ring-amber-300' : ''}`}
                     >
+                      {isAdmin && (
+                        <td className="px-4 py-3">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {
+                              setSelectedIds(prev => {
+                                const next = new Set(prev);
+                                if (next.has(lead.id)) next.delete(lead.id);
+                                else next.add(lead.id);
+                                return next;
+                              });
+                            }}
+                            className="w-4 h-4 rounded border-stone-300 text-amber-600 focus:ring-amber-500 cursor-pointer"
+                          />
+                        </td>
+                      )}
                       {/* Entire row is wrapped in an anchor for right-click / cmd-click support.
                           We intercept left-click to use the SPA callback instead of navigation. */}
                       <td className="px-4 py-3 font-medium text-stone-800">
@@ -872,7 +1022,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
                       <td className="px-4 py-3 text-stone-600 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{lead.sales_rep_code || '—'}</td>
                       <td className="px-4 py-3 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{badge(lead.lead_type)}</td>
                       <td className="px-4 py-3 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{badge(lead.lead_temperature, TEMP_COLORS)}</td>
-                      <td className="px-4 py-3 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{badge(lead.lead_status, STATUS_COLORS)}</td>
+                      <td className="px-4 py-3 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{badge(lead.lead_status, STATUS_COLORS, isReviewRequired ? <ShieldAlert className="w-3 h-3 flex-shrink-0" /> : null)}</td>
                       <td className="px-4 py-3 text-stone-500 cursor-pointer" onClick={() => onSelectLead(lead.id)}>{formatDate(lead.created_at)}</td>
                     </tr>
                   );
@@ -923,6 +1073,68 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
           </div>
         )}
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {deleteModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/30 backdrop-blur-[1px]"
+            onClick={() => !deleting && setDeleteModalOpen(false)}
+          />
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6 flex flex-col gap-4">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0 w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5 text-red-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-stone-800">
+                  {selectedIds.size === 1
+                    ? 'Delete this lead permanently?'
+                    : `Delete ${selectedIds.size} leads permanently?`}
+                </h3>
+                <p className="text-sm text-stone-500 mt-1">
+                  This will permanently delete the selected lead{selectedIds.size === 1 ? '' : 's'} and cannot be undone.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 mt-2">
+              <button
+                onClick={() => setDeleteModalOpen(false)}
+                disabled={deleting}
+                className="px-4 py-2 text-sm font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  setDeleting(true);
+                  setDeleteError(null);
+                  setDeleteSuccess(null);
+                  const ids = Array.from(selectedIds);
+                  const { data, error } = await supabase.rpc('delete_leads_bulk', { lead_ids: ids });
+                  if (error) {
+                    setDeleteError(error.message || 'Failed to delete leads');
+                    setDeleting(false);
+                    return;
+                  }
+                  const count = (data as number) ?? 0;
+                  setDeleting(false);
+                  setDeleteModalOpen(false);
+                  setSelectedIds(new Set());
+                  setDeleteSuccess(`${count} lead${count === 1 ? '' : 's'} deleted successfully.`);
+                  fetchLeads(page, searchTerm, companySearchTerm, dateFilter, eventFilter, repFilter, applied, statusFilter);
+                  setTimeout(() => setDeleteSuccess(null), 5000);
+                }}
+                disabled={deleting}
+                className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+              >
+                {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                Delete Lead{selectedIds.size === 1 ? '' : 's'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Advanced Filters Panel */}
       {panelOpen && (

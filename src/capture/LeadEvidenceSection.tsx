@@ -26,7 +26,7 @@ interface LightboxProps {
   onClose: () => void;
 }
 
-function Lightbox({ images, initialIndex, onClose }: LightboxProps) {
+export function Lightbox({ images, initialIndex, onClose }: LightboxProps) {
   const [idx, setIdx] = useState(initialIndex);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -141,7 +141,7 @@ function Lightbox({ images, initialIndex, onClose }: LightboxProps) {
 
 // ─── Audio Player ─────────────────────────────────────────────────────────────
 
-function AudioPlayer({ src }: { src: string }) {
+export function AudioPlayer({ src }: { src: string }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [current, setCurrent] = useState(0);

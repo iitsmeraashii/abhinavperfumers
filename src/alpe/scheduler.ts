@@ -178,23 +178,62 @@ class AlpeScheduler {
       });
 
       // Run the full pipeline: Queue → Worker → Pipeline → Decision → Promotion → Completion
+      alpeLog('Scheduler — claiming job for processing', {
+        jobId: job.id,
+        backendSessionId: job.capture_session_id,
+        correlationId: (job.metadata as Record<string, unknown> | null)?.correlationId ?? null,
+      });
       const workerResult = await processJob(job);
-      alpeLog('Worker result', workerResult);
+      alpeLog('Worker result', { jobId: job.id, backendSessionId: job.capture_session_id, ...workerResult });
 
-      const decision = decide(workerResult);
-      alpeLog('Decision', decision);
+      const decision = decide(workerResult, job.retry_count);
+      alpeLog('Decision', { jobId: job.id, backendSessionId: job.capture_session_id, ...decision });
 
       if (decision.newState === 'RETRYING' && decision.isRetryable) {
-        await markRetrying(job.id, decision.failureReason ?? 'Retryable failure');
+        await markRetrying(
+          job.id,
+          decision.failureReason ?? 'Retryable failure',
+          decision.failedStage,
+          decision.errorMessage,
+        );
       } else {
         await updateJobState(job.id, decision.newState, {
           failure_reason: decision.failureReason,
+          failed_stage:   decision.failedStage,
+          error_message:  decision.errorMessage,
+        });
+      }
+
+      // Update local completed_leads with failure diagnostics for the Queue UI
+      if (decision.newState === 'RETRYING' || decision.newState === 'FAILED') {
+        const { updateCompletedLeadStatus } = await import('../capture/completedLeadsStorage');
+        const isExhausted = decision.newState === 'FAILED' ||
+          (decision.nextRetryCount !== null && decision.nextRetryCount >= 3);
+        await updateCompletedLeadStatus(job.capture_session_id, 'failed', {
+          retries:        decision.nextRetryCount ?? job.retry_count,
+          lastError:      decision.errorMessage ?? decision.failureReason,
+          failedStage:    decision.failedStage,
+          lastAttemptAt:  new Date().toISOString(),
+          failedAt:       decision.newState === 'FAILED' ? new Date().toISOString() : null,
+          isExhausted,
         });
       }
 
       if (decision.newState === 'COMPLETED' || decision.newState === 'REQUIRES_REVIEW') {
         this.jobsProcessed++;
         alpeLog('Queue completion', { jobId: job.id, newState: decision.newState, jobsProcessed: this.jobsProcessed });
+
+        // Reconcile local completed_leads state with the backend outcome.
+        // The pipeline's executePromotion() normally sets this to 'synced'
+        // already, but two scenarios leave it stuck at 'pending_sync':
+        //   1. The worker took the early-return path (session already promoted)
+        //      and executePromotion() was never called.
+        //   2. _updateCompletedLead()'s IndexedDB write failed silently.
+        // This idempotent overwrite ensures the local record reflects reality.
+        const { updateCompletedLeadStatus } = await import('../capture/completedLeadsStorage');
+        await updateCompletedLeadStatus(job.capture_session_id, 'synced', {
+          syncedAt: new Date().toISOString(),
+        });
       }
 
       updateAlpeRuntime({ currentJobId: null, currentQueueState: null, processingStartedAt: null, workerState: null, currentPipelineStage: null });

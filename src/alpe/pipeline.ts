@@ -18,11 +18,12 @@
 //   executePromotionStage   — lead_entries INSERT, terminal stage
 
 import { evidenceManager }            from '../capture/captureEvidenceManager';
-import type { ReviewResult }           from '../capture/captureReviewEngine';
+import type { ReviewResult, ExtractionContext } from '../capture/captureReviewEngine';
+import { getReviewMinimumConfidence } from '../runtime/runtimeDiagnostics';
 import { executionEngine } from '../capture/CaptureExecutionEngine';
 import type { ExecutionPlan } from '../capture/CaptureExecutionEngine';
 import { buildCompletedLead, saveCompletedLead } from '../capture/completedLeadsStorage';
-import type { CaptureSession } from '../capture/types';
+import type { CaptureSession, FieldConfidenceReport, FieldStatusReport } from '../capture/types';
 import { alpeLog, updateAlpeRuntime } from './diagnostics';
 import { supabase } from '../supabaseClient';
 
@@ -41,9 +42,13 @@ function traceStage(backendSessionId: string, stage: string, payload: Record<str
 }
 import type { EvidenceAssets } from './assetReference';
 import type { ResolvedEvidenceGroup } from './evidenceResolver';
+import type { PipelineStage } from './types';
 import { resolveAllEvidence } from './evidenceResolver';
 import { extractBusinessCard, extractQr } from './extractionService';
 import type { ExtractionOutcome } from './extractionService';
+import { persistExtractionMetadata } from './extractionMetadataPersistence';
+import { persistReviewResult } from './extractionMetadataPersistence';
+import type { ExtractionMetadata } from './extractionMetadataPersistence';
 
 // ─── Pipeline Contract ────────────────────────────────────────────────────────
 
@@ -73,6 +78,13 @@ export interface ProcessingContext {
 
   extractionSource?:    string | null;
   extractionConfidence?: number | null;
+  /** Model-reported per-field confidence from the extraction stage. */
+  fieldConfidence?:     FieldConfidenceReport | null;
+  /** Model-reported per-field extraction status from the extraction stage. */
+  fieldStatus?:         FieldStatusReport | null;
+  /** Extraction metadata produced by executeExtractionStage, consumed by
+   *  executeExtractionMetadataStage to persist back to capture_sessions. */
+  extractionMetadata?: ExtractionMetadata;
   review?: ReviewResult;
   result?: ProcessingResult;
 }
@@ -80,9 +92,10 @@ export interface ProcessingContext {
 export type ProcessingOutcome = 'success' | 'queued' | 'failed';
 
 export interface ProcessingResult {
-  outcome: ProcessingOutcome;
-  leadId:  string | null;
-  error:   string | null;
+  outcome:     ProcessingOutcome;
+  leadId:      string | null;
+  error:       string | null;
+  failedStage: PipelineStage | null;
 }
 
 // ─── Pipeline stages ──────────────────────────────────────────────────────────
@@ -184,6 +197,12 @@ async function executeExtractionStage(ctx: ProcessingContext): Promise<void> {
 
   if (!resolved) {
     ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
+    ctx.extractionMetadata = {
+      source:     ctx.extractionSource,
+      status:     'skipped',
+      confidence: null,
+      draftData:  ctx.session.draftData,
+    };
     diag.error = 'No resolved evidence available';
     logExtractionDiagnostics(ctx, diag);
     return;
@@ -219,6 +238,12 @@ async function executeExtractionStage(ctx: ProcessingContext): Promise<void> {
     diag.fieldsExtracted = [];
     logExtractionDiagnostics(ctx, diag);
     ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
+    ctx.extractionMetadata = {
+      source:     ctx.extractionSource,
+      status:     'skipped',
+      confidence: null,
+      draftData:  ctx.session.draftData,
+    };
     return;
   }
 
@@ -256,9 +281,25 @@ async function executeExtractionStage(ctx: ProcessingContext): Promise<void> {
 
     ctx.extractionSource    = outcome.source;
     ctx.extractionConfidence = outcome.confidence;
+    ctx.fieldConfidence      = outcome.fieldConfidence ?? null;
+    ctx.fieldStatus          = outcome.fieldStatus ?? null;
+    ctx.extractionMetadata = {
+      source:          outcome.source,
+      status:          'done',
+      confidence:      outcome.confidence,
+      fieldConfidence: outcome.fieldConfidence ?? null,
+      fieldStatus:     outcome.fieldStatus ?? null,
+      draftData:       ctx.session.draftData,
+    };
   } else {
     ctx.extractionSource = (ctx.session.draftData.extractionSource as string | undefined) ?? null;
     if (outcome?.error) diag.error = outcome.error;
+    ctx.extractionMetadata = {
+      source:     ctx.extractionSource,
+      status:     outcome?.error ? 'failed' : 'skipped',
+      confidence: null,
+      draftData:  ctx.session.draftData,
+    };
   }
 
   logExtractionDiagnostics(ctx, diag);
@@ -303,6 +344,27 @@ function logExtractionDiagnostics(
   } catch { /* ignore */ }
 }
 
+async function executeExtractionMetadataStage(ctx: ProcessingContext): Promise<void> {
+  alpeLog('Pipeline stage → PERSIST_EXTRACTION_METADATA');
+  updateAlpeRuntime({ currentPipelineStage: 'PERSIST_RESULTS' });
+  traceStage(ctx.backendSessionId, 'PERSIST_EXTRACTION_METADATA_START', {
+    hasMetadata: !!ctx.extractionMetadata,
+  });
+
+  if (!ctx.extractionMetadata) {
+    traceStage(ctx.backendSessionId, 'PERSIST_EXTRACTION_METADATA_SKIP', { reason: 'no metadata' });
+    return;
+  }
+
+  await persistExtractionMetadata(ctx.backendSessionId, ctx.extractionMetadata);
+
+  traceStage(ctx.backendSessionId, 'PERSIST_EXTRACTION_METADATA_DONE', {
+    source:     ctx.extractionMetadata.source,
+    status:     ctx.extractionMetadata.status,
+    confidence: ctx.extractionMetadata.confidence,
+  });
+}
+
 function executeValidationStage(ctx: ProcessingContext): void {
   alpeLog('Pipeline stage → VALIDATION');
   updateAlpeRuntime({ currentPipelineStage: 'VALIDATION' });
@@ -319,9 +381,10 @@ function executeValidationStage(ctx: ProcessingContext): void {
   traceStage(ctx.backendSessionId, 'VALIDATION_RESULT', { valid: result.valid, error: result.error?.message ?? null });
   if (!result.valid) {
     ctx.result = {
-      outcome: 'failed',
-      leadId:  null,
-      error:   result.error?.message ?? 'Capture has no data to save',
+      outcome:     'failed',
+      leadId:      null,
+      error:       result.error?.message ?? 'Capture has no data to save',
+      failedStage: 'VALIDATION',
     };
   }
 }
@@ -331,7 +394,7 @@ function executeReviewStage(ctx: ProcessingContext): void {
   updateAlpeRuntime({ currentPipelineStage: 'DECISION' });
   if (ctx.plan.review === 'SKIP') {
     traceStage(ctx.backendSessionId, 'REVIEW', { skipped: true });
-    ctx.review = { required: false, reason: null, confidence: null } as ReviewResult;
+    ctx.review = { required: false, reason: null, reasons: [], confidence: null } as ReviewResult;
     return;
   }
   const strategies = ctx.plan.strategies;
@@ -343,8 +406,44 @@ function executeReviewStage(ctx: ProcessingContext): void {
         : rawConfidence
       : null;
 
-  ctx.review = strategies.review.evaluate(ctx.session.draftData, confidencePercent);
-  traceStage(ctx.backendSessionId, 'REVIEW', { required: ctx.review.required, reason: ctx.review.reason, confidence: ctx.review.confidence });
+  const extractionContext = {
+    status:            ctx.extractionMetadata?.status ?? null,
+    fieldConfidence:   ctx.fieldConfidence ?? undefined,
+    fieldStatus:       ctx.fieldStatus ?? undefined,
+    backendSessionId:  ctx.backendSessionId,
+  } satisfies ExtractionContext;
+
+  // DIAGNOSTIC — temporary, unconditional. Shows fieldConfidence and fieldStatus reaching review.
+  console.log('[REVIEW_FIELD_CONFIDENCE]', {
+    backendSessionId:  ctx.backendSessionId,
+    overallConfidence: confidencePercent,
+    minimumConfidence: getReviewMinimumConfidence(),
+    fieldConfidence:   extractionContext.fieldConfidence,
+    fieldStatus:       extractionContext.fieldStatus,
+    profile:           ctx.session.captureProfile,
+  });
+
+  ctx.review = strategies.review.evaluate(
+    ctx.session.draftData,
+    confidencePercent,
+    extractionContext,
+  );
+
+  // Unconditional review decision diagnostic
+  console.log('[REVIEW_DECISION]', {
+    backendSessionId:        ctx.backendSessionId,
+    overallConfidence:       confidencePercent,
+    minimumConfidence:       getReviewMinimumConfidence(),
+    fieldConfidence:         extractionContext.fieldConfidence ?? null,
+    fieldStatus:             extractionContext.fieldStatus ?? null,
+    reasons:                 ctx.review.reasons,
+    fieldConfidenceViolations: ctx.review.fieldConfidenceViolations ?? [],
+    fieldStatusViolations:   ctx.review.fieldStatusViolations ?? [],
+    contactViolations:       ctx.review.contactViolations ?? [],
+    required:                ctx.review.required,
+  });
+
+  traceStage(ctx.backendSessionId, 'REVIEW', { required: ctx.review.required, reason: ctx.review.reason, reasons: ctx.review.reasons, confidence: ctx.review.confidence, fieldStatusViolations: ctx.review.fieldStatusViolations ?? [] });
 }
 
 async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
@@ -358,7 +457,7 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
   traceStage(backendSessionId, 'PROMOTION_START', { promotion: plan.promotion, isOnline, queue: plan.queue });
 
   if (plan.promotion === 'SKIP') {
-    ctx.result = { outcome: 'queued', leadId: null, error: null };
+    ctx.result = { outcome: 'queued', leadId: null, error: null, failedStage: null };
     return;
   }
 
@@ -381,7 +480,7 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
     lead.status = 'pending_sync';
     await saveCompletedLead(lead);
     await executionEngine.routePromotion(plan.queue, false, backendSessionId, promotionOptions);
-    ctx.result = { outcome: 'queued', leadId: null, error: null };
+    ctx.result = { outcome: 'queued', leadId: null, error: null, failedStage: null };
   };
 
   const routeResult = await executionEngine.routePromotion(plan.queue, isOnline, backendSessionId, promotionOptions);
@@ -401,14 +500,14 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
       result.error.includes('permission');
 
     if (isNonRetryable) {
-      ctx.result = { outcome: 'failed', leadId: null, error: result.error };
+      ctx.result = { outcome: 'failed', leadId: null, error: result.error, failedStage: 'PROMOTION' };
     } else {
       await _queuePromotion();
     }
     return;
   }
 
-  ctx.result = { outcome: 'success', leadId: result.leadId, error: null };
+  ctx.result = { outcome: 'success', leadId: result.leadId, error: null, failedStage: null };
   traceStage(backendSessionId, 'PROMOTION_COMPLETE', { outcome: 'success', leadId: result.leadId });
   alpeLog('Promotion completion', { outcome: 'success', leadId: result.leadId });
 }
@@ -424,6 +523,7 @@ export async function processCaptureSession(
   executeEvidenceStage(ctx);
   await executeEvidenceResolutionStage(ctx);
   await executeExtractionStage(ctx);
+  await executeExtractionMetadataStage(ctx);
   executeValidationStage(ctx);
   if (ctx.result) {
     return ctx.plan.result === 'SUPPRESS_TOAST'
@@ -431,6 +531,9 @@ export async function processCaptureSession(
       : ctx.result;
   }
   executeReviewStage(ctx);
+  if (ctx.review) {
+    await persistReviewResult(ctx.backendSessionId, ctx.review);
+  }
   await executePromotionStage(ctx);
   alpeLog('Pipeline stage → COMPLETE');
   updateAlpeRuntime({ currentPipelineStage: 'COMPLETE' });

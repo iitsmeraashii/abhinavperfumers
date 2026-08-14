@@ -8,6 +8,7 @@
 
 import {
   getCached,
+  getCachedReviewConfig,
   isLoaded,
   load,
   reload,
@@ -106,4 +107,14 @@ export function isTimersEnabled(): boolean {
  */
 export function isReady(): boolean {
   return isLoaded();
+}
+
+/**
+ * Synchronously return the configured minimum extraction confidence (0–100)
+ * below which a captured lead requires manual review. Reads from the in-memory
+ * cache — O(1), never hits the database. Falls back to 50 if the cache has not
+ * been loaded yet.
+ */
+export function getReviewMinimumConfidence(): number {
+  return getCachedReviewConfig().minimumConfidence;
 }

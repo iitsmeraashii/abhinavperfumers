@@ -28,19 +28,32 @@ const ALL_FALSE: DiagnosticsConfig = {
   timers:       false,
 };
 
+// ─── Review config ───────────────────────────────────────────────────────────
+
+export interface ReviewConfig {
+  /** Minimum AI extraction confidence (0–100) before a lead is auto-promoted. */
+  minimumConfidence: number;
+}
+
+export const DEFAULT_REVIEW_CONFIG: ReviewConfig = {
+  minimumConfidence: 75,
+};
+
 // ─── Database row shape ──────────────────────────────────────────────────────
 
 interface ConfigRow {
-  diagnostics_enabled:       boolean | null;
-  diagnostics_console:       boolean | null;
-  diagnostics_runtime_dumps: boolean | null;
-  diagnostics_database:      boolean | null;
-  diagnostics_timers:        boolean | null;
+  diagnostics_enabled:        boolean | null;
+  diagnostics_console:        boolean | null;
+  diagnostics_runtime_dumps:  boolean | null;
+  diagnostics_database:       boolean | null;
+  diagnostics_timers:         boolean | null;
+  review_minimum_confidence:  number | null;
 }
 
 // ─── Cache state ─────────────────────────────────────────────────────────────
 
 let _cache: DiagnosticsConfig | null = null;
+let _reviewCache: ReviewConfig | null = null;
 let _loadPromise: Promise<DiagnosticsConfig> | null = null;
 let _realtimeChannel: ReturnType<typeof supabase.channel> | null = null;
 
@@ -57,17 +70,24 @@ function mapRow(row: ConfigRow | null): DiagnosticsConfig {
   };
 }
 
-async function fetchConfig(): Promise<DiagnosticsConfig> {
+function mapReviewRow(row: ConfigRow | null): ReviewConfig {
+  if (!row || row.review_minimum_confidence == null) return { ...DEFAULT_REVIEW_CONFIG };
+  const clamped = Math.max(0, Math.min(100, row.review_minimum_confidence));
+  return { minimumConfidence: clamped };
+}
+
+async function fetchConfig(): Promise<{ diagnostics: DiagnosticsConfig; review: ReviewConfig }> {
   const { data, error } = await supabase
     .from('runtime_configuration')
     .select(
-      'diagnostics_enabled, diagnostics_console, diagnostics_runtime_dumps, diagnostics_database, diagnostics_timers',
+      'diagnostics_enabled, diagnostics_console, diagnostics_runtime_dumps, diagnostics_database, diagnostics_timers, review_minimum_confidence',
     )
     .eq('id', 1)
     .maybeSingle();
 
-  if (error) return { ...ALL_FALSE };
-  return mapRow(data as ConfigRow | null);
+  if (error) return { diagnostics: { ...ALL_FALSE }, review: { ...DEFAULT_REVIEW_CONFIG } };
+  const row = data as ConfigRow | null;
+  return { diagnostics: mapRow(row), review: mapReviewRow(row) };
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -82,9 +102,10 @@ export async function load(): Promise<DiagnosticsConfig> {
   if (_loadPromise) return _loadPromise;
 
   _loadPromise = fetchConfig()
-    .then(config => {
-      _cache = config;
-      return config;
+    .then(({ diagnostics, review }) => {
+      _cache = diagnostics;
+      _reviewCache = review;
+      return diagnostics;
     })
     .finally(() => {
       _loadPromise = null;
@@ -99,7 +120,9 @@ export async function load(): Promise<DiagnosticsConfig> {
  */
 export async function reload(): Promise<DiagnosticsConfig> {
   _loadPromise = null;
-  _cache = await fetchConfig();
+  const { diagnostics, review } = await fetchConfig();
+  _cache = diagnostics;
+  _reviewCache = review;
   return _cache;
 }
 
@@ -110,6 +133,15 @@ export async function reload(): Promise<DiagnosticsConfig> {
  */
 export function getCached(): DiagnosticsConfig {
   return _cache ?? { ...ALL_FALSE };
+}
+
+/**
+ * Synchronously return the cached review configuration.
+ * Falls back to DEFAULT_REVIEW_CONFIG if the cache has not been loaded yet.
+ * O(1) — never hits the database.
+ */
+export function getCachedReviewConfig(): ReviewConfig {
+  return _reviewCache ?? { ...DEFAULT_REVIEW_CONFIG };
 }
 
 /**
