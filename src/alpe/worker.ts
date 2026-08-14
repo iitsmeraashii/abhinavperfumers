@@ -234,7 +234,7 @@ function reconstructDraftData(
     phoneNumbers:    row.phones ?? undefined,
     emails:          row.emails ?? undefined,
     extractionSource:    row.extraction_source ?? undefined,
-    extractionConfidence: row.extraction_confidence ?? undefined,
+    extractionConfidence: row.extraction_confidence != null ? Number(row.extraction_confidence) : undefined,
   };
 
   // ── DEPRECATED: scattered evidence fields ──

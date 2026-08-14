@@ -5,7 +5,7 @@ import { useAuth } from './AuthContext';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
 import { useAutosave } from './capture/useAutosave';
-import { loadDraft, clearDraft } from './capture/captureDraftStorage';
+import { loadDraft, clearDraft, loadSavedDraft, saveSavedDraft } from './capture/captureDraftStorage';
 import { deleteSessionAssets } from './capture/captureAssetStorage';
 import { OfflineBanner } from './capture/OfflineBanner';
 import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
@@ -40,7 +40,7 @@ import {
   logEvent, logOperationStart, logOperationEnd,
 } from './capture/assetSyncDiagnostics';
 import type { ExecutionPlan, SyncRoutingCallbacks, QueuePolicy, UploadTiming, ExtractionPolicy } from './capture/CaptureExecutionEngine';
-import type { CaptureProfile } from './capture/types';
+import type { CaptureProfile, DraftData } from './capture/types';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
@@ -51,7 +51,7 @@ const QrScannerView = lazy(() =>
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
-export default function CaptureLeadPage() {
+export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: string | null }) {
   const { selectedEvent } = useEvent();
   const { salesRep } = useAuth();
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
@@ -187,9 +187,36 @@ export default function CaptureLeadPage() {
 
   useAutosave(session, { isOnline, onSaveStateChange: setSaveState });
 
+  // ── Resume a saved draft (explicitly requested from Queue) ───────────────
+  // When the user taps Continue on a saved draft in the Queue, App passes
+  // the saved draft's id via resumeDraftId. We load it from IndexedDB and
+  // restore it as the active session. The autosave hook then protects it
+  // as the active_capture_draft while being edited. The original saved
+  // draft record remains untouched in its own 'saved_draft:*' key.
+  useEffect(() => {
+    if (!resumeDraftId) return;
+    let cancelled = false;
+    loadSavedDraft(resumeDraftId).then((saved) => {
+      if (cancelled || !saved) return;
+      const normalised = saved.captureMethod === 'QR'
+        ? { ...saved, captureMethod: 'MANUAL' as CaptureMethod }
+        : saved;
+      if (normalised.captureMethod === 'BUSINESS_CARD' && normalised.draftData.cardSessionId) {
+        setCardSessionId(normalised.draftData.cardSessionId as string);
+      }
+      actions.restoreSession(normalised);
+      profileEngine.resolve(normalised.captureProfile);
+      addEntryRef.current('Resumed saved draft', { draftId: resumeDraftId });
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeDraftId]);
+
   // ── Draft restore on mount ────────────────────────────────────────────────
   // Draft restore on mount — hold draft in pendingDraft until user decides.
+  // Skipped when resuming a saved draft (that path restores directly).
   useEffect(() => {
+    if (resumeDraftId) return;
     loadDraft().then((saved) => {
       if (!saved || saved.sessionStatus === 'IDLE') return;
 
@@ -205,7 +232,7 @@ export default function CaptureLeadPage() {
       setPendingDraft({ session: normalised, capturedAt: normalised.updatedAt ?? normalised.createdAt });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [resumeDraftId]);
 
   // User chose to continue the recovered draft
   const handleRecoveryContinue = useCallback(() => {
@@ -575,6 +602,65 @@ export default function CaptureLeadPage() {
     correlationIdRef.current = null;
     evidenceManager.setCorrelationId(null);
   }, [actions, form, selectedEvent, isOnline]);
+
+  // ── Save as Draft (explicit user action) ──────────────────────────────────
+  // Saves the current session as an independent saved_draft:<uuid>, then resets
+  // the capture session so the rep can immediately capture the next lead.
+  // The active_capture_draft is cleared so the old session does not become the
+  // recovery draft for the new capture.
+  function isDraftEmpty(dd: DraftData): boolean {
+    const textFields = [
+      dd.clientName, dd.company, dd.phone, dd.email, dd.designation,
+      dd.notes, dd.website, dd.address, dd.previousRepCode, dd.priceRange,
+      dd.leadType, dd.leadTemperature,
+      dd.ocrRawText, dd.visionRawText, dd.extractionSource,
+      dd.voiceNoteTranscript, dd.notesImageDataUrl,
+    ];
+    const hasText = textFields.some(v => v != null && String(v).trim() !== '');
+    const hasArray = [
+      dd.phoneNumbers, dd.emails, dd.application, dd.quickKeywords,
+      dd.targetMarket, dd.certification, dd.benchmark,
+    ].some(arr => Array.isArray(arr) && arr.length > 0);
+    const hasCard = !!(dd.cardFrontAssetId || dd.cardBackAssetId);
+    const hasQr   = !!dd.rawQr;
+    const hasVoice = !!(dd.voiceNoteDurationMs && dd.voiceNoteDurationMs > 0);
+    return !hasText && !hasArray && !hasCard && !hasQr && !hasVoice;
+  }
+
+  const handleSaveAsDraft = useCallback(async () => {
+    const s = sessionRef.current;
+    if (s.sessionStatus === 'IDLE' || isDraftEmpty(s.draftData)) {
+      setPromotionToast({ message: 'Nothing to save — start capturing first!', isError: false });
+      setTimeout(() => setPromotionToast(null), 2000);
+      return;
+    }
+
+    // 1. Persist as a saved draft with its own identity
+    await saveSavedDraft(s);
+
+    // 2. Clear active recovery state so the saved draft is not restored
+    await clearDraft();
+
+    // 3. Reset the evidence manager's correlation (deferred uploads already
+    //    flushed by saveSavedDraft's snapshot — no in-flight uploads to lose)
+    notifySessionReset();
+    clearCorrelation();
+    correlationIdRef.current = null;
+    evidenceManager.setCorrelationId(null);
+
+    // 4. Reset the session + form for a fresh capture
+    form.handleReset();
+    actions.resetSession();
+    profileEngine.reset();
+    setPlan(null);
+    setQrScanning(false);
+    setCardSessionId('');
+    setCardAssets({ front: null, back: null });
+    setLastOcrResult(null);
+
+    setPromotionToast({ message: 'Draft saved!', isError: false });
+    setTimeout(() => setPromotionToast(null), 2000);
+  }, [actions, form]);
 
   // ── QR scan complete ──────────────────────────────────────────────────────
   const handleQrScanned = useCallback(async (parsed: ParsedContact) => {
@@ -1014,6 +1100,7 @@ export default function CaptureLeadPage() {
             onBack={handleBackToOptions}
             onDiscard={handleDiscardDraft}
             onSaveAndNext={handleSaveAndNext}
+            onSaveAsDraft={handleSaveAsDraft}
             onVoiceNoteRecorded={handleVoiceNoteRecorded}
             contactDetailsOptional={session.captureProfile === 'EXHIBITION'}
           />

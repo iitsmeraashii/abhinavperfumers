@@ -11,7 +11,7 @@
 
 import type { DraftData } from './types';
 import type { ValidationResult } from './captureValidationEngine';
-import type { ReviewResult } from './captureReviewEngine';
+import type { ReviewResult, ExtractionContext } from './captureReviewEngine';
 import type { ProcessingResult } from '../alpe/pipeline';
 import type { PromoteSessionOptions } from './capturePromotionService';
 
@@ -31,7 +31,11 @@ export interface ValidationStrategy {
  * before promotion. Delegates rule evaluation to CaptureReviewEngine.
  */
 export interface ReviewStrategy {
-  evaluate(data: DraftData, extractionConfidence: number | null): ReviewResult;
+  evaluate(
+    data: DraftData,
+    extractionConfidence: number | null,
+    extraction?: ExtractionContext,
+  ): ReviewResult;
 }
 
 /**
@@ -129,8 +133,30 @@ class CrmValidationStrategy implements ValidationStrategy {
 }
 
 class CrmReviewStrategy implements ReviewStrategy {
-  evaluate(data: DraftData, extractionConfidence: number | null): ReviewResult {
-    return reviewEngine.evaluate(data, extractionConfidence);
+  evaluate(
+    data: DraftData,
+    extractionConfidence: number | null,
+    extraction?: ExtractionContext,
+  ): ReviewResult {
+    console.log('[REVIEW_ENGINE_INPUT]', {
+      backendSessionId: extraction?.backendSessionId ?? null,
+      overallConfidence: extractionConfidence,
+      fieldConfidence: extraction?.fieldConfidence,
+      fieldStatus: extraction?.fieldStatus,
+      phoneNumbers: data.phoneNumbers,
+      emails: data.emails,
+    });
+    const result = reviewEngine.evaluate(data, extractionConfidence, extraction);
+    console.log('[REVIEW_ENGINE_OUTPUT]', {
+      backendSessionId: extraction?.backendSessionId ?? null,
+      required: result.required,
+      reason: result.reason,
+      reasons: result.reasons,
+      fieldStatusViolations: result.fieldStatusViolations,
+      fieldConfidenceViolations: result.fieldConfidenceViolations,
+      contactViolations: result.contactViolations,
+    });
+    return result;
   }
 }
 
@@ -210,8 +236,30 @@ class ExhibitionValidationStrategy implements ValidationStrategy {
 }
 
 class ExhibitionReviewStrategy implements ReviewStrategy {
-  evaluate(data: DraftData, extractionConfidence: number | null): ReviewResult {
-    return reviewEngine.evaluate(data, extractionConfidence);
+  evaluate(
+    data: DraftData,
+    extractionConfidence: number | null,
+    extraction?: ExtractionContext,
+  ): ReviewResult {
+    console.log('[REVIEW_ENGINE_INPUT]', {
+      backendSessionId: extraction?.backendSessionId ?? null,
+      overallConfidence: extractionConfidence,
+      fieldConfidence: extraction?.fieldConfidence,
+      fieldStatus: extraction?.fieldStatus,
+      phoneNumbers: data.phoneNumbers,
+      emails: data.emails,
+    });
+    const result = reviewEngine.evaluate(data, extractionConfidence, extraction);
+    console.log('[REVIEW_ENGINE_OUTPUT]', {
+      backendSessionId: extraction?.backendSessionId ?? null,
+      required: result.required,
+      reason: result.reason,
+      reasons: result.reasons,
+      fieldStatusViolations: result.fieldStatusViolations,
+      fieldConfidenceViolations: result.fieldConfidenceViolations,
+      contactViolations: result.contactViolations,
+    });
+    return result;
   }
 }
 

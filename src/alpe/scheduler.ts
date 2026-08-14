@@ -178,11 +178,16 @@ class AlpeScheduler {
       });
 
       // Run the full pipeline: Queue → Worker → Pipeline → Decision → Promotion → Completion
+      alpeLog('Scheduler — claiming job for processing', {
+        jobId: job.id,
+        backendSessionId: job.capture_session_id,
+        correlationId: (job.metadata as Record<string, unknown> | null)?.correlationId ?? null,
+      });
       const workerResult = await processJob(job);
-      alpeLog('Worker result', workerResult);
+      alpeLog('Worker result', { jobId: job.id, backendSessionId: job.capture_session_id, ...workerResult });
 
       const decision = decide(workerResult);
-      alpeLog('Decision', decision);
+      alpeLog('Decision', { jobId: job.id, backendSessionId: job.capture_session_id, ...decision });
 
       if (decision.newState === 'RETRYING' && decision.isRetryable) {
         await markRetrying(job.id, decision.failureReason ?? 'Retryable failure');

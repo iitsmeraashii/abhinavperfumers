@@ -309,6 +309,7 @@ function Layout() {
   const [leadsInitialFilters,setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
   const [moreDrawerOpen,     setMoreDrawerOpen]     = useState(false);
+  const [resumeDraftId,      setResumeDraftId]      = useState<string | null>(null);
 
   // Kick off event validation once on mount (auth is already resolved at this point)
   useEffect(() => {
@@ -346,6 +347,7 @@ function Layout() {
     setTab(t);
     setSelectedLeadId(null);
     setMoreDrawerOpen(false);
+    if (t !== 'capture') setResumeDraftId(null);
     localStorage.setItem('activeTab', t);
     const url = new URL(window.location.href);
     url.search = '';
@@ -512,11 +514,14 @@ function Layout() {
             )}
             {tab === 'templates' && isAdmin && !selectedLeadId && <TemplatesPage />}
             {tab === 'notifications' && isAdmin && !selectedLeadId && <SystemNotificationsPage />}
-            {tab === 'capture' && !selectedLeadId && <CaptureLeadPage />}
+            {tab === 'capture' && !selectedLeadId && <CaptureLeadPage key={resumeDraftId ?? 'capture'} resumeDraftId={resumeDraftId} />}
             {tab === 'queue' && !selectedLeadId && (
               <LeadQueuePage
                 onCapture={() => handleTabChange('capture')}
-                onContinueDraft={() => handleTabChange('capture')}
+                onContinueDraft={(draftId?: string) => {
+                  setResumeDraftId(draftId ?? null);
+                  handleTabChange('capture');
+                }}
                 onViewLead={undefined}
               />
             )}

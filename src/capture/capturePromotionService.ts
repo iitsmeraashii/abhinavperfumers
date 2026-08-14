@@ -93,6 +93,7 @@ export async function executePromotion(
 
     const { error: insertError } = await supabase.from('lead_entries').insert({
       id:                      leadId,
+      capture_session_id:      backendSessionId,
       client_name:             draftData.clientName?.trim()      || null,
       company:                 draftData.company?.trim()         || null,
       designation:             draftData.designation?.trim()     || null,

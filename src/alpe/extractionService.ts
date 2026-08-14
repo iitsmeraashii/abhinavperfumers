@@ -7,7 +7,7 @@
 // ocrFallback.ts — same constants, same flow, same edge function contract.
 
 import { supabase } from '../supabaseClient';
-import type { VisionExtractedFields, VisionResult } from '../capture/types';
+import type { VisionExtractedFields, VisionResult, FieldConfidenceReport, FieldStatusReport } from '../capture/types';
 import type { ResolvedEvidence } from './evidenceResolver';
 
 // ─── Config (mirrors useVisionExtraction.ts) ─────────────────────────────────
@@ -184,6 +184,10 @@ export interface ExtractionOutcome {
   confidence: number;
   fields:     VisionExtractedFields | null;
   error:      string | null;
+  /** Model-reported per-field confidence. Absent for Tesseract/QR paths. */
+  fieldConfidence?: FieldConfidenceReport | null;
+  /** Model-reported per-field extraction status. Absent for Tesseract/QR paths. */
+  fieldStatus?: FieldStatusReport | null;
 }
 
 /**
@@ -222,6 +226,16 @@ export async function extractBusinessCard(
     // Call edge function (OpenAI Vision)
     try {
       const edgeResponse = await withTimeout(callEdgeFunction(processedBlob), REQUEST_TIMEOUT);
+      // DIAGNOSTIC — temporary, unconditional. Shows the raw parsed edge-function response.
+      console.log('[EXTRACTION_RESPONSE_RAW_OBJECT]', edgeResponse.data);
+      console.log('[EXTRACTION_RESPONSE_RAW_JSON]', JSON.stringify(edgeResponse.data, null, 2));
+      console.log('[EXTRACTION_FIELD_CONFIDENCE]', {
+        overallConfidence: edgeResponse.data?.confidence,
+        fieldConfidence: edgeResponse.data?.fieldConfidence,
+        fieldStatus: edgeResponse.data?.fieldStatus,
+        phoneNumbers: edgeResponse.data?.phoneNumbers,
+        emails: edgeResponse.data?.emails,
+      });
       console.log('[ALPE TRACE] EXTRACTION_VISION_RESPONSE', {
         success: edgeResponse.success,
         confidence: edgeResponse.data?.confidence ?? null,
@@ -233,12 +247,23 @@ export async function extractBusinessCard(
       if (!edgeResponse.success || !edgeResponse.data) {
         throw new Error(edgeResponse.error ?? 'Extraction returned no data');
       }
-      return {
-        source:     'openai_vision',
-        confidence: edgeResponse.data.confidence,
-        fields:     edgeResponse.data,
-        error:      null,
+      const outcome = {
+        source:          'openai_vision' as const,
+        confidence:      edgeResponse.data.confidence,
+        fields:          edgeResponse.data,
+        fieldConfidence: edgeResponse.data.fieldConfidence ?? null,
+        fieldStatus:     edgeResponse.data.fieldStatus ?? null,
+        error:           null as string | null,
       };
+      // DIAGNOSTIC — temporary. Shows the normalized outcome before it leaves extractBusinessCard().
+      console.log('[EXTRACTION_SERVICE_RESULT]', {
+        confidence: outcome.confidence,
+        fieldConfidence: outcome.fieldConfidence,
+        fieldStatus: outcome.fieldStatus,
+        fields: outcome.fields,
+        source: outcome.source,
+      });
+      return outcome;
     } catch (visionErr) {
       console.warn('[ALPE TRACE] EXTRACTION_VISION_FAILED', { error: visionErr instanceof Error ? visionErr.message : String(visionErr) });
       const fallbackFields = await runTesseractFallback(dataUrl);

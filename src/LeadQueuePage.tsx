@@ -12,6 +12,8 @@ import { getPendingCount, flushQueue } from './capture/captureOfflineQueue';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { getAlpeRuntimeState, subscribeAlpeRuntime } from './alpe/diagnostics';
 import { subscribeCompletedLeads, getCompletedLeadsVersion } from './capture/completedLeadsStorage';
+import { subscribeSavedDrafts, getSavedDraftsVersion } from './capture/captureDraftStorage';
+import { QueueItemDetailSheet } from './capture/QueueItemDetailSheet';
 
 // ─── Status config ─────────────────────────────────────────────────────────────
 
@@ -148,9 +150,10 @@ interface QueueCardProps {
   onRetry:     (item: QueueItem) => void;
   onDelete:    (item: QueueItem) => void;
   onView:      (item: QueueItem) => void;
+  onViewLead?: (item: QueueItem) => void;
 }
 
-function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView }: QueueCardProps) {
+function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView, onViewLead }: QueueCardProps) {
   const [expanded, setExpanded] = useState(false);
   const name      = getDisplayName(item);
   const company   = getDisplayCompany(item);
@@ -276,7 +279,7 @@ function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView }: Qu
         )}
         {isSynced && (
           <button
-            onClick={() => onView(item)}
+            onClick={() => (onViewLead ?? onView)(item)}
             className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl
               border border-stone-200 text-stone-700 text-sm font-medium
               hover:bg-stone-50 active:scale-[0.97] transition-all"
@@ -292,6 +295,19 @@ function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView }: Qu
               hover:bg-stone-50 active:scale-[0.97] transition-all"
           >
             <Eye className="w-3.5 h-3.5" /> Details
+          </button>
+        )}
+
+        {/* Details eye button — opens detail sheet for any item type */}
+        {(isDraft || isFailed || isSynced) && (
+          <button
+            onClick={() => onView(item)}
+            className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl
+              border border-stone-200 text-stone-700 text-sm font-medium
+              hover:bg-stone-50 active:scale-[0.97] transition-all"
+            aria-label="View details"
+          >
+            <Eye className="w-3.5 h-3.5" />
           </button>
         )}
 
@@ -322,9 +338,10 @@ interface SectionProps {
   onRetry:     (item: QueueItem) => void;
   onDelete:    (item: QueueItem) => void;
   onView:      (item: QueueItem) => void;
+  onViewLead?: (item: QueueItem) => void;
 }
 
-function QueueSection({ title, count, items, isOnline, defaultOpen, onContinue, onRetry, onDelete, onView }: SectionProps) {
+function QueueSection({ title, count, items, isOnline, defaultOpen, onContinue, onRetry, onDelete, onView, onViewLead }: SectionProps) {
   const [open, setOpen] = useState(defaultOpen);
 
   if (items.length === 0) return null;
@@ -356,6 +373,7 @@ function QueueSection({ title, count, items, isOnline, defaultOpen, onContinue, 
               onRetry={onRetry}
               onDelete={onDelete}
               onView={onView}
+              onViewLead={onViewLead}
             />
           ))}
         </div>
@@ -669,19 +687,29 @@ function EmptyState({ filter, onCapture }: { filter: FilterTab; onCapture: () =>
 
 interface Props {
   onCapture:    () => void;
-  onContinueDraft: (sessionId: string) => void;
+  onContinueDraft: (draftId?: string) => void;
   onViewLead?:  (backendSessionId: string) => void;
 }
+
+// Persist the queue filter across component remounts (e.g. when navigating
+// to Capture and back). Component state alone resets on unmount.
+let persistedFilter: FilterTab = 'all';
 
 export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }: Props) {
   const [items,       setItems]       = useState<QueueItem[]>([]);
   const [loading,     setLoading]     = useState(true);
-  const [filter,      setFilter]      = useState<FilterTab>('all');
+  const [filter,      setFilterState]   = useState<FilterTab>(persistedFilter);
   const [search,      setSearch]      = useState('');
   const [pendingOps,  setPendingOps]  = useState(0);
   const [isFlushing,  setIsFlushing]  = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<QueueItem | null>(null);
+  const [detailTarget, setDetailTarget] = useState<QueueItem | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  const setFilter = useCallback((f: FilterTab) => {
+    persistedFilter = f;
+    setFilterState(f);
+  }, []);
 
   const handleReconnect = useCallback(async () => {
     setIsFlushing(true);
@@ -718,6 +746,14 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
     () => 0,
   );
   useEffect(() => { reload(); }, [completedLeadsVersion, reload]);
+
+  // ── Reactivity: reload when saved drafts change ────────────────────────────
+  const savedDraftsVersion = useSyncExternalStore(
+    subscribeSavedDrafts,
+    getSavedDraftsVersion,
+    () => 0,
+  );
+  useEffect(() => { reload(); }, [savedDraftsVersion, reload]);
 
   // Filter + search
   const filtered = useMemo(() => {
@@ -775,10 +811,14 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
   }, [isOnline, reload]);
 
   const handleContinue = useCallback((item: QueueItem) => {
-    onContinueDraft(item.id);
+    onContinueDraft(item.isSavedDraft ? item.id : undefined);
   }, [onContinueDraft]);
 
   const handleView = useCallback((item: QueueItem) => {
+    setDetailTarget(item);
+  }, []);
+
+  const handleViewLead = useCallback((item: QueueItem) => {
     if (item.backendSessionId && onViewLead) onViewLead(item.backendSessionId);
   }, [onViewLead]);
 
@@ -945,6 +985,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
                 onRetry={handleRetry}
                 onDelete={(item) => setDeleteTarget(item)}
                 onView={handleView}
+                onViewLead={handleViewLead}
               />
             ))}
           </div>
@@ -977,6 +1018,14 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
           item={deleteTarget}
           onConfirm={() => handleDelete(deleteTarget)}
           onCancel={() => setDeleteTarget(null)}
+        />
+      )}
+
+      {/* ── Queue item detail sheet ── */}
+      {detailTarget && (
+        <QueueItemDetailSheet
+          item={detailTarget}
+          onClose={() => setDetailTarget(null)}
         />
       )}
     </div>

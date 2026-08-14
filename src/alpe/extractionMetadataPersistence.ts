@@ -9,7 +9,8 @@
 // row reflects the completed AI extraction.
 
 import { supabase } from '../supabaseClient';
-import type { DraftData } from '../capture/types';
+import type { DraftData, FieldConfidenceReport, FieldStatusReport } from '../capture/types';
+import type { ReviewResult } from '../capture/captureReviewEngine';
 
 /**
  * Extraction metadata collected by executeExtractionStage() and passed
@@ -23,6 +24,10 @@ export interface ExtractionMetadata {
   status:      'done' | 'failed' | 'skipped';
   /** Confidence score 0–1 from the extraction engine. */
   confidence:  number | null;
+  /** Model-reported per-field confidence. Absent for Tesseract/QR/manual paths. */
+  fieldConfidence?: FieldConfidenceReport | null;
+  /** Model-reported per-field extraction status. Absent for Tesseract/QR/manual paths. */
+  fieldStatus?: FieldStatusReport | null;
   /** DraftData after extraction fields have been merged in. */
   draftData:   DraftData;
 }
@@ -66,6 +71,13 @@ export async function persistExtractionMetadata(
     extraction_status:      metadata.status,
     extraction_confidence:  metadata.confidence,
     extracted_fields:       buildExtractedFields(metadata.draftData),
+    extraction_metadata: {
+      source:          metadata.source,
+      confidence:      metadata.confidence,
+      fieldConfidence: metadata.fieldConfidence ?? null,
+      fieldStatus:     metadata.fieldStatus ?? null,
+      fieldsExtracted: buildExtractedFields(metadata.draftData),
+    },
   };
 
   try {
@@ -85,6 +97,53 @@ export async function persistExtractionMetadata(
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(
       '[ALPE] persistExtractionMetadata threw:',
+      msg,
+      { backendSessionId },
+    );
+  }
+}
+
+/**
+ * Persist the final review decision to capture_sessions.review_metadata.
+ *
+ * This is the authoritative historical record of why a lead was (or was not)
+ * marked REQUIRES_REVIEW. It is written once during the pipeline's review
+ * stage and never reconstructed.
+ *
+ * Failures are logged but never throw — the pipeline must continue to
+ * promotion regardless of whether this persistence succeeded.
+ */
+export async function persistReviewResult(
+  backendSessionId: string,
+  review: ReviewResult,
+): Promise<void> {
+  const reviewMetadata = {
+    required:                  review.required,
+    reason:                    review.reason,
+    reasons:                   review.reasons,
+    confidence:                review.confidence,
+    fieldConfidenceViolations: review.fieldConfidenceViolations ?? null,
+    fieldStatusViolations:     review.fieldStatusViolations ?? null,
+    contactViolations:         review.contactViolations ?? null,
+  };
+
+  try {
+    const { error } = await supabase
+      .from('capture_sessions')
+      .update({ review_metadata: reviewMetadata })
+      .eq('id', backendSessionId);
+
+    if (error) {
+      console.warn(
+        '[ALPE] persistReviewResult failed:',
+        error.message,
+        { backendSessionId },
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      '[ALPE] persistReviewResult threw:',
       msg,
       { backendSessionId },
     );

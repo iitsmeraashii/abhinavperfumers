@@ -787,13 +787,14 @@ interface Props {
   onBack:        () => void;
   onDiscard:     () => Promise<void>;
   onSaveAndNext?: () => Promise<{ error?: string } | void>;
+  onSaveAsDraft?: () => Promise<void>;
   onVoiceNoteRecorded?: (blob: Blob, durationMs: number, mimeType: string) => void;
   /** When true, contact fields are optional because evidence (card/QR)
    *  satisfies the minimum save requirement. Used in Exhibition mode. */
   contactDetailsOptional?: boolean;
 }
 
-export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onVoiceNoteRecorded, contactDetailsOptional }: Props) {
+export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
@@ -826,7 +827,13 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const website         = String(d.website ?? '');
   const address         = String(d.address  ?? '');
 
-  const hasDraftData = !!(clientName || company || phone || notes || notesImage);
+  const hasDraftData = !!(clientName || company || phone || email || designation || notes || notesImage
+    || d.cardFrontAssetId || d.cardBackAssetId || d.rawQr
+    || (d.voiceNoteDurationMs && d.voiceNoteDurationMs > 0)
+    || (d.application && d.application.length) || (d.quickKeywords && d.quickKeywords.length)
+    || (d.targetMarket && d.targetMarket.length) || (d.certification && d.certification.length)
+    || (d.benchmark && d.benchmark.length) || d.leadType || d.leadTemperature
+    || d.previousRepCode || d.priceRange || d.website || d.address);
   const hasIdentifier = !!(clientName.trim() || company.trim() || phone.trim());
   // In Exhibition mode, evidence (card/QR) satisfies the minimum requirement.
   const hasEvidence = !!(d.cardFrontAssetId || d.rawQr);
@@ -957,6 +964,15 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
     await handleSaveDraft(session);
     setSaving(false);
   }, [handleSaveDraft, session]);
+
+  const handleSaveAsDraftClick = useCallback(async () => {
+    setSaving(true);
+    // The parent's onSaveAsDraft handles saving the saved draft AND resetting
+    // the session. We must NOT call handleSaveDraft here — that writes to the
+    // active_capture_draft recovery key, which the parent then has to clear.
+    if (onSaveAsDraft) await onSaveAsDraft();
+    setSaving(false);
+  }, [onSaveAsDraft]);
 
   async function handleDiscardConfirm() {
     setShowDiscardDialog(false);
@@ -1253,8 +1269,8 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
         <div className="max-w-lg mx-auto flex gap-3">
           <button
             type="button"
-            onClick={handleContinueEnrich}
-            disabled={saving}
+            onClick={onSaveAsDraft ? handleSaveAsDraftClick : handleContinueEnrich}
+            disabled={saving || (onSaveAsDraft && !hasDraftData)}
             className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl
               border border-stone-200 bg-white text-stone-700 text-sm font-semibold
               hover:bg-stone-50 active:bg-stone-100 active:scale-[0.98]

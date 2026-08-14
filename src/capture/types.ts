@@ -43,6 +43,45 @@ export type VisionStatus = 'idle' | 'preprocessing' | 'extracting' | 'validating
 
 export type FieldConfidence = 'high' | 'medium' | 'low' | 'unknown';
 
+/**
+ * Model-reported per-field confidence on a 0–1 scale.
+ * All properties are optional — the model may omit any or all.
+ * Array entries correspond by index to the parallel arrays in
+ * VisionExtractedFields (phoneNumbers[i] ↔ phoneNumbers[i]).
+ */
+export interface FieldConfidenceReport {
+  fullName?:     number;
+  company?:      number;
+  designation?:  number;
+  website?:      number;
+  address?:      number;
+  phoneNumbers?: number[];
+  emails?:       number[];
+}
+
+/**
+ * Model-reported per-field extraction status.
+ * - 'extracted'  — field is present and a usable value was extracted.
+ * - 'absent'     — field is genuinely not present on the card.
+ * - 'uncertain'  — field appears present but the value cannot be reliably
+ *                  determined (blurry, obscured, partially visible, illegible).
+ *
+ * For scalar fields, one status value. For array fields (phoneNumbers,
+ * emails), one status per attempted entry — including entries that produced
+ * no extracted value (e.g. an uncertain phone that yielded an empty array).
+ */
+export type FieldExtractionStatus = 'extracted' | 'absent' | 'uncertain';
+
+export interface FieldStatusReport {
+  fullName?:     FieldExtractionStatus;
+  company?:      FieldExtractionStatus;
+  designation?:  FieldExtractionStatus;
+  website?:      FieldExtractionStatus;
+  address?:      FieldExtractionStatus;
+  phoneNumbers?: FieldExtractionStatus[];
+  emails?:       FieldExtractionStatus[];
+}
+
 export interface VisionExtractedFields {
   fullName:     string;
   firstName:    string;
@@ -56,7 +95,18 @@ export interface VisionExtractedFields {
   confidence:   number;   // 0-1 overall
   notes:        string;
   rawText:      string;
+  /** Model-reported per-field confidence. Optional — absent when the
+   *  model does not report it (e.g. Tesseract fallback, QR parsing). */
+  fieldConfidence?: FieldConfidenceReport;
+  /** Model-reported per-field extraction status. Optional — absent when
+   *  the model does not report it (Tesseract, QR). For array fields, the
+   *  array may contain entries even when the values array is empty (e.g.
+   *  phoneNumbers: [] with fieldStatus.phoneNumbers: ['uncertain']). */
+  fieldStatus?: FieldStatusReport;
 }
+
+/** Grade-based per-field confidence (legacy heuristic fallback). */
+export type DerivedFieldConfidence = Record<Exclude<keyof VisionExtractedFields, 'fieldConfidence'>, FieldConfidence>;
 
 export interface VisionResult {
   assetId:        string;
@@ -65,8 +115,9 @@ export interface VisionResult {
   durationMs:     number;
   attempt:        number;
   completedAt:    string;
-  // Per-field confidence derived from overall + presence
-  fieldConfidence: Record<keyof VisionExtractedFields, FieldConfidence>;
+  /** Model-reported numeric per-field confidence when available; falls back
+   *  to the grade-based heuristic from deriveFieldConfidence() otherwise. */
+  fieldConfidence: FieldConfidenceReport | DerivedFieldConfidence;
 }
 
 export type LeadTemperature = 'Hot' | 'Warm' | 'Cold';

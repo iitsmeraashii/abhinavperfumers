@@ -13,7 +13,7 @@
 //   - No API key ever touches the frontend
 
 import { useState, useRef, useCallback } from 'react';
-import type { VisionResult, VisionStatus, VisionExtractedFields, FieldConfidence } from './types';
+import type { VisionResult, VisionStatus, VisionExtractedFields, FieldConfidence, FieldConfidenceReport } from './types';
 import { supabase } from '../supabaseClient';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ async function preprocessImage(dataUrl: string): Promise<ProcessedImage> {
 
 function deriveFieldConfidence(
   fields: VisionExtractedFields,
-): Record<keyof VisionExtractedFields, FieldConfidence> {
+): Record<Exclude<keyof VisionExtractedFields, 'fieldConfidence'>, FieldConfidence> {
   const overall = fields.confidence;
 
   function grade(value: string | string[], weight = 1): FieldConfidence {
@@ -270,6 +270,15 @@ export function useVisionExtraction(): UseVisionExtractionReturn {
 
       try {
         edgeResponse = await withTimeout(callEdgeFunction(processed.blob), REQUEST_TIMEOUT);
+        // DIAGNOSTIC — temporary, unconditional. Shows the raw parsed edge-function response.
+        console.log('[EXTRACTION_RESPONSE_RAW_OBJECT]', edgeResponse.data);
+        console.log('[EXTRACTION_RESPONSE_RAW_JSON]', JSON.stringify(edgeResponse.data, null, 2));
+        console.log('[EXTRACTION_FIELD_CONFIDENCE]', {
+          overallConfidence: edgeResponse.data?.confidence,
+          fieldConfidence: edgeResponse.data?.fieldConfidence,
+          phoneNumbers: edgeResponse.data?.phoneNumbers,
+          emails: edgeResponse.data?.emails,
+        });
         if (!edgeResponse.success || !edgeResponse.data) {
           throw new Error(edgeResponse.error ?? 'Extraction returned no data');
         }
@@ -313,6 +322,11 @@ export function useVisionExtraction(): UseVisionExtractionReturn {
 
       // ── 4. Build result ────────────────────────────────────────────────────
       const fields = edgeResponse.data!;
+      const modelFieldConfidence = fields.fieldConfidence;
+      const hasModelFieldConfidence =
+        modelFieldConfidence != null &&
+        typeof modelFieldConfidence === 'object' &&
+        Object.keys(modelFieldConfidence).length > 0;
       const result: VisionResult = {
         assetId,
         fields,
@@ -320,7 +334,9 @@ export function useVisionExtraction(): UseVisionExtractionReturn {
         durationMs:      edgeResponse.durationMs ?? Date.now() - startMs,
         attempt:         edgeResponse.attempt ?? 1,
         completedAt:     new Date().toISOString(),
-        fieldConfidence: deriveFieldConfidence(fields),
+        fieldConfidence: hasModelFieldConfidence
+          ? modelFieldConfidence as FieldConfidenceReport
+          : deriveFieldConfidence(fields),
       };
 
       setVisionState({ status: 'done', progress: 1, progressLabel: 'Extracted successfully', result, error: null });

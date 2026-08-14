@@ -12,7 +12,7 @@ import {
 import { createPortal } from 'react-dom';
 import { saveAsset, deleteAsset, getSessionAssets } from './captureAssetStorage';
 import { useVisionExtraction } from './useVisionExtraction';
-import type { BusinessCardAsset, CardSide, CaptureSession, DraftData, OcrResult, VisionResult } from './types';
+import type { BusinessCardAsset, CardSide, CaptureSession, DraftData, OcrResult, VisionResult, FieldConfidenceReport, FieldConfidence as FieldGrade } from './types';
 import type { VisionState } from './useVisionExtraction';
 import type { ExtractionPolicy } from './CaptureExecutionEngine';
 import { Toast } from './CaptureUI';
@@ -567,6 +567,44 @@ function ChipInput({ label, icon: Icon, values, confidence, onAdd, onRemove, inp
   );
 }
 
+// ─── Field confidence grade conversion ────────────────────────────────────────
+
+function numericToGrade(value: number | undefined): FieldGrade {
+  if (value == null) return 'unknown';
+  if (value >= 0.75) return 'high';
+  if (value >= 0.45) return 'medium';
+  return 'low';
+}
+
+interface FieldConfidenceGrades {
+  fullName?:     FieldGrade;
+  company?:      FieldGrade;
+  designation?:  FieldGrade;
+  website?:      FieldGrade;
+  address?:      FieldGrade;
+  phoneNumbers?: FieldGrade;
+  emails?:       FieldGrade;
+}
+
+function resolveFieldConfidenceGrades(
+  fc: VisionResult['fieldConfidence'] | undefined,
+): FieldConfidenceGrades {
+  if (!fc) return {};
+  if ('fullName' in fc || 'company' in fc || 'phoneNumbers' in fc || 'emails' in fc) {
+    const report = fc as FieldConfidenceReport;
+    return {
+      fullName:     numericToGrade(report.fullName),
+      company:      numericToGrade(report.company),
+      designation:  numericToGrade(report.designation),
+      website:      numericToGrade(report.website),
+      address:      numericToGrade(report.address),
+      phoneNumbers: Array.isArray(report.phoneNumbers) ? numericToGrade(report.phoneNumbers[0]) : undefined,
+      emails:       Array.isArray(report.emails) ? numericToGrade(report.emails[0]) : undefined,
+    };
+  }
+  return fc as FieldConfidenceGrades;
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function BusinessCardCapture({
@@ -805,7 +843,7 @@ export function BusinessCardCapture({
     onComplete(front.asset.id, back.asset?.id ?? null, legacyOcr, visionState.result);
   }
 
-  const fc = lastVisionResult?.fieldConfidence;
+  const fc = resolveFieldConfidenceGrades(lastVisionResult?.fieldConfidence);
 
   return (
     <div className="mt-4 animate-in fade-in slide-in-from-bottom-3 duration-300 pb-6">
