@@ -5,7 +5,7 @@ import {
   Link2, Link2Off, ExternalLink, Clock, Send,
   FileText, Image as ImageIcon, Headphones, FileVideo, FileCheck,
   CheckCheck, Check, X, Circle, Plus, Unlink,
-  AlertTriangle, Lock,
+  AlertTriangle, Lock, FileCheck2,
 } from 'lucide-react';
 import { formatDateTime } from './utils/dateFormat';
 import { getAuthIdentity } from './capture/captureAuth';
@@ -247,7 +247,12 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
   const [actionError, setActionError] = useState('');
   const [unlinking, setUnlinking] = useState(false);
 
+  const [draftText, setDraftText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sendNotice, setSendNotice] = useState('');
+
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const refreshLinkedLeads = useCallback(async () => {
     const { data: bridgeData } = await supabase
@@ -367,6 +372,21 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  function handleSend() {
+    const text = draftText.trim();
+    if (!text || sending) return;
+    setSending(true);
+    setSendNotice('');
+    // Placeholder — no API call, no database write
+    setTimeout(() => {
+      setSending(false);
+      setDraftText('');
+      setSendNotice('Sending will be connected in a later step. Your message was not sent.');
+      // Refocus textarea
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    }, 600);
+  }
 
   async function handleUnlink() {
     if (!unlinkTarget) return;
@@ -632,17 +652,60 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
             )}
           </div>
 
-          {/* ── Disabled composer ── */}
+          {/* ── Composer ── */}
           <div className="border-t border-stone-100 px-3 md:px-4 py-3 bg-stone-50">
-            <div className="flex items-center gap-2">
-              <div className="flex-1 flex items-center gap-2 px-3.5 py-3 bg-white border border-stone-200 rounded-2xl opacity-50 cursor-not-allowed select-none">
-                <Lock className="w-4 h-4 text-stone-400 flex-shrink-0" />
-                <span className="text-sm text-stone-400">Replying will be available in a future update</span>
+            {/* Temporary send notice */}
+            {sendNotice && (
+              <div className="mb-2 flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg">
+                <Clock className="w-3 h-3 flex-shrink-0" />
+                {sendNotice}
               </div>
-              <div className="flex-shrink-0 w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center opacity-50 cursor-not-allowed">
-                <Send className="w-4 h-4 text-stone-400" />
+            )}
+
+            {(window === 'open' || window === 'expiring') ? (
+              <div className="flex items-end gap-2">
+                <textarea
+                  ref={textareaRef}
+                  value={draftText}
+                  onChange={e => setDraftText(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (draftText.trim() && !sending) handleSend();
+                    }
+                  }}
+                  placeholder="Type a message…"
+                  rows={1}
+                  className="flex-1 resize-none px-3.5 py-2.5 text-sm border border-stone-200 rounded-2xl bg-white text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition max-h-32"
+                  style={{ minHeight: '42px' }}
+                />
+                <button
+                  onClick={handleSend}
+                  disabled={!draftText.trim() || sending}
+                  className="flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition disabled:bg-stone-100 disabled:cursor-not-allowed bg-stone-800 hover:bg-stone-700 text-white"
+                >
+                  {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                </button>
               </div>
-            </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <div className="flex-1 flex items-center gap-2 px-3.5 py-3 bg-white border border-stone-200 rounded-2xl opacity-60 cursor-not-allowed select-none">
+                  <Lock className="w-4 h-4 text-stone-400 flex-shrink-0" />
+                  <span className="text-sm text-stone-400">
+                    {window === 'closed'
+                      ? 'Service window expired. Free-form replies are unavailable.'
+                      : 'No service window. Free-form replies are unavailable.'}
+                  </span>
+                </div>
+                <button
+                  disabled
+                  className="flex-shrink-0 w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center opacity-50 cursor-not-allowed"
+                  title="Choose Template (coming soon)"
+                >
+                  <FileCheck2 className="w-4 h-4 text-stone-400" />
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
