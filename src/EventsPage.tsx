@@ -2,8 +2,9 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from './supabaseClient';
 import {
   CalendarDays, MapPin, Plus, Loader2, AlertCircle, CheckCircle2,
-  X, Save, FileText, Lock, Info, Trash2, Users, TrendingUp,
+  X, Save, Lock, Info, Trash2, Users, TrendingUp,
   ThermometerSun, BarChart2, ArrowRight, Globe, ChevronLeft,
+  MessageCircle, Image as ImageIcon, Upload, Search, ChevronDown,
 } from 'lucide-react';
 import { formatDateShort } from './utils/dateFormat';
 
@@ -30,14 +31,34 @@ interface Event {
   description: string | null;
   start_date: string | null;
   end_date: string | null;
-  message_template_id: string | null;
+  whatsapp_template_id: string | null;
+  whatsapp_template_name: string | null;
+  whatsapp_image_url: string | null;
   status: EventStatus;
   updated_at: string;
 }
 
-interface Template {
-  id: string;
+interface MetaComponent {
+  type: string;
+  format?: string;
+  text?: string;
+  example?: Record<string, unknown>;
+}
+
+interface MetaTemplate {
   name: string;
+  parameter_format: string;
+  components: MetaComponent[];
+  id: string;
+  status: string;
+  category: string;
+  language: string;
+}
+
+interface FetchResult {
+  templates: MetaTemplate[];
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 
 interface FormState {
@@ -47,8 +68,10 @@ interface FormState {
   description: string;
   start_date: string;
   end_date: string;
-  message_template_id: string;
   status: EventStatus;
+  whatsapp_template_id: string;
+  whatsapp_template_name: string;
+  whatsapp_image_url: string;
 }
 
 interface Metrics {
@@ -82,7 +105,8 @@ const ALL_STATUSES: EventStatus[] = ['DRAFT', 'UPCOMING', 'ACTIVE', 'COMPLETED',
 
 const EMPTY_FORM: FormState = {
   event_code: '', name: '', location: '', description: '',
-  start_date: '', end_date: '', message_template_id: '', status: 'DRAFT',
+  start_date: '', end_date: '', status: 'DRAFT',
+  whatsapp_template_id: '', whatsapp_template_name: '', whatsapp_image_url: '',
 };
 
 const STATUS_STYLES: Record<EventStatus, { badge: string; tab: string; dot: string }> = {
@@ -111,9 +135,20 @@ function eventToForm(e: Event): FormState {
     description: e.description ?? '',
     start_date: e.start_date ?? '',
     end_date: e.end_date ?? '',
-    message_template_id: e.message_template_id ?? '',
     status: e.status ?? 'DRAFT',
+    whatsapp_template_id: e.whatsapp_template_id ?? '',
+    whatsapp_template_name: e.whatsapp_template_name ?? '',
+    whatsapp_image_url: e.whatsapp_image_url ?? '',
   };
+}
+
+function hasImageHeader(components: MetaComponent[]): boolean {
+  return components.some(c => c.type === 'HEADER' && c.format === 'IMAGE');
+}
+
+function getHeaderType(components: MetaComponent[]): string | null {
+  const header = components.find(c => c.type === 'HEADER');
+  return header?.format ?? null;
 }
 
 function formChanged(a: FormState, b: FormState) {
@@ -214,7 +249,6 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
 
   const [activeTab, setActiveTab] = useState<EventStatus>('ACTIVE');
   const [events, setEvents] = useState<EventListItem[]>([]);
-  const [templates, setTemplates] = useState<Template[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isNew, setIsNew] = useState(false);
@@ -226,6 +260,24 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [unsavedTarget, setUnsavedTarget] = useState<'new' | string | null>(null);
+
+  // WhatsApp template picker state
+  const [waTemplates, setWaTemplates] = useState<MetaTemplate[]>([]);
+  const [waLoading, setWaLoading] = useState(false);
+  const [waError, setWaError] = useState<string | null>(null);
+  const [waPickerOpen, setWaPickerOpen] = useState(false);
+  const [waHasMore, setWaHasMore] = useState(false);
+  const [waNextCursor, setWaNextCursor] = useState<string | null>(null);
+  const [waLoadingMore, setWaLoadingMore] = useState(false);
+  const [waImageUploading, setWaImageUploading] = useState(false);
+  const waImageInputRef = useRef<HTMLInputElement>(null);
+
+  // Current WhatsApp state derived from form
+  const waSelected = !!form.whatsapp_template_id;
+  const waSelectedTemplate = waTemplates.find(t => t.id === form.whatsapp_template_id);
+  const waNeedsImage = waSelectedTemplate ? hasImageHeader(waSelectedTemplate.components) : false;
+  // Also check if the stored template name implies image header even if template list isn't loaded
+  const waStoredNeedsImage = waSelected && !waSelectedTemplate && !!form.whatsapp_image_url;
 
   // Analytics
   const [metrics, setMetrics] = useState<Metrics | null>(null);
@@ -253,13 +305,97 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
     setLoadingList(false);
   }
 
-  async function fetchTemplates() {
-    const { data } = await supabase
-      .from('message_templates')
-      .select('id, name')
-      .eq('status', 'ACTIVE')
-      .order('name');
-    setTemplates((data ?? []) as Template[]);
+  async function fetchWaTemplates(after?: string) {
+    if (!after) setWaLoading(true);
+    else setWaLoadingMore(true);
+    setWaError(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) throw new Error('Not authenticated');
+
+      const url = new URL(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/fetch-whatsapp-templates`);
+      if (after) url.searchParams.set('after', after);
+
+      const resp = await fetch(url.toString(), {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+        },
+      });
+      if (!resp.ok) {
+        let detail = '';
+        try { const e = await resp.json(); detail = e?.error ?? ''; } catch { detail = await resp.text().catch(() => ''); }
+        throw new Error(detail || `Failed to fetch templates (${resp.status})`);
+      }
+      const result: FetchResult = await resp.json();
+      if (after) {
+        setWaTemplates(prev => [...prev, ...result.templates]);
+      } else {
+        setWaTemplates(result.templates);
+      }
+      setWaHasMore(result.hasMore);
+      setWaNextCursor(result.nextCursor);
+    } catch (err) {
+      setWaError(err instanceof Error ? err.message : 'Failed to fetch templates');
+    } finally {
+      setWaLoading(false);
+      setWaLoadingMore(false);
+    }
+  }
+
+  function openWaPicker() {
+    setWaPickerOpen(true);
+    if (waTemplates.length === 0) fetchWaTemplates();
+  }
+
+  function selectWaTemplate(t: MetaTemplate) {
+    const needsImage = hasImageHeader(t.components);
+    setForm(f => ({
+      ...f,
+      whatsapp_template_id: t.id,
+      whatsapp_template_name: t.name,
+      whatsapp_image_url: needsImage ? f.whatsapp_image_url : '',
+    }));
+    setWaPickerOpen(false);
+  }
+
+  function clearWaConfig() {
+    setForm(f => ({
+      ...f,
+      whatsapp_template_id: '',
+      whatsapp_template_name: '',
+      whatsapp_image_url: '',
+    }));
+  }
+
+  async function handleWaImageUpload(file: File) {
+    if (!selectedId) {
+      showToast('Save the event first before uploading a WhatsApp image.', 'error');
+      return;
+    }
+    setWaImageUploading(true);
+    const ext = file.name.split('.').pop() || 'jpg';
+    const path = `${selectedId}/${crypto.randomUUID()}.${ext}`;
+    const { error } = await supabase.storage.from('event-whatsapp-images').upload(path, file);
+    if (error) {
+      showToast('Failed to upload image.', 'error');
+    } else {
+      const { data: { publicUrl } } = supabase.storage.from('event-whatsapp-images').getPublicUrl(path);
+      setForm(f => ({ ...f, whatsapp_image_url: publicUrl }));
+    }
+    setWaImageUploading(false);
+  }
+
+  async function handleWaImageRemove() {
+    const url = form.whatsapp_image_url;
+    if (url) {
+      try {
+        const match = url.match(/\/event-whatsapp-images\/(.+)$/);
+        if (match) await supabase.storage.from('event-whatsapp-images').remove([match[1]]);
+      } catch { /* best-effort cleanup */ }
+    }
+    setForm(f => ({ ...f, whatsapp_image_url: '' }));
   }
 
   async function fetchAnalytics(eventCode: string) {
@@ -330,7 +466,7 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
 
   // ── Effects ────────────────────────────────────────────────────────────────
 
-  useEffect(() => { fetchEvents(activeTab); fetchTemplates(); }, []);
+  useEffect(() => { fetchEvents(activeTab); }, []);
 
   useEffect(() => {
     fetchEvents(activeTab);
@@ -356,10 +492,10 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
     setIsNew(false);
     setErrors({});
     setMobileShowDetail(true);
-    // Fetch full event record (list view omits description, message_template_id)
+    // Fetch full event record (list view omits description)
     const { data: full } = await supabase
       .from('events')
-      .select('id, event_code, name, location, description, start_date, end_date, message_template_id, status, updated_at')
+      .select('id, event_code, name, location, description, start_date, end_date, whatsapp_template_id, whatsapp_template_name, whatsapp_image_url, status, updated_at')
       .eq('id', ev.id)
       .maybeSingle();
     const f = eventToForm((full ?? ev) as Event);
@@ -447,9 +583,13 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
       payload.start_date = form.start_date || null;
       payload.end_date = form.end_date || null;
       payload.status = form.status;
-      payload.message_template_id = form.message_template_id || null;
+      payload.whatsapp_template_id = form.whatsapp_template_id || null;
+      payload.whatsapp_template_name = form.whatsapp_template_name || null;
+      payload.whatsapp_image_url = form.whatsapp_image_url || null;
     } else if (editMode === 'template-only') {
-      payload.message_template_id = form.message_template_id || null;
+      payload.whatsapp_template_id = form.whatsapp_template_id || null;
+      payload.whatsapp_template_name = form.whatsapp_template_name || null;
+      payload.whatsapp_image_url = form.whatsapp_image_url || null;
     }
 
     if (isNew) {
@@ -525,7 +665,7 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
   const modeBanner = editMode === 'readonly'
     ? { icon: Lock, cls: 'bg-stone-50 border-stone-200 text-stone-500', text: `This event is ${form.status.toLowerCase()} — read only.` }
     : editMode === 'template-only'
-    ? { icon: Info, cls: 'bg-yellow-50 border-yellow-200 text-yellow-700', text: 'Event is ACTIVE. Only the message template can be changed.' }
+    ? { icon: Info, cls: 'bg-yellow-50 border-yellow-200 text-yellow-700', text: 'Event is ACTIVE. Only the WhatsApp template can be changed.' }
     : null;
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -781,26 +921,139 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
                     )}
                   </Field>
 
-                  <Field label="Message Template" error={errors.message_template_id}>
-                    {editMode === 'readonly' && !isNew ? (
-                      <div className={`${INPUT_BASE} ${INPUT_OFF} flex items-center gap-2`}>
-                        <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">{templates.find(t => t.id === form.message_template_id)?.name ?? '—'}</span>
-                      </div>
-                    ) : (
-                      <select
-                        value={form.message_template_id}
-                        onChange={e => patch('message_template_id', e.target.value)}
-                        className={`${INPUT_BASE} ${INPUT_ON}`}
-                      >
-                        <option value="">— None —</option>
-                        {templates.map(t => (
-                          <option key={t.id} value={t.id}>{t.name}</option>
-                        ))}
-                      </select>
-                    )}
-                  </Field>
+                </div>
+              </SectionCard>
 
+              {/* ── SECTION 1.5: WHATSAPP CONFIGURATION ── */}
+              <SectionCard title="WhatsApp Configuration" icon={<MessageCircle className="w-4 h-4" />}>
+                <div className="space-y-4">
+                  <p className="text-xs text-stone-400 leading-relaxed">
+                    Select a Meta WhatsApp template for this event. The template and image will be used by the automated WhatsApp sending workflow. This does not send any messages.
+                  </p>
+
+                  {!waSelected ? (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={openWaPicker}
+                        disabled={editMode === 'readonly'}
+                        className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-stone-700 border border-stone-200 hover:bg-stone-50 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Search className="w-3.5 h-3.5" />
+                        Choose from Templates
+                      </button>
+                      {editMode === 'readonly' && (
+                        <span className="text-xs text-stone-400">No WhatsApp template configured.</span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {/* Selected template display */}
+                      <div className="flex items-start justify-between gap-3 p-3 bg-stone-50 border border-stone-200 rounded-lg">
+                        <div className="flex items-start gap-3 min-w-0">
+                          <div className="w-8 h-8 rounded-lg bg-green-50 border border-green-200 flex items-center justify-center flex-shrink-0">
+                            <CheckCircle2 className="w-4 h-4 text-green-600" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-stone-800 truncate">{form.whatsapp_template_name}</p>
+                            <p className="text-[11px] text-stone-400 font-mono mt-0.5">ID: {form.whatsapp_template_id}</p>
+                            {waSelectedTemplate && (
+                              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">{waSelectedTemplate.language}</span>
+                                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${waSelectedTemplate.status === 'APPROVED' ? 'bg-green-50 text-green-700' : 'bg-yellow-50 text-yellow-700'}`}>{waSelectedTemplate.status}</span>
+                                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">{waSelectedTemplate.category}</span>
+                                {waNeedsImage && (
+                                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">IMAGE HEADER</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        {editMode !== 'readonly' && (
+                          <div className="flex items-center gap-1 flex-shrink-0">
+                            <button
+                              onClick={openWaPicker}
+                              className="p-1.5 text-stone-400 hover:text-stone-700 hover:bg-stone-100 rounded-md transition"
+                              title="Change template"
+                            >
+                              <Search className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={clearWaConfig}
+                              className="p-1.5 text-stone-400 hover:text-red-500 hover:bg-red-50 rounded-md transition"
+                              title="Clear WhatsApp configuration"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Image upload for IMAGE-header templates */}
+                      {(waNeedsImage || waStoredNeedsImage) && editMode !== 'readonly' && (
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <ImageIcon className="w-3.5 h-3.5 text-stone-400" />
+                            <p className="text-xs font-medium text-stone-600">WhatsApp Header Image</p>
+                          </div>
+                          <p className="text-[11px] text-stone-400 leading-relaxed">
+                            This image will be used as the header image when sending WhatsApp messages with this template.
+                          </p>
+                          {form.whatsapp_image_url ? (
+                            <div className="space-y-2">
+                              <div className="relative rounded-lg overflow-hidden border border-stone-200 bg-stone-50">
+                                <img src={form.whatsapp_image_url} alt="WhatsApp header" className="w-full max-h-48 object-contain" />
+                                <button
+                                  onClick={handleWaImageRemove}
+                                  className="absolute top-2 right-2 p-1 bg-white/90 hover:bg-white text-stone-600 hover:text-red-500 rounded-md shadow-sm transition"
+                                  title="Remove image"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <button
+                                onClick={() => waImageInputRef.current?.click()}
+                                disabled={waImageUploading}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-stone-600 border border-stone-200 hover:bg-stone-50 rounded-lg transition disabled:opacity-50"
+                              >
+                                {waImageUploading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                                Replace Image
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => waImageInputRef.current?.click()}
+                              disabled={waImageUploading || !selectedId}
+                              className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-stone-700 border border-stone-200 hover:bg-stone-50 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {waImageUploading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                              {waImageUploading ? 'Uploading…' : 'Upload Header Image'}
+                            </button>
+                          )}
+                          {!selectedId && (
+                            <p className="text-[11px] text-amber-600">Save the event first to enable image upload.</p>
+                          )}
+                          <input
+                            ref={waImageInputRef}
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={e => {
+                              const file = e.target.files?.[0];
+                              if (file) handleWaImageUpload(file);
+                              e.target.value = '';
+                            }}
+                          />
+                        </div>
+                      )}
+
+                      {/* Show stored image preview in readonly mode */}
+                      {((waNeedsImage || waStoredNeedsImage) && editMode === 'readonly' && form.whatsapp_image_url) ? (
+                        <div className="rounded-lg overflow-hidden border border-stone-200 bg-stone-50">
+                          <img src={form.whatsapp_image_url} alt="WhatsApp header" className="w-full max-h-48 object-contain" />
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
               </SectionCard>
 
@@ -1091,6 +1344,89 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
           onCancel={() => setUnsavedTarget(null)}
         />
       )}
+      {/* WhatsApp Template Picker Dialog */}
+      {waPickerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl border border-stone-200 shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100">
+              <div className="flex items-center gap-2.5">
+                <MessageCircle className="w-4 h-4 text-stone-400" />
+                <h3 className="text-sm font-semibold text-stone-800">Select WhatsApp Template</h3>
+              </div>
+              <button onClick={() => setWaPickerOpen(false)} className="p-1 text-stone-400 hover:text-stone-700 rounded-md transition">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4">
+              {waLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="w-5 h-5 text-stone-300 animate-spin" />
+                </div>
+              ) : waError ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <AlertCircle className="w-8 h-8 text-red-200 mb-2" />
+                  <p className="text-sm text-red-600 mb-1">{waError}</p>
+                  <button onClick={() => fetchWaTemplates()} className="mt-2 text-xs font-medium text-stone-600 border border-stone-200 hover:bg-stone-50 rounded-lg px-3 py-1.5 transition">
+                    Retry
+                  </button>
+                </div>
+              ) : waTemplates.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <MessageCircle className="w-8 h-8 text-stone-200 mb-2" />
+                  <p className="text-sm text-stone-400">No WhatsApp templates found.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {waTemplates.map(t => {
+                    const headerType = getHeaderType(t.components);
+                    const isApproved = t.status === 'APPROVED';
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => selectWaTemplate(t)}
+                        className={`w-full text-left p-3 rounded-lg border transition ${
+                          form.whatsapp_template_id === t.id
+                            ? 'border-stone-800 bg-stone-50'
+                            : 'border-stone-200 hover:border-stone-300 hover:bg-stone-50'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-stone-800 truncate">{t.name}</p>
+                            <p className="text-[11px] text-stone-400 font-mono mt-0.5">{t.id}</p>
+                            <div className="flex flex-wrap gap-1.5 mt-1.5">
+                              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">{t.language}</span>
+                              <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${isApproved ? 'bg-green-50 text-green-700' : 'bg-yellow-50 text-yellow-700'}`}>{t.status}</span>
+                              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">{t.category}</span>
+                              {headerType && (
+                                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">{headerType} HEADER</span>
+                              )}
+                            </div>
+                          </div>
+                          {form.whatsapp_template_id === t.id && (
+                            <CheckCircle2 className="w-4 h-4 text-stone-800 flex-shrink-0 mt-1" />
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                  {waHasMore && (
+                    <button
+                      onClick={() => fetchWaTemplates(waNextCursor ?? undefined)}
+                      disabled={waLoadingMore}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 text-xs font-medium text-stone-600 border border-stone-200 hover:bg-stone-50 rounded-lg transition disabled:opacity-50"
+                    >
+                      {waLoadingMore ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                      Load More
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {toast && (
         <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
       )}

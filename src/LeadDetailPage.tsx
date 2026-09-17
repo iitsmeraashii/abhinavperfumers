@@ -7,7 +7,7 @@ import {
   User, Users, Thermometer, Hash, FileText, Image, MessageCircle,
   AlertCircle, Clock, RefreshCw, Pencil, Check, X as XIcon,
   StickyNote, Plus, Send, ChevronDown, Bell, CheckCircle2, Link2,
-  ShieldAlert, Flame, Snowflake,
+  ShieldAlert, Flame, Snowflake, Eye,
 } from 'lucide-react';
 import {
   REVIEW_REASON_LABELS, fieldLabel, formatConfidencePercent,
@@ -952,41 +952,58 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
       {/* Lead Temperature Prompt — NEW leads with no temperature */}
       {showTempPrompt && lead && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 backdrop-blur-sm px-4"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-stone-900/40 backdrop-blur-sm px-0 sm:px-4"
           onClick={() => setShowTempPrompt(false)}
         >
           <div
-            className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200"
+            className="w-full sm:max-w-md bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl border border-stone-200 overflow-hidden animate-in fade-in slide-in-from-bottom-4 sm:zoom-in-95 duration-200"
             onClick={e => e.stopPropagation()}
           >
-            <div className="px-6 pt-6 pb-2 text-center">
-              <h2 className="text-lg font-bold text-stone-900">Set Lead Temperature</h2>
-              <p className="text-sm text-stone-500 mt-1">How would you rate the potential of this lead?</p>
+            {/* Header with lead context */}
+            <div className="px-6 pt-6 pb-4 border-b border-stone-100">
+              <div className="flex items-start gap-3 mb-3">
+                <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-amber-100 text-amber-600 shrink-0">
+                  <Thermometer className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-lg font-bold text-stone-900">Set Lead Temperature</h2>
+                  <p className="text-sm text-stone-500 mt-0.5">Choose the potential of this lead.</p>
+                </div>
+              </div>
+              {/* Lead context summary */}
+              <div className="flex items-center gap-2 px-3 py-2 bg-stone-50 rounded-lg text-sm text-stone-600">
+                <User className="w-3.5 h-3.5 text-stone-400 shrink-0" />
+                <span className="font-medium text-stone-800 truncate">{lead.client_name || 'Unknown'}</span>
+                {(val(lead.company) || val(lead.designation)) && (
+                  <span className="text-stone-400 truncate hidden sm:inline">
+                    · {[val(lead.company), val(lead.designation)].filter(Boolean).join(' · ')}
+                  </span>
+                )}
+              </div>
             </div>
+
+            {/* Temperature options — stacked for mobile, comfortable touch targets */}
             <div className="px-6 py-5 space-y-3">
-              {TEMP_PROMPT_OPTIONS.map(opt => {
-                  const active = false; // selection saves immediately, no pre-select
-                  return (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      disabled={tempPromptSaving}
-                      onClick={() => handleTempPromptSelect(opt.value)}
-                      className={`w-full flex items-center gap-4 px-5 py-4 rounded-xl font-medium text-sm
-                        transition-all duration-150 ring-2 active:scale-[0.98] text-left
-                        ${active
-                          ? `${opt.activeColor} shadow-sm`
-                          : `border ${opt.inactiveColor} ring-transparent`}
-                        ${tempPromptSaving ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-                    >
-                      <span className="flex-shrink-0">{opt.icon}</span>
-                      <div className="flex-1 min-w-0">
-                        <p className="font-semibold">{opt.label}</p>
-                        <p className="text-xs opacity-80 mt-0.5">{opt.description}</p>
-                      </div>
-                    </button>
-                  );
-                })}
+              {TEMP_PROMPT_OPTIONS.map(opt => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  disabled={tempPromptSaving}
+                  aria-label={`Set temperature to ${opt.label}`}
+                  onClick={() => handleTempPromptSelect(opt.value)}
+                  className={`w-full flex items-center gap-4 px-5 py-4 rounded-xl font-medium text-sm
+                    transition-all duration-150 ring-2 active:scale-[0.98] text-left
+                    border ring-transparent
+                    ${opt.inactiveColor}
+                    ${tempPromptSaving ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:shadow-sm'}`}
+                >
+                  <span className="flex-shrink-0">{opt.icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold">{opt.label}</p>
+                    <p className="text-xs opacity-80 mt-0.5">{opt.description}</p>
+                  </div>
+                </button>
+              ))}
               {tempPromptError && (
                 <div className="flex items-center gap-2 px-4 py-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -999,6 +1016,24 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
                   Saving…
                 </div>
               )}
+            </div>
+
+            {/* Review Lead First — secondary action */}
+            <div className="px-6 pb-6 pt-1 border-t border-stone-100">
+              <button
+                type="button"
+                disabled={tempPromptSaving}
+                onClick={() => setShowTempPrompt(false)}
+                className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl
+                  text-sm font-semibold text-stone-600
+                  border border-stone-200 bg-white hover:bg-stone-50
+                  active:scale-[0.98] transition-all duration-150
+                  disabled:opacity-50"
+                aria-label="Review lead before setting temperature"
+              >
+                <Eye className="w-4 h-4" />
+                Review Lead First
+              </button>
             </div>
           </div>
         </div>
@@ -1360,7 +1395,28 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
               </>
             ) : (
               <>
-                <Row icon={<Thermometer className="w-3.5 h-3.5" />} label="Temperature" value={val(lead.lead_temperature)} />
+                <div className="flex items-start gap-3 py-2.5 border-b border-stone-100 last:border-0">
+                  <span className="mt-0.5 text-stone-400 flex-shrink-0"><Thermometer className="w-3.5 h-3.5" /></span>
+                  <div className="min-w-0 flex-1 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-stone-400 mb-0.5">Temperature</p>
+                      <p className={`text-sm ${val(lead.lead_temperature) ? 'text-stone-800' : 'text-stone-300'}`}>
+                        {val(lead.lead_temperature) ?? 'Not Set'}
+                      </p>
+                    </div>
+                    {!val(lead.lead_temperature) && canEdit && !editMode && (
+                      <button
+                        onClick={enterEdit}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg
+                          bg-amber-100 text-amber-700 border border-amber-200
+                          hover:bg-amber-200 active:scale-95 transition-all shrink-0"
+                      >
+                        <Thermometer className="w-3.5 h-3.5" />
+                        Set Temperature
+                      </button>
+                    )}
+                  </div>
+                </div>
                 <TagRow icon={<Hash className="w-3.5 h-3.5" />} label="Keywords" values={parseTagString(lead.quick_keywords)} />
               </>
             )}

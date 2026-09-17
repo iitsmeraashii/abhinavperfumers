@@ -183,6 +183,25 @@ export async function claimNextJob(userId: string): Promise<QueueEntry | null> {
   return claimed as QueueEntry;
 }
 
+// ─── Reconciliation query ─────────────────────────────────────────────────────
+
+/** Jobs in terminal states (COMPLETED, REQUIRES_REVIEW) for this user.
+ *  Used by the reconciliation pass to sync local completed_leads records
+ *  that are stuck in a non-synced state after a missed completion event. */
+export async function findCompletedJobs(
+  userId: string,
+): Promise<QueueEntry[]> {
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select('id, capture_session_id, state, retry_count, failure_reason, failed_stage, error_message, processing_completed_at')
+    .eq('user_id', userId)
+    .in('state', ['COMPLETED', 'REQUIRES_REVIEW'])
+    .order('processing_completed_at', { ascending: false });
+
+  if (error || !data) return [];
+  return data as QueueEntry[];
+}
+
 // ─── Recovery queries ──────────────────────────────────────────────────────────
 
 /** Jobs stuck in PROCESSING — interrupted by a crash/refresh before completing. */

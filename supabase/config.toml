@@ -1,0 +1,8 @@
+[functions.extract-business-card]
+verify_jwt = false
+
+[functions.transcribe-voice-note]
+verify_jwt = true
+
+[functions.fetch-whatsapp-templates]
+verify_jwt = true

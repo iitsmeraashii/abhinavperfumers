@@ -16,7 +16,7 @@ import {
   updateJobState,
   markRetrying,
 } from './processingQueueRepository';
-import { runRecovery } from './recoveryService';
+import { runRecovery, reconcileCompletedLeads } from './recoveryService';
 import type { RecoveryReport } from './recoveryService';
 import { processJob } from './worker';
 import { decide } from './decisionEngine';
@@ -81,6 +81,8 @@ class AlpeScheduler {
       this.recoveryReport = {
         interruptedRequeued: 0,
         retryableRequeued: 0,
+        reconciledSynced: 0,
+        reconciliationFailures: 0,
         totalRecovered: 0,
         errors: [this.lastError],
       };
@@ -163,6 +165,11 @@ class AlpeScheduler {
     alpeLog('Scheduler poll', { pollCount: this.pollCount });
 
     try {
+      const reconciliation = await reconcileCompletedLeads(this.userId);
+      if (reconciliation.synced > 0 || reconciliation.failures > 0) {
+        alpeLog('Reconciliation pass complete', { userId: this.userId, ...reconciliation });
+      }
+
       const job = await claimNextJob(this.userId);
 
       if (!job) {
@@ -178,10 +185,14 @@ class AlpeScheduler {
       });
 
       // Run the full pipeline: Queue → Worker → Pipeline → Decision → Promotion → Completion
-      alpeLog('Scheduler — claiming job for processing', {
+      alpeLog('JOB_CLAIMED', {
         jobId: job.id,
-        backendSessionId: job.capture_session_id,
+        captureSessionId: job.capture_session_id,
         correlationId: (job.metadata as Record<string, unknown> | null)?.correlationId ?? null,
+      });
+      alpeLog('PROCESSING_STARTED', {
+        jobId: job.id,
+        captureSessionId: job.capture_session_id,
       });
       const workerResult = await processJob(job);
       alpeLog('Worker result', { jobId: job.id, backendSessionId: job.capture_session_id, ...workerResult });
@@ -221,7 +232,12 @@ class AlpeScheduler {
 
       if (decision.newState === 'COMPLETED' || decision.newState === 'REQUIRES_REVIEW') {
         this.jobsProcessed++;
-        alpeLog('Queue completion', { jobId: job.id, newState: decision.newState, jobsProcessed: this.jobsProcessed });
+        alpeLog('PROCESSING_COMPLETED', {
+          jobId: job.id,
+          captureSessionId: job.capture_session_id,
+          newState: decision.newState,
+          jobsProcessed: this.jobsProcessed,
+        });
 
         // Reconcile local completed_leads state with the backend outcome.
         // The pipeline's executePromotion() normally sets this to 'synced'
@@ -231,9 +247,21 @@ class AlpeScheduler {
         //   2. _updateCompletedLead()'s IndexedDB write failed silently.
         // This idempotent overwrite ensures the local record reflects reality.
         const { updateCompletedLeadStatus } = await import('../capture/completedLeadsStorage');
-        await updateCompletedLeadStatus(job.capture_session_id, 'synced', {
+        const ok = await updateCompletedLeadStatus(job.capture_session_id, 'synced', {
           syncedAt: new Date().toISOString(),
         });
+        if (ok) {
+          alpeLog('LOCAL_QUEUE_SYNCED', {
+            jobId: job.id,
+            captureSessionId: job.capture_session_id,
+          });
+        } else {
+          alpeError('RECONCILIATION_FAILURE', {
+            jobId: job.id,
+            captureSessionId: job.capture_session_id,
+            reason: 'Local completed_leads write was not verified',
+          });
+        }
       }
 
       updateAlpeRuntime({ currentJobId: null, currentQueueState: null, processingStartedAt: null, workerState: null, currentPipelineStage: null });

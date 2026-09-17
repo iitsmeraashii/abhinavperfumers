@@ -162,6 +162,8 @@ export interface DraftData {
   emails?:            string[];
   website?:           string;
   address?:           string;
+  // Per-lead event override (defaults to My Account event)
+  captureEventId?:    string;
   // Card session references
   cardSessionId?:     string;
   cardFrontAssetId?:  string;

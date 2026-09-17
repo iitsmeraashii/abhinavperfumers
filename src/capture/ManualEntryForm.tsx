@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import type { CaptureSession, DraftData, LeadTemperature, LeadType, ApplicationOption } from './types';
+import type { AppEvent } from '../EventContext';
 import { APPLICATION_OPTIONS } from './types';
 import type { UseManualEntryFormReturn } from './useManualEntryForm';
 import { Toast, DiscardDialog, DraftSaveIndicator } from './CaptureUI';
@@ -745,15 +746,22 @@ function TagArrayInput({ label, values, onChange, placeholder }: {
 function CollapsibleSection({
   title,
   step,
-  defaultOpen,
+  defaultOpen = true,
+  resetKey,
   children,
 }: {
   title: string;
   step: number;
   defaultOpen?: boolean;
+  resetKey?: string | null;
   children: React.ReactNode;
 }) {
-  const [open, setOpen] = useState(defaultOpen ?? false);
+  const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    setOpen(defaultOpen);
+  }, [defaultOpen, resetKey]);
+
   return (
     <div className="border border-stone-200 rounded-2xl bg-white overflow-hidden shadow-sm">
       <button
@@ -793,15 +801,48 @@ interface Props {
   /** When true, contact fields are optional because evidence (card/QR)
    *  satisfies the minimum save requirement. Used in Exhibition mode. */
   contactDetailsOptional?: boolean;
+  /** Active events for the per-lead Event override dropdown. */
+  activeEvents?:  AppEvent[];
+  /** My Account default event — used as the initial selection. */
+  defaultEvent?:  AppEvent | null;
 }
 
-export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional }: Props) {
+export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional, activeEvents = [], defaultEvent = null }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
   } = form;
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Ref to the Lead Classification section for post-extraction auto-scroll.
+  const leadClassificationRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to Lead Classification (Section 2) when the manual entry form
+  // is opened after a successful Contact Card or QR extraction. This fires
+  // once per session — the `originalCaptureMethod` is set at session creation
+  // and never changes, and the `hasScrolledRef` guard prevents re-triggering
+  // on re-renders or form state changes.
+  const hasScrolledRef = useRef(false);
+  const isFromExtraction = session.originalCaptureMethod === 'BUSINESS_CARD'
+    || session.originalCaptureMethod === 'QR';
+  useEffect(() => {
+    if (!isFromExtraction || hasScrolledRef.current) return;
+    const el = leadClassificationRef.current;
+    if (!el) return;
+    // Use requestAnimationFrame to ensure the DOM has fully laid out after
+    // the section reordering and all child fields have rendered. This is
+    // deterministic (tied to the browser's render cycle, not an arbitrary
+    // delay) and only fires once.
+    const rafId = requestAnimationFrame(() => {
+      const headerOffset = 80; // account for sticky/fixed header height
+      const rect = el.getBoundingClientRect();
+      const scrollTarget = rect.top + window.scrollY - headerOffset;
+      window.scrollTo({ top: scrollTarget, behavior: 'smooth' });
+      hasScrolledRef.current = true;
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [isFromExtraction]);
   // Suppress the "Lead saved" draft toast while promotion is in flight so it
   // doesn't appear alongside a promotion error toast from the parent.
   const [promotionActive, setPromotionActive] = useState(false);
@@ -1004,33 +1045,10 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
 
       <div className="space-y-4">
 
-        {/* ═══ Section 1 — Lead Classification (highlighted) ═══ */}
-        <div className="relative z-20 bg-amber-50/60 rounded-2xl border border-amber-200/70 shadow-sm overflow-visible">
-          <div className="px-5 pt-5 pb-4 border-b border-amber-100">
-            <SectionHeader title="Lead Classification" subtitle="Is this a new or existing lead? How hot is it?" step={1} sectionKey="contact" />
-          </div>
-          <div className="px-5 py-5 space-y-4">
-            <LeadTypePicker
-              value={leadType}
-              onChange={v => handlePatchDraft({ leadType: v })}
-            />
-            {leadType === 'EXISTING' && (
-              <PreviousRepSelect
-                value={previousRepCode}
-                onChange={code => handleChange('previousRepCode', code)}
-              />
-            )}
-            <LeadTemperaturePicker
-              value={leadTemperature}
-              onChange={v => handlePatchDraft({ leadTemperature: v })}
-            />
-          </div>
-        </div>
-
-        {/* ═══ Section 2 — Contact Details ═══ */}
+        {/* ═══ Section 1 — Contact Details ═══ */}
         <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
           <div className="px-5 pt-5 pb-4 border-b border-stone-100 flex items-center justify-between">
-            <SectionHeader title="Contact Details" subtitle="Capture key info first" step={2} sectionKey="contact" />
+            <SectionHeader title="Contact Details" subtitle="Capture key info first" step={1} sectionKey="contact" />
             <DraftSaveIndicator state={saveState} />
           </div>
 
@@ -1156,6 +1174,29 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
           </div>
         </div>
 
+        {/* ═══ Section 2 — Lead Classification (highlighted) ═══ */}
+        <div ref={leadClassificationRef} className="relative z-20 bg-amber-50/60 rounded-2xl border border-amber-200/70 shadow-sm overflow-visible scroll-mt-20">
+          <div className="px-5 pt-5 pb-4 border-b border-amber-100">
+            <SectionHeader title="Lead Classification" subtitle="Is this a new or existing lead? How hot is it?" step={2} sectionKey="contact" />
+          </div>
+          <div className="px-5 py-5 space-y-4">
+            <LeadTypePicker
+              value={leadType}
+              onChange={v => handlePatchDraft({ leadType: v })}
+            />
+            {leadType === 'EXISTING' && (
+              <PreviousRepSelect
+                value={previousRepCode}
+                onChange={code => handleChange('previousRepCode', code)}
+              />
+            )}
+            <LeadTemperaturePicker
+              value={leadTemperature}
+              onChange={v => handlePatchDraft({ leadTemperature: v })}
+            />
+          </div>
+        </div>
+
         {/* ═══ Section 3 — Quick Notes ═══ */}
         <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
           <div className="px-5 pt-5 pb-4 border-b border-stone-100">
@@ -1198,7 +1239,11 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
         </div>
 
         {/* ═══ Section 3 — Additional Details (Collapsible) ═══ */}
-        <CollapsibleSection title="Additional Details (Optional)" step={4} defaultOpen={import.meta.env.VITE_ADDITIONAL_DETAILS_OPEN === 'true'}>
+        <CollapsibleSection
+          title="Additional Details (Optional)"
+          step={4}
+          resetKey={backendSessionId}
+        >
           <ApplicationChips
             selected={application}
             onChange={v => handlePatchDraft({ application: v })}
@@ -1234,6 +1279,22 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
             onChange={v => handlePatchDraft({ benchmark: v })}
             placeholder="e.g. Competitor product name…"
           />
+
+          {/* Event override — defaults to My Account event */}
+          <div>
+            <FieldLabel label="Event" />
+            <select
+              value={session.draftData.captureEventId ?? defaultEvent?.id ?? ''}
+              onChange={e => handlePatchDraft({ captureEventId: e.target.value || undefined })}
+              className={inputCls()}
+            >
+              {activeEvents.map(ev => (
+                <option key={ev.id} value={ev.id}>
+                  {ev.name}
+                </option>
+              ))}
+            </select>
+          </div>
         </CollapsibleSection>
 
       </div>
