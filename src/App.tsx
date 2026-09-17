@@ -16,6 +16,7 @@ import LeadQueuePage from './LeadQueuePage';
 import MyAccountPage from './MyAccountPage';
 import SalesRepsPage from './SalesRepsPage';
 import ConversationsPage from './ConversationsPage';
+import ConversationDetailPage from './ConversationDetailPage';
 import { supabase } from './supabaseClient';
 import {
   LogOut, Loader2,
@@ -308,6 +309,7 @@ function Layout() {
     return isAdmin ? 'dashboard' : 'capture';
   });
   const [selectedLeadId,     setSelectedLeadId]     = useState<string | null>(initialLeadId);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [leadsEventFilter,   setLeadsEventFilter]   = useState<string | undefined>(undefined);
   const [leadsInitialFilters,setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
@@ -346,9 +348,23 @@ function Layout() {
     window.history.pushState({}, '', url.toString());
   }
 
+  function handleBackFromConversation() {
+    setSelectedConversationId(null);
+  }
+
+  function handleSelectConversation(id: string) {
+    setSelectedConversationId(id);
+  }
+
+  function handleViewLeadFromConversation(leadId: string) {
+    setSelectedConversationId(null);
+    handleSelectLead(leadId);
+  }
+
   function handleTabChange(t: Tab) {
     setTab(t);
     setSelectedLeadId(null);
+    setSelectedConversationId(null);
     setMoreDrawerOpen(false);
     if (t !== 'capture') setResumeDraftId(null);
     localStorage.setItem('activeTab', t);
@@ -544,7 +560,16 @@ function Layout() {
                 onViewLead={handleViewLeadFromQueue}
               />
             )}
-            {tab === 'conversations' && !selectedLeadId && <ConversationsPage />}
+            {tab === 'conversations' && !selectedLeadId && !selectedConversationId && (
+              <ConversationsPage onSelectConversation={handleSelectConversation} />
+            )}
+            {tab === 'conversations' && !selectedLeadId && selectedConversationId && (
+              <ConversationDetailPage
+                conversationId={selectedConversationId}
+                onBack={handleBackFromConversation}
+                onViewLead={handleViewLeadFromConversation}
+              />
+            )}
             {tab === 'leads' && !selectedLeadId && (
               <LeadsPage
                 key={[leadsEventFilter ?? '', JSON.stringify(leadsInitialFilters ?? {})].join('|')}

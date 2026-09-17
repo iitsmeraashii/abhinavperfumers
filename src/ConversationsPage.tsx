@@ -99,7 +99,11 @@ function buildMessagePreview(msg: LatestMessage): string {
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export default function ConversationsPage() {
+interface ConversationsPageProps {
+  onSelectConversation?: (conversationId: string) => void;
+}
+
+export default function ConversationsPage({ onSelectConversation }: ConversationsPageProps) {
   const [rows, setRows] = useState<ConversationRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -438,7 +442,7 @@ export default function ConversationsPage() {
                   key={conv.id}
                   className="bg-white border border-stone-200 rounded-xl px-4 py-3.5 hover:border-stone-300 hover:shadow-sm transition-all duration-150 cursor-pointer"
                   onClick={() => {
-                    // Placeholder — detail view will be implemented in a later step
+                    if (onSelectConversation) onSelectConversation(conv.id);
                   }}
                 >
                   <div className="flex items-start justify-between gap-3">
