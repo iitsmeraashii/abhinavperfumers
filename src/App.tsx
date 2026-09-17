@@ -15,14 +15,15 @@ import CaptureLeadPage from './CaptureLeadPage';
 import LeadQueuePage from './LeadQueuePage';
 import MyAccountPage from './MyAccountPage';
 import SalesRepsPage from './SalesRepsPage';
+import ConversationsPage from './ConversationsPage';
 import { supabase } from './supabaseClient';
 import {
   LogOut, Loader2,
   LayoutDashboard, List, CalendarDays, Bell, PlusCircle,
-  MoreHorizontal, X, User, ChevronDown, Layers, Users,
+  MoreHorizontal, X, User, ChevronDown, Layers, Users, MessageCircle,
 } from 'lucide-react';
 
-type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'events' | 'notifications' | 'salesreps' | 'account';
+type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'notifications' | 'salesreps' | 'account';
 
 // ─── Mobile bottom nav tabs ───────────────────────────────────────────────────
 
@@ -38,8 +39,9 @@ const MOBILE_TABS: MobileTab[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-5 h-5" />, adminOnly: true },
   { id: 'leads',     label: 'Leads',     icon: <List className="w-5 h-5" /> },
   { id: 'capture',   label: 'Capture',   icon: <PlusCircle className="w-5 h-5" />, emphasize: true },
-  { id: 'queue',     label: 'Queue',     icon: <Layers className="w-5 h-5" /> },
-  { id: 'events',    label: 'Events',    icon: <CalendarDays className="w-5 h-5" />, adminOnly: true },
+  { id: 'queue',          label: 'Queue',         icon: <Layers className="w-5 h-5" /> },
+  { id: 'conversations',  label: 'WhatsApp',      icon: <MessageCircle className="w-5 h-5" /> },
+  { id: 'events',          label: 'Events',        icon: <CalendarDays className="w-5 h-5" />, adminOnly: true },
 ];
 
 // ─── Profile dropdown (desktop) ───────────────────────────────────────────────
@@ -298,8 +300,8 @@ function Layout() {
   const initialFollowUp = params.get('followup');
 
   const [tab,                setTab]                = useState<Tab>(() => {
-    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'events', 'notifications', 'salesreps', 'account'];
-    const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'account'];
+    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'account'];
+    const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'conversations', 'account'];
     const allowed = isAdmin ? adminTabs : repTabs;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
     if (saved && allowed.includes(saved)) return saved;
@@ -450,6 +452,13 @@ function Layout() {
             >
               <Layers className="w-4 h-4" /> Queue
             </button>
+            <button
+              onClick={() => handleTabChange('conversations')}
+              className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                ${tab === 'conversations' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+            >
+              <MessageCircle className="w-4 h-4" /> WhatsApp
+            </button>
             {isAdmin && (
               <button
                 onClick={() => handleTabChange('events')}
@@ -535,6 +544,7 @@ function Layout() {
                 onViewLead={handleViewLeadFromQueue}
               />
             )}
+            {tab === 'conversations' && !selectedLeadId && <ConversationsPage />}
             {tab === 'leads' && !selectedLeadId && (
               <LeadsPage
                 key={[leadsEventFilter ?? '', JSON.stringify(leadsInitialFilters ?? {})].join('|')}
