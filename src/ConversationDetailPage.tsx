@@ -391,7 +391,6 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
         },
         body: JSON.stringify({
           conversation_id: conversationId,
-          to_phone: conversation.wa_phone_number,
           text_body: text,
         }),
       });
