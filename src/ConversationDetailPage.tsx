@@ -1,12 +1,14 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
 import {
   ArrowLeft, Loader2, AlertCircle, MessageCircle, Phone,
   Link2, Link2Off, ExternalLink, Clock, Send,
   FileText, Image as ImageIcon, Headphones, FileVideo, FileCheck,
-  CheckCheck, Check, X, Circle,
+  CheckCheck, Check, X, Circle, Plus, Unlink,
 } from 'lucide-react';
 import { formatDateTime } from './utils/dateFormat';
+import LinkExistingLeadModal from './LinkExistingLeadModal';
+import CreateLeadModal from './CreateLeadModal';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -132,7 +134,40 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
   const [error, setError] = useState('');
   const [notFound, setNotFound] = useState(false);
 
+  const [showLinkModal, setShowLinkModal] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [unlinkTarget, setUnlinkTarget] = useState<LinkedLead | null>(null);
+  const [actionError, setActionError] = useState('');
+  const [unlinking, setUnlinking] = useState(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const refreshLinkedLeads = useCallback(async () => {
+    const { data: bridgeData } = await supabase
+      .from('whatsapp_conversation_leads')
+      .select('lead_entry_id')
+      .eq('conversation_id', conversationId);
+
+    const leadIds = (bridgeData ?? []).map(b => b.lead_entry_id);
+
+    if (leadIds.length > 0) {
+      const { data: leadData } = await supabase
+        .from('lead_entries')
+        .select('id, client_name, company, lead_status, lead_temperature, state')
+        .in('id', leadIds);
+
+      setLinkedLeads((leadData ?? []).map(l => ({
+        leadEntryId: l.id,
+        clientName: l.client_name,
+        company: l.company,
+        leadStatus: l.lead_status,
+        leadTemperature: l.lead_temperature,
+        state: l.state,
+      })));
+    } else {
+      setLinkedLeads([]);
+    }
+  }, [conversationId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -192,42 +227,16 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
       setMessages((msgData ?? []) as ChatMessage[]);
 
-      // ── Fetch linked leads via bridge table ──
-      const { data: bridgeData } = await supabase
-        .from('whatsapp_conversation_leads')
-        .select('lead_entry_id')
-        .eq('conversation_id', conversationId);
+      // ── Fetch linked leads ──
+      await refreshLinkedLeads();
 
       if (cancelled) return;
-
-      const leadIds = (bridgeData ?? []).map(b => b.lead_entry_id);
-
-      if (leadIds.length > 0) {
-        const { data: leadData } = await supabase
-          .from('lead_entries')
-          .select('id, client_name, company, lead_status, lead_temperature, state')
-          .in('id', leadIds);
-
-        if (cancelled) return;
-
-        setLinkedLeads((leadData ?? []).map(l => ({
-          leadEntryId: l.id,
-          clientName: l.client_name,
-          company: l.company,
-          leadStatus: l.lead_status,
-          leadTemperature: l.lead_temperature,
-          state: l.state,
-        })));
-      } else {
-        setLinkedLeads([]);
-      }
-
       setLoading(false);
     }
 
     load();
     return () => { cancelled = true; };
-  }, [conversationId]);
+  }, [conversationId, refreshLinkedLeads]);
 
   // Auto-scroll to bottom on messages load
   useEffect(() => {
@@ -235,6 +244,28 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  async function handleUnlink() {
+    if (!unlinkTarget) return;
+    setUnlinking(true);
+    setActionError('');
+
+    const { error: delErr } = await supabase
+      .from('whatsapp_conversation_leads')
+      .delete()
+      .eq('conversation_id', conversationId)
+      .eq('lead_entry_id', unlinkTarget.leadEntryId);
+
+    if (delErr) {
+      setActionError(delErr.message || 'Failed to unlink lead.');
+      setUnlinking(false);
+      return;
+    }
+
+    setUnlinkTarget(null);
+    setUnlinking(false);
+    await refreshLinkedLeads();
+  }
 
   // ── Render states ──
 
@@ -284,6 +315,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
   const window = deriveServiceWindow(conversation.customer_service_window_expires_at);
   const wCfg = WINDOW_CONFIG[window];
   const hasLeads = linkedLeads.length > 0;
+  const existingLeadIds = linkedLeads.map(l => l.leadEntryId);
 
   return (
     <div className="max-w-6xl mx-auto p-4 md:p-6">
@@ -348,6 +380,14 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
           </div>
         </div>
       </div>
+
+      {/* ── Action error ── */}
+      {actionError && (
+        <div className="mb-3 flex items-center gap-2 px-4 py-2.5 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl">
+          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+          {actionError}
+        </div>
+      )}
 
       {/* ── Main layout: chat + info panel ── */}
       <div className="flex flex-col lg:flex-row gap-4">
@@ -486,12 +526,21 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                           )}
                         </div>
                       </div>
+                    </div>
+                    <div className="flex items-center gap-1 mt-2">
                       <button
                         onClick={() => onViewLead(lead.leadEntryId)}
-                        className="flex-shrink-0 flex items-center gap-1 px-2 py-1 text-xs font-medium text-stone-600 hover:text-stone-900 hover:bg-stone-50 rounded-lg transition"
+                        className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-stone-600 hover:text-stone-900 hover:bg-stone-50 rounded-lg transition"
                       >
                         <ExternalLink className="w-3 h-3" />
                         View
+                      </button>
+                      <button
+                        onClick={() => { setActionError(''); setUnlinkTarget(lead); }}
+                        className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition"
+                      >
+                        <Unlink className="w-3 h-3" />
+                        Unlink
                       </button>
                     </div>
                   </div>
@@ -504,21 +553,23 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
               </div>
             )}
 
-            {/* Placeholder actions */}
+            {/* Actions */}
             <div className="mt-3 pt-3 border-t border-stone-100 space-y-2">
+              {!hasLeads && (
+                <button
+                  onClick={() => { setActionError(''); setShowCreateModal(true); }}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 text-stone-700 hover:bg-stone-50 transition"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Create Lead
+                </button>
+              )}
               <button
-                disabled
-                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-dashed border-stone-200 text-stone-400 cursor-not-allowed"
+                onClick={() => { setActionError(''); setShowLinkModal(true); }}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 text-stone-700 hover:bg-stone-50 transition"
               >
-                Create Lead
-                <span className="text-[10px] text-stone-300">(coming soon)</span>
-              </button>
-              <button
-                disabled
-                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-dashed border-stone-200 text-stone-400 cursor-not-allowed"
-              >
-                Link Existing Lead
-                <span className="text-[10px] text-stone-300">(coming soon)</span>
+                <Link2 className="w-3.5 h-3.5" />
+                {hasLeads ? 'Link Another Lead' : 'Link Existing Lead'}
               </button>
             </div>
           </div>
@@ -544,6 +595,66 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
           </div>
         </div>
       </div>
+
+      {/* ── Link Existing Lead Modal ── */}
+      {showLinkModal && (
+        <LinkExistingLeadModal
+          conversationId={conversationId}
+          existingLeadIds={existingLeadIds}
+          onClose={() => setShowLinkModal(false)}
+          onLinked={() => refreshLinkedLeads()}
+        />
+      )}
+
+      {/* ── Create Lead Modal ── */}
+      {showCreateModal && (
+        <CreateLeadModal
+          conversationId={conversationId}
+          waPhoneNumber={conversation.wa_phone_number}
+          onClose={() => setShowCreateModal(false)}
+          onCreated={() => refreshLinkedLeads()}
+        />
+      )}
+
+      {/* ── Unlink Confirmation Modal ── */}
+      {unlinkTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm">
+            <div className="px-5 py-4 border-b border-stone-100">
+              <h3 className="text-base font-semibold text-stone-800">Unlink Lead</h3>
+            </div>
+            <div className="px-5 py-4">
+              <p className="text-sm text-stone-600">
+                Are you sure you want to unlink{' '}
+                <span className="font-medium text-stone-800">
+                  {unlinkTarget.clientName || 'this lead'}
+                </span>{' '}
+                from this conversation?
+              </p>
+              <p className="text-xs text-stone-400 mt-2">
+                This only removes the link. The lead itself and all messages remain unchanged.
+              </p>
+            </div>
+            <div className="px-5 py-3 border-t border-stone-100 flex justify-end gap-2">
+              <button
+                onClick={() => setUnlinkTarget(null)}
+                disabled={unlinking}
+                className="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg transition disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleUnlink}
+                disabled={unlinking}
+                className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg transition disabled:opacity-50"
+              >
+                {unlinking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Unlink className="w-3.5 h-3.5" />}
+                Unlink
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
