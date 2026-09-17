@@ -7,6 +7,7 @@ import {
   CheckCheck, Check, X, Circle, Plus, Unlink,
 } from 'lucide-react';
 import { formatDateTime } from './utils/dateFormat';
+import { getAuthIdentity } from './capture/captureAuth';
 import LinkExistingLeadModal from './LinkExistingLeadModal';
 import CreateLeadModal from './CreateLeadModal';
 
@@ -52,6 +53,7 @@ interface Props {
   conversationId: string;
   onBack: () => void;
   onViewLead: (leadId: string) => void;
+  onUnreadCleared?: () => void;
 }
 
 // ── Service window helpers ────────────────────────────────────────────────────
@@ -126,7 +128,7 @@ function getMediaLabel(msg: ChatMessage): string {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function ConversationDetailPage({ conversationId, onBack, onViewLead }: Props) {
+export default function ConversationDetailPage({ conversationId, onBack, onViewLead, onUnreadCleared }: Props) {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [linkedLeads, setLinkedLeads] = useState<LinkedLead[]>([]);
@@ -205,6 +207,29 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
       setConversation(convData as Conversation);
 
+      // ── Mark conversation as read if it has unread messages ──
+      const conv = convData as Conversation;
+      if (conv.unread_count > 0) {
+        try {
+          const identity = await getAuthIdentity();
+          const readBy = identity?.repCode ?? null;
+          const { error: markErr } = await supabase.rpc('mark_conversation_read', {
+            p_conversation_id: conversationId,
+            p_read_by: readBy,
+          });
+          if (markErr) {
+            console.warn('[ConversationDetail] mark_conversation_read failed:', markErr.message);
+          } else {
+            // Update local state immediately
+            setConversation({ ...conv, unread_count: 0 });
+            // Notify parent so the list can refresh
+            onUnreadCleared?.();
+          }
+        } catch (err) {
+          console.warn('[ConversationDetail] mark_conversation_read error:', err);
+        }
+      }
+
       // ── Fetch messages (chronological) ──
       const { data: msgData, error: msgErr } = await supabase
         .from('whatsapp_messages')
@@ -236,7 +261,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
     load();
     return () => { cancelled = true; };
-  }, [conversationId, refreshLinkedLeads]);
+  }, [conversationId, refreshLinkedLeads, onUnreadCleared]);
 
   // Auto-scroll to bottom on messages load
   useEffect(() => {

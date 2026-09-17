@@ -310,6 +310,7 @@ function Layout() {
   });
   const [selectedLeadId,     setSelectedLeadId]     = useState<string | null>(initialLeadId);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [conversationsRefreshKey, setConversationsRefreshKey] = useState(0);
   const [leadsEventFilter,   setLeadsEventFilter]   = useState<string | undefined>(undefined);
   const [leadsInitialFilters,setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
@@ -350,6 +351,7 @@ function Layout() {
 
   function handleBackFromConversation() {
     setSelectedConversationId(null);
+    setConversationsRefreshKey(k => k + 1);
   }
 
   function handleSelectConversation(id: string) {
@@ -561,13 +563,17 @@ function Layout() {
               />
             )}
             {tab === 'conversations' && !selectedLeadId && !selectedConversationId && (
-              <ConversationsPage onSelectConversation={handleSelectConversation} />
+              <ConversationsPage
+                key={`conv-${conversationsRefreshKey}`}
+                onSelectConversation={handleSelectConversation}
+              />
             )}
             {tab === 'conversations' && !selectedLeadId && selectedConversationId && (
               <ConversationDetailPage
                 conversationId={selectedConversationId}
                 onBack={handleBackFromConversation}
                 onViewLead={handleViewLeadFromConversation}
+                onUnreadCleared={() => setConversationsRefreshKey(k => k + 1)}
               />
             )}
             {tab === 'leads' && !selectedLeadId && (
