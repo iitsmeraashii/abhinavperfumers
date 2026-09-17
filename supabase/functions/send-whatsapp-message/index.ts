@@ -7,55 +7,11 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+const GRAPH_API_VERSION = "v25.0";
+
 interface SendRequestBody {
   conversation_id: string;
-  to_phone?: string;
   text_body: string;
-}
-
-interface MetaPhoneNumber {
-  id: string;
-  display_phone_number?: string;
-}
-
-interface MetaPhoneNumbersResponse {
-  data?: MetaPhoneNumber[];
-}
-
-function normalizePhone(phone: string | null | undefined): string {
-  return (phone ?? '').replace(/\\D/g, '');
-}
-
-async function resolvePhoneNumberId(
-  token: string,
-  wabaId: string,
-  configuredPhoneNumberId: string | undefined,
-  businessPhone: string | null,
-): Promise<string> {
-  if (configuredPhoneNumberId && configuredPhoneNumberId !== wabaId) {
-    return configuredPhoneNumberId;
-  }
-
-  const response = await fetch(
-    `https://graph.facebook.com/v21.0/${wabaId}/phone_numbers?fields=id,display_phone_number&limit=100`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  );
-  const payload = await response.json() as MetaPhoneNumbersResponse & { error?: { message?: string } };
-
-  if (!response.ok) {
-    throw new Error(payload.error?.message || `Unable to load WhatsApp phone numbers (${response.status})`);
-  }
-
-  const phoneNumbers = payload.data ?? [];
-  const normalizedBusinessPhone = normalizePhone(businessPhone);
-  const matchingPhone = phoneNumbers.find(
-    (phone) => normalizedBusinessPhone && normalizePhone(phone.display_phone_number) === normalizedBusinessPhone,
-  );
-
-  if (matchingPhone?.id) return matchingPhone.id;
-  if (phoneNumbers.length === 1 && phoneNumbers[0].id) return phoneNumbers[0].id;
-
-  throw new Error('Unable to identify the configured WhatsApp phone number.');
 }
 
 Deno.serve(async (req: Request) => {
@@ -73,7 +29,6 @@ Deno.serve(async (req: Request) => {
   try {
     const token = Deno.env.get("META_ACCESS_TOKEN");
     const wabaId = Deno.env.get("META_WABA_ID");
-    const configuredPhoneNumberId = Deno.env.get("META_PHONE_NUMBER_ID");
 
     if (!token || !wabaId) {
       return new Response(
@@ -97,6 +52,7 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
+    // ── Load conversation ──
     const { data: conversation, error: conversationError } = await supabase
       .from("whatsapp_conversations")
       .select("wa_phone_number, customer_service_window_expires_at")
@@ -110,6 +66,7 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // ── Enforce service window server-side ──
     const expiresAt = conversation.customer_service_window_expires_at
       ? new Date(conversation.customer_service_window_expires_at).getTime()
       : 0;
@@ -121,6 +78,56 @@ Deno.serve(async (req: Request) => {
     }
 
     const toPhone = conversation.wa_phone_number;
+
+    // ── Resolve sender phone number ID ──
+    // Priority: runtime_configuration.whatsapp_phone_number_id > META_PHONE_NUMBER_ID (if valid) > query Meta API
+    let phoneNumberId: string | null = null;
+
+    const { data: runtimeConfig } = await supabase
+      .from("runtime_configuration")
+      .select("whatsapp_phone_number_id")
+      .eq("id", 1)
+      .maybeSingle();
+
+    if (runtimeConfig?.whatsapp_phone_number_id) {
+      phoneNumberId = runtimeConfig.whatsapp_phone_number_id;
+    }
+
+    if (!phoneNumberId) {
+      const envPhoneNumberId = Deno.env.get("META_PHONE_NUMBER_ID");
+      // Use env var only if it differs from the WABA ID (which is a common misconfiguration)
+      if (envPhoneNumberId && envPhoneNumberId !== wabaId) {
+        phoneNumberId = envPhoneNumberId;
+      }
+    }
+
+    if (!phoneNumberId) {
+      // Fall back to querying the Meta API for phone numbers on the WABA
+      const phoneResp = await fetch(
+        `https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/phone_numbers?fields=id,display_phone_number&limit=100`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      const phoneData = await phoneResp.json() as
+        { data?: { id: string; display_phone_number?: string }[]; error?: { message?: string } };
+
+      if (!phoneResp.ok) {
+        throw new Error(phoneData.error?.message || "Unable to resolve WhatsApp phone number ID");
+      }
+
+      const phones = phoneData.data ?? [];
+      if (phones.length >= 1 && phones[0]?.id) {
+        phoneNumberId = phones[0].id;
+      }
+    }
+
+    if (!phoneNumberId) {
+      return new Response(
+        JSON.stringify({ error: "Unable to resolve the WhatsApp phone number ID for sending." }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // ── Resolve from_phone for the database record ──
     let fromPhone = Deno.env.get("META_BUSINESS_PHONE_NUMBER");
 
     if (!fromPhone) {
@@ -136,21 +143,14 @@ Deno.serve(async (req: Request) => {
       fromPhone = lastOutbound?.from_phone ?? null;
     }
 
-    const phoneNumberId = await resolvePhoneNumberId(
-      token,
-      wabaId,
-      configuredPhoneNumberId,
-      fromPhone,
-    );
-
     // ── Call Meta WhatsApp Cloud API ──
-    const metaUrl = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
+    const metaUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
     const metaBody = {
       messaging_product: "whatsapp",
       recipient_type: "individual",
       to: toPhone,
       type: "text",
-      text: { body: text_body },
+      text: { preview_url: false, body: text_body },
     };
 
     const metaResp = await fetch(metaUrl, {

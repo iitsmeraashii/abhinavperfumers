@@ -40,6 +40,16 @@ interface ChatMessage {
   timestamp: string | null;
   status: string | null;
   template_name: string | null;
+  error_code: number | null;
+  error_message: string | null;
+}
+
+function normalizeChatMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    direction: message.direction.toLowerCase(),
+    message_type: message.message_type.toLowerCase(),
+  };
 }
 
 interface LinkedLead {
@@ -343,7 +353,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
         .select(`
           id, direction, message_type, text_body,
           media_filename, media_mime_type, media_caption, media_url,
-          timestamp, status, template_name
+          timestamp, status, template_name,
+          error_code, error_message
         `)
         .eq('conversation_id', conversationId)
         .order('timestamp', { ascending: true })
@@ -357,7 +368,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
         return;
       }
 
-      setMessages((msgData ?? []) as ChatMessage[]);
+      setMessages((msgData ?? []).map(message => normalizeChatMessage(message as ChatMessage)));
 
       await refreshLinkedLeads();
 
@@ -374,6 +385,29 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // ── Poll for status updates from the webhook (every 10s) ──
+  useEffect(() => {
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      if (cancelled) return;
+      const { data: msgData } = await supabase
+        .from('whatsapp_messages')
+        .select(`
+          id, direction, message_type, text_body,
+          media_filename, media_mime_type, media_caption, media_url,
+          timestamp, status, template_name,
+          error_code, error_message
+        `)
+        .eq('conversation_id', conversationId)
+        .order('timestamp', { ascending: true })
+        .limit(500);
+      if (!cancelled && msgData) {
+        setMessages(msgData.map(message => normalizeChatMessage(message as ChatMessage)));
+      }
+    }, 10000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [conversationId]);
 
   async function handleSend() {
     const text = draftText.trim();
@@ -412,14 +446,15 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
         .select(`
           id, direction, message_type, text_body,
           media_filename, media_mime_type, media_caption, media_url,
-          timestamp, status, template_name
+          timestamp, status, template_name,
+          error_code, error_message
         `)
         .eq('conversation_id', conversationId)
         .order('timestamp', { ascending: true })
         .limit(500);
 
       if (msgData) {
-        setMessages(msgData as ChatMessage[]);
+        setMessages(msgData.map(message => normalizeChatMessage(message as ChatMessage)));
       }
 
       // Update conversation timestamps locally
@@ -681,6 +716,16 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                                   {msg.media_caption}
                                 </p>
                               )}
+                            </div>
+                          )}
+
+                          {/* Failed message error detail */}
+                          {(!isInbound && deriveOutboundStatus(msg) === 'failed' && msg.error_message) && (
+                            <div className="mt-1.5 px-2 py-1 rounded-lg bg-red-500/10 border border-red-500/20 text-[11px] text-red-300">
+                              {msg.error_code != null && (
+                                <span className="font-mono font-medium">[{msg.error_code}] </span>
+                              )}
+                              {msg.error_message}
                             </div>
                           )}
 
