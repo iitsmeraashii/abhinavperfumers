@@ -249,10 +249,12 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
   const [draftText, setDraftText] = useState('');
   const [sending, setSending] = useState(false);
-  const [sendNotice, setSendNotice] = useState('');
+  const [sendError, setSendError] = useState('');
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const onUnreadClearedRef = useRef(onUnreadCleared);
+  onUnreadClearedRef.current = onUnreadCleared;
 
   const refreshLinkedLeads = useCallback(async () => {
     const { data: bridgeData } = await supabase
@@ -329,7 +331,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
             console.warn('[ConversationDetail] mark_conversation_read failed:', markErr.message);
           } else {
             setConversation({ ...conv, unread_count: 0 });
-            onUnreadCleared?.();
+            onUnreadClearedRef.current?.();
           }
         } catch (err) {
           console.warn('[ConversationDetail] mark_conversation_read error:', err);
@@ -365,7 +367,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
     load();
     return () => { cancelled = true; };
-  }, [conversationId, refreshLinkedLeads, onUnreadCleared]);
+  }, [conversationId, refreshLinkedLeads]);
 
   useEffect(() => {
     if (scrollRef.current && messages.length > 0) {
@@ -373,19 +375,68 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
     }
   }, [messages]);
 
-  function handleSend() {
+  async function handleSend() {
     const text = draftText.trim();
     if (!text || sending) return;
     setSending(true);
-    setSendNotice('');
-    // Placeholder — no API call, no database write
-    setTimeout(() => {
-      setSending(false);
+    setSendError('');
+
+    try {
+      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-whatsapp-message`;
+      const resp = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({
+          conversation_id: conversationId,
+          to_phone: conversation.wa_phone_number,
+          text_body: text,
+        }),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok || !data.success) {
+        setSendError(data.error || `Send failed (${resp.status})`);
+        return;
+      }
+
+      // Success — clear draft and reload messages
       setDraftText('');
-      setSendNotice('Sending will be connected in a later step. Your message was not sent.');
-      // Refocus textarea
+      setSendError('');
+
+      // Reload messages from the database so the real outbound row appears
+      const { data: msgData } = await supabase
+        .from('whatsapp_messages')
+        .select(`
+          id, direction, message_type, text_body,
+          media_filename, media_mime_type, media_caption, media_url,
+          timestamp, status, template_name
+        `)
+        .eq('conversation_id', conversationId)
+        .order('timestamp', { ascending: true })
+        .limit(500);
+
+      if (msgData) {
+        setMessages(msgData as ChatMessage[]);
+      }
+
+      // Update conversation timestamps locally
+      const nowIso = new Date().toISOString();
+      setConversation(prev => prev ? {
+        ...prev,
+        last_message_at: nowIso,
+        last_outbound_at: nowIso,
+      } : prev);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to send message';
+      setSendError(msg);
+    } finally {
+      setSending(false);
       requestAnimationFrame(() => textareaRef.current?.focus());
-    }, 600);
+    }
   }
 
   async function handleUnlink() {
@@ -654,11 +705,11 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
           {/* ── Composer ── */}
           <div className="border-t border-stone-100 px-3 md:px-4 py-3 bg-stone-50">
-            {/* Temporary send notice */}
-            {sendNotice && (
-              <div className="mb-2 flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg">
-                <Clock className="w-3 h-3 flex-shrink-0" />
-                {sendNotice}
+            {/* Send error */}
+            {sendError && (
+              <div className="mb-2 flex items-center gap-1.5 px-3 py-1.5 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">
+                <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                {sendError}
               </div>
             )}
 

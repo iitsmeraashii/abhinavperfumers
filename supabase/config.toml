@@ -6,3 +6,6 @@ verify_jwt = true
 
 [functions.fetch-whatsapp-templates]
 verify_jwt = true
+
+[functions.send-whatsapp-message]
+verify_jwt = true
