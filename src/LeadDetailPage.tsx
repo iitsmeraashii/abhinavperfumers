@@ -1474,7 +1474,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
               const openConversationBtn = onOpenConversation && waConversationId && (
                 <button
                   onClick={() => onOpenConversation(waConversationId)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
                 >
                   <MessageCircle className="w-3.5 h-3.5" />
                   Open Conversation
@@ -1484,7 +1484,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
               const replyBtn = onOpenConversation && waConversationId && canReply && (
                 <button
                   onClick={() => onOpenConversation(waConversationId)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 transition"
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 transition"
                 >
                   <Send className="w-3.5 h-3.5" />
                   Reply
@@ -1492,17 +1492,17 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
               );
 
               return (
-                <div className="py-3">
+                <div className="py-3 space-y-3">
                   {/* Status badges */}
                   {waCardState === 'unread_reply' ? (
-                    <div className="flex items-center gap-2 mb-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500 text-white">
                         <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
                         New customer message
                       </span>
                     </div>
                   ) : waCardState === 'customer_replied' ? (
-                    <div className="flex items-center gap-2 mb-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
                         <Check className="w-3 h-3" />
                         Reached
@@ -1512,14 +1512,14 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                       </span>
                     </div>
                   ) : waCardState === 'reached' ? (
-                    <div className="flex items-center gap-2 mb-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
                         <Check className="w-3 h-3" />
                         Reached
                       </span>
                     </div>
                   ) : waCardState === 'connected' ? (
-                    <div className="flex items-center gap-2 mb-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
                         <Check className="w-3 h-3" />
                         Connected
@@ -1531,39 +1531,41 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                   {waCardState === 'unread_reply' ? (
                     <>
                       {waLastMessagePreview && (
-                        <p className="text-sm text-stone-700 truncate mb-1.5 max-w-full">
+                        <p className="rounded-lg bg-stone-50 px-3 py-2 text-sm leading-5 text-stone-700 truncate max-w-full">
                           {waLastMessagePreview}
                         </p>
                       )}
                       {waLastMessageTime && (
-                        <p className="text-xs text-stone-400 mb-1">{formatDateTime(waLastMessageTime)}</p>
+                        <p className="text-xs text-stone-400">{formatDateTime(waLastMessageTime)}</p>
                       )}
                     </>
                   ) : waCardState === 'customer_replied' ? (
                     <>
                       {waLastMessageTime && (
-                        <p className="text-xs text-stone-400 mb-1">Last message {formatDateTime(waLastMessageTime)}</p>
+                        <p className="text-xs text-stone-500"><span className="text-stone-400">Last message</span><span className="mx-1.5 text-stone-300">·</span>{formatDateTime(waLastMessageTime)}</p>
                       )}
                     </>
                   ) : waCardState === 'reached' ? (
                     <>
                       {waLastActivity && (
-                        <p className="text-xs text-stone-400 mb-1">Last activity {formatDateTime(waLastActivity)}</p>
+                        <p className="text-xs text-stone-500"><span className="text-stone-400">Last activity</span><span className="mx-1.5 text-stone-300">·</span>{formatDateTime(waLastActivity)}</p>
                       )}
                     </>
                   ) : waCardState === 'connected' ? (
-                    <p className="text-sm text-stone-500 mb-1">No outbound message has been confirmed delivered.</p>
+                    <p className="text-sm leading-5 text-stone-500">No outbound message has been confirmed delivered.</p>
                   ) : null}
 
                   {/* Service window line */}
-                  <div className="flex items-center gap-1.5 mb-3">
-                    <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-medium ${windowBadgeCls}`}>
-                      Reply window: {windowLabel}
+                  <div className="flex items-center justify-between gap-3 border-t border-stone-100 pt-3">
+                    <span className="text-xs text-stone-400">Reply window</span>
+                    <span className={`text-xs font-medium text-right ${windowState === 'open' ? 'text-green-700' : 'text-stone-500'}`}>
+                      {windowState === 'open' ? 'Open until' : windowState === 'expired' ? 'Expired' : 'No window'}
+                      {windowState !== 'none' && <span className="text-stone-400 font-normal"> · {windowLabel.replace(/^(Open until|Expired)\s*/, '')}</span>}
                     </span>
                   </div>
 
                   {/* Actions */}
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 pt-1">
                     {waCardState === 'unread_reply' ? (
                       canReply ? replyBtn : openConversationBtn
                     ) : (
