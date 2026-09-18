@@ -417,6 +417,10 @@ async function sendAssetMessage(opts: {
     mediaObj.caption = asset.share_message;
   }
 
+  if (mediaType === "document") {
+    mediaObj.filename = asset.file_name;
+  }
+
   const metaBody = {
     messaging_product: "whatsapp",
     recipient_type: "individual",

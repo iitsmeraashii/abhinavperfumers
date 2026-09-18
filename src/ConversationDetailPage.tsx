@@ -748,8 +748,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                                 </div>
                               )}
 
-                              {/* Caption under media */}
-                              {msg.media_caption && (
+                              {/* Caption under image media only */}
+                              {msg.message_type === 'image' && msg.media_caption && (
                                 <p className={`text-sm whitespace-pre-wrap break-words ${
                                   isInbound ? 'text-stone-700' : 'text-stone-200'
                                 }`}>
