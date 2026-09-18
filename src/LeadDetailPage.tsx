@@ -519,6 +519,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
   const [waLastActivity, setWaLastActivity] = useState<string | null>(null);
   const [waLastMessagePreview, setWaLastMessagePreview] = useState<string | null>(null);
   const [waLastMessageTime, setWaLastMessageTime] = useState<string | null>(null);
+  const [waWindowExpiresAt, setWaWindowExpiresAt] = useState<string | null>(null);
 
   // Activity log refresh — incremented to force ActivityLog remount after mutations
   const [activityRefreshKey, setActivityRefreshKey] = useState(0);
@@ -728,6 +729,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
   }, [leadId, user]);
 
   // ── WhatsApp card: load conversation state for this lead ──
+  // State precedence: OPTED_OUT > UNREAD_REPLY > CUSTOMER_REPLIED > REACHED > CONNECTED > NO_CONVERSATION
   useEffect(() => {
     if (!lead) return;
     let cancelled = false;
@@ -738,14 +740,15 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
       setWaLastActivity(null);
       setWaLastMessagePreview(null);
       setWaLastMessageTime(null);
+      setWaWindowExpiresAt(null);
 
-      // Check opt-out first
+      // A. OPTED_OUT — highest priority, suppresses everything
       if (lead.whatsapp_opt_out) {
         if (!cancelled) setWaCardState('opted_out');
         return;
       }
 
-      // Find conversation via the bridge table (lead → conversation)
+      // Find conversation via the bridge table only (no phone-number fallback)
       const { data: bridgeRows } = await supabase
         .from('whatsapp_conversation_leads')
         .select('conversation_id')
@@ -753,22 +756,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
         .order('created_at', { ascending: false })
         .limit(1);
 
-      let conversationId: string | null = bridgeRows?.[0]?.conversation_id ?? null;
-
-      // Fallback: match by phone number if no bridge relationship exists
-      if (!conversationId) {
-        const normalizedPhone = formatWhatsAppNumber(lead.phones?.[0] ?? '');
-        if (normalizedPhone) {
-          const { data: convByPhone } = await supabase
-            .from('whatsapp_conversations')
-            .select('id')
-            .eq('wa_phone_number', normalizedPhone)
-            .order('last_message_at', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          conversationId = convByPhone?.id ?? null;
-        }
-      }
+      const conversationId: string | null = bridgeRows?.[0]?.conversation_id ?? null;
 
       if (!conversationId) {
         if (!cancelled) setWaCardState('no_conversation');
@@ -778,10 +766,10 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
       if (cancelled) return;
       setWaConversationId(conversationId);
 
-      // Load conversation details
+      // Load conversation details including service window
       const { data: conversation } = await supabase
         .from('whatsapp_conversations')
-        .select('unread_count, last_message_at')
+        .select('unread_count, last_message_at, customer_service_window_expires_at')
         .eq('id', conversationId)
         .maybeSingle();
 
@@ -789,6 +777,8 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
         setWaCardState('connected');
         return;
       }
+
+      setWaWindowExpiresAt(conversation.customer_service_window_expires_at ?? null);
 
       // Load messages to determine reached / customer_replied / unread
       const { data: messages } = await supabase
@@ -820,6 +810,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
       setWaLastMessagePreview(lastInbound?.text_body ?? null);
       setWaLastMessageTime(lastInbound?.timestamp ?? lastMsg?.timestamp ?? null);
 
+      // State precedence: UNREAD_REPLY > CUSTOMER_REPLIED > REACHED > CONNECTED
       if (hasUnread && hasInbound) {
         setWaCardState('unread_reply');
       } else if (hasInbound) {
@@ -1401,6 +1392,12 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
               </div>
             ) : waCardState === 'no_conversation' ? (
               <div className="py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-stone-100 text-stone-500">
+                    <span className="w-1.5 h-1.5 rounded-full bg-stone-400" />
+                    Not connected
+                  </span>
+                </div>
                 <p className="text-sm text-stone-500 mb-3">No WhatsApp conversation exists for this number.</p>
                 <a
                   href={`https://wa.me/${formatWhatsAppNumber(lead.phones?.[0] ?? '') ?? ''}`}
@@ -1412,97 +1409,152 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                   Send WhatsApp
                 </a>
               </div>
-            ) : waCardState === 'connected' ? (
-              <div className="py-3">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
-                    <Check className="w-3 h-3" />
-                    Connected
-                  </span>
+            ) : (() => {
+              // ── Service window computation for linked conversations ──
+              const windowState: 'open' | 'expired' | 'none' = (() => {
+                if (!waWindowExpiresAt) return 'none';
+                const normalized = /[Zz]$/.test(waWindowExpiresAt) || /[+-]\d{2}:?\d{2}$/.test(waWindowExpiresAt)
+                  ? waWindowExpiresAt
+                  : waWindowExpiresAt.replace(' ', 'T') + 'Z';
+                const diff = new Date(normalized).getTime() - Date.now();
+                return diff > 0 ? 'open' : 'expired';
+              })();
+
+              const windowLabel = windowState === 'open'
+                ? (() => {
+                    const normalized = /[Zz]$/.test(waWindowExpiresAt!) || /[+-]\d{2}:?\d{2}$/.test(waWindowExpiresAt!)
+                      ? waWindowExpiresAt!
+                      : waWindowExpiresAt!.replace(' ', 'T') + 'Z';
+                    const diff = new Date(normalized).getTime() - Date.now();
+                    const hours = Math.floor(diff / (60 * 60 * 1000));
+                    const minutes = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000));
+                    const expiresAt = formatDateTime(waWindowExpiresAt);
+                    const remaining = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+                    return `Open until ${expiresAt} · Expires in ${remaining}`;
+                  })()
+                : windowState === 'expired'
+                  ? (() => {
+                      const normalized = /[Zz]$/.test(waWindowExpiresAt!) || /[+-]\d{2}:?\d{2}$/.test(waWindowExpiresAt!)
+                        ? waWindowExpiresAt!
+                        : waWindowExpiresAt!.replace(' ', 'T') + 'Z';
+                      const diff = Date.now() - new Date(normalized).getTime();
+                      const hours = Math.floor(diff / (60 * 60 * 1000));
+                      const minutes = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000));
+                      const ago = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+                      return `Expired ${ago} ago`;
+                    })()
+                  : 'No window';
+
+              const windowBadgeCls = windowState === 'open'
+                ? 'bg-green-100 text-green-700'
+                : windowState === 'expired'
+                  ? 'bg-stone-100 text-stone-500'
+                  : 'bg-stone-100 text-stone-400';
+
+              const canReply = windowState === 'open';
+
+              const openConversationBtn = onOpenConversation && waConversationId && (
+                <button
+                  onClick={() => onOpenConversation(waConversationId)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" />
+                  Open Conversation
+                </button>
+              );
+
+              const replyBtn = onOpenConversation && waConversationId && canReply && (
+                <button
+                  onClick={() => onOpenConversation(waConversationId)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 transition"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Reply
+                </button>
+              );
+
+              return (
+                <div className="py-3">
+                  {/* Status badges */}
+                  {waCardState === 'unread_reply' ? (
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500 text-white">
+                        <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                        New customer message
+                      </span>
+                    </div>
+                  ) : waCardState === 'customer_replied' ? (
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                        <Check className="w-3 h-3" />
+                        Reached
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-blue-600 text-white">
+                        Customer replied
+                      </span>
+                    </div>
+                  ) : waCardState === 'reached' ? (
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                        <Check className="w-3 h-3" />
+                        Reached
+                      </span>
+                    </div>
+                  ) : waCardState === 'connected' ? (
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
+                        <Check className="w-3 h-3" />
+                        Connected
+                      </span>
+                    </div>
+                  ) : null}
+
+                  {/* State-specific detail */}
+                  {waCardState === 'unread_reply' ? (
+                    <>
+                      {waLastMessagePreview && (
+                        <p className="text-sm text-stone-700 truncate mb-1.5 max-w-full">
+                          {waLastMessagePreview}
+                        </p>
+                      )}
+                      {waLastMessageTime && (
+                        <p className="text-xs text-stone-400 mb-1">{formatDateTime(waLastMessageTime)}</p>
+                      )}
+                    </>
+                  ) : waCardState === 'customer_replied' ? (
+                    <>
+                      {waLastMessageTime && (
+                        <p className="text-xs text-stone-400 mb-1">Last message {formatDateTime(waLastMessageTime)}</p>
+                      )}
+                    </>
+                  ) : waCardState === 'reached' ? (
+                    <>
+                      {waLastActivity && (
+                        <p className="text-xs text-stone-400 mb-1">Last activity {formatDateTime(waLastActivity)}</p>
+                      )}
+                    </>
+                  ) : waCardState === 'connected' ? (
+                    <p className="text-sm text-stone-500 mb-1">No outbound message has been confirmed delivered.</p>
+                  ) : null}
+
+                  {/* Service window line */}
+                  <div className="flex items-center gap-1.5 mb-3">
+                    <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-medium ${windowBadgeCls}`}>
+                      Reply window: {windowLabel}
+                    </span>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-2">
+                    {waCardState === 'unread_reply' ? (
+                      canReply ? replyBtn : openConversationBtn
+                    ) : (
+                      openConversationBtn
+                    )}
+                  </div>
                 </div>
-                <p className="text-sm text-stone-500 mb-3">No outbound message has been confirmed delivered.</p>
-                {onOpenConversation && waConversationId && (
-                  <button
-                    onClick={() => onOpenConversation(waConversationId)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
-                  >
-                    <MessageCircle className="w-3.5 h-3.5" />
-                    Open Conversation
-                  </button>
-                )}
-              </div>
-            ) : waCardState === 'reached' ? (
-              <div className="py-3">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
-                    <Check className="w-3 h-3" />
-                    Reached
-                  </span>
-                </div>
-                {waLastActivity && (
-                  <p className="text-xs text-stone-400 mb-3">Last activity {formatDateTime(waLastActivity)}</p>
-                )}
-                {onOpenConversation && waConversationId && (
-                  <button
-                    onClick={() => onOpenConversation(waConversationId)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
-                  >
-                    <MessageCircle className="w-3.5 h-3.5" />
-                    Open Conversation
-                  </button>
-                )}
-              </div>
-            ) : waCardState === 'customer_replied' ? (
-              <div className="py-3">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">
-                    <Check className="w-3 h-3" />
-                    Reached
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-blue-600 text-white">
-                    Customer replied
-                  </span>
-                </div>
-                {waLastMessageTime && (
-                  <p className="text-xs text-stone-400 mb-3">Last message {formatDateTime(waLastMessageTime)}</p>
-                )}
-                {onOpenConversation && waConversationId && (
-                  <button
-                    onClick={() => onOpenConversation(waConversationId)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
-                  >
-                    <MessageCircle className="w-3.5 h-3.5" />
-                    Open Conversation
-                  </button>
-                )}
-              </div>
-            ) : waCardState === 'unread_reply' ? (
-              <div className="py-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500 text-white">
-                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
-                    New customer message
-                  </span>
-                </div>
-                {waLastMessagePreview && (
-                  <p className="text-sm text-stone-700 truncate mb-1.5 max-w-full">
-                    {waLastMessagePreview}
-                  </p>
-                )}
-                {waLastMessageTime && (
-                  <p className="text-xs text-stone-400 mb-3">{formatDateTime(waLastMessageTime)}</p>
-                )}
-                {onOpenConversation && waConversationId && (
-                  <button
-                    onClick={() => onOpenConversation(waConversationId)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 transition"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    Reply
-                  </button>
-                )}
-              </div>
-            ) : null}
+              );
+            })()}
           </Card>
 
           {/* Business Details */}
