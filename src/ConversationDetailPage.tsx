@@ -18,6 +18,7 @@ import CreateLeadModal from './CreateLeadModal';
 interface Conversation {
   id: string;
   conversation_code: string | null;
+  profile_name: string | null;
   wa_phone_number: string;
   status: string;
   last_message_at: string | null;
@@ -313,7 +314,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       const { data: convData, error: convErr } = await supabase
         .from('whatsapp_conversations')
         .select(`
-          id, conversation_code, wa_phone_number, status,
+          id, conversation_code, profile_name, wa_phone_number, status,
           last_message_at, last_inbound_at, last_outbound_at,
           customer_service_window_expires_at, unread_count,
           created_at, updated_at
@@ -577,8 +578,13 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <h1 className="text-base font-semibold text-stone-800 truncate">
-                  {conversation.wa_phone_number}
+                  {conversation.profile_name?.trim() || conversation.wa_phone_number}
                 </h1>
+                {conversation.profile_name?.trim() && (
+                  <span className="text-sm text-stone-500 truncate">
+                    {conversation.wa_phone_number}
+                  </span>
+                )}
                 {conversation.conversation_code && (
                   <span className="text-xs text-stone-400 font-mono px-1.5 py-0.5 bg-stone-50 rounded">
                     {conversation.conversation_code}
