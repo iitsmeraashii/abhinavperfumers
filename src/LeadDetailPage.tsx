@@ -520,6 +520,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
   const [waLastMessagePreview, setWaLastMessagePreview] = useState<string | null>(null);
   const [waLastMessageTime, setWaLastMessageTime] = useState<string | null>(null);
   const [waWindowExpiresAt, setWaWindowExpiresAt] = useState<string | null>(null);
+  const [waSharedLeadCount, setWaSharedLeadCount] = useState<number | null>(null);
 
   // Activity log refresh — incremented to force ActivityLog remount after mutations
   const [activityRefreshKey, setActivityRefreshKey] = useState(0);
@@ -742,6 +743,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
       setWaLastMessagePreview(null);
       setWaLastMessageTime(null);
       setWaWindowExpiresAt(null);
+      setWaSharedLeadCount(null);
 
       // A. OPTED_OUT — highest priority, suppresses everything
       if (lead.whatsapp_opt_out) {
@@ -769,9 +771,6 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
             .eq('wa_phone_number', normalizedPhone)
             .order('last_message_at', { ascending: false })
             .limit(1);
-          // Safe handling: if multiple conversations match, use the most recent.
-          // The card displays a single conversation; the conversation detail page
-          // remains the source of full multi-conversation context.
           conversationId = convByPhone?.[0]?.id ?? null;
         }
       }
@@ -798,7 +797,15 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
 
       setWaWindowExpiresAt(conversation.customer_service_window_expires_at ?? null);
 
-      // Load messages to determine reached / customer_replied / unread
+      // Count how many leads are linked to this conversation (for "Shared conversation" indicator)
+      const { count: linkedLeadCount } = await supabase
+        .from('whatsapp_conversation_leads')
+        .select('lead_entry_id', { count: 'exact', head: true })
+        .eq('conversation_id', conversationId);
+
+      if (!cancelled) setWaSharedLeadCount(linkedLeadCount ?? 1);
+
+      // Load messages to determine reached / customer_replied / unread + last message preview
       const { data: messages } = await supabase
         .from('whatsapp_messages')
         .select('direction, status, text_body, timestamp')
@@ -821,12 +828,16 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
       const unreadCount = conversation.unread_count ?? 0;
       const hasUnread = unreadCount > 0;
 
+      // Last message overall (for preview) — not just inbound
       const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
       const lastInbound = hasInbound ? inboundMsgs[inboundMsgs.length - 1] : null;
 
       setWaLastActivity(conversation.last_message_at ?? lastMsg?.timestamp ?? null);
-      setWaLastMessagePreview(lastInbound?.text_body ?? null);
-      setWaLastMessageTime(lastInbound?.timestamp ?? lastMsg?.timestamp ?? null);
+
+      // Preview: use the latest message's text body, with a fallback for media/template messages
+      const previewText = lastMsg?.text_body?.trim() || null;
+      setWaLastMessagePreview(previewText ?? 'Media message');
+      setWaLastMessageTime(lastMsg?.timestamp ?? null);
 
       // State precedence: UNREAD_REPLY > CUSTOMER_REPLIED > REACHED > CONNECTED
       if (hasUnread && hasInbound) {
@@ -1496,9 +1507,13 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                   {/* Status badges */}
                   {waCardState === 'unread_reply' ? (
                     <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                        <Check className="w-3 h-3" />
+                        Reached
+                      </span>
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500 text-white">
                         <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
-                        New customer message
+                        New reply
                       </span>
                     </div>
                   ) : waCardState === 'customer_replied' ? (
@@ -1527,33 +1542,34 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                     </div>
                   ) : null}
 
-                  {/* State-specific detail */}
-                  {waCardState === 'unread_reply' ? (
-                    <>
-                      {waLastMessagePreview && (
-                        <p className="rounded-lg bg-stone-50 px-3 py-2 text-sm leading-5 text-stone-700 truncate max-w-full">
-                          {waLastMessagePreview}
+                  {/* Last message preview — shown for all linked conversation states */}
+                  {waLastMessagePreview && (
+                    <div className="space-y-1">
+                      {waLastMessageTime && (
+                        <p className="text-xs text-stone-500">
+                          <span className="text-stone-400">Last message</span>
+                          <span className="mx-1.5 text-stone-300">·</span>
+                          {formatDateTime(waLastMessageTime)}
                         </p>
                       )}
-                      {waLastMessageTime && (
-                        <p className="text-xs text-stone-400">{formatDateTime(waLastMessageTime)}</p>
-                      )}
-                    </>
-                  ) : waCardState === 'customer_replied' ? (
-                    <>
-                      {waLastMessageTime && (
-                        <p className="text-xs text-stone-500"><span className="text-stone-400">Last message</span><span className="mx-1.5 text-stone-300">·</span>{formatDateTime(waLastMessageTime)}</p>
-                      )}
-                    </>
-                  ) : waCardState === 'reached' ? (
-                    <>
-                      {waLastActivity && (
-                        <p className="text-xs text-stone-500"><span className="text-stone-400">Last activity</span><span className="mx-1.5 text-stone-300">·</span>{formatDateTime(waLastActivity)}</p>
-                      )}
-                    </>
-                  ) : waCardState === 'connected' ? (
+                      <p className="rounded-lg bg-stone-50 px-3 py-2 text-sm leading-5 text-stone-700 truncate max-w-full">
+                        {waLastMessagePreview}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* State-specific detail for connected (no last message to show) */}
+                  {waCardState === 'connected' && !waLastMessagePreview && (
                     <p className="text-sm leading-5 text-stone-500">No outbound message has been confirmed delivered.</p>
-                  ) : null}
+                  )}
+
+                  {/* Shared conversation indicator */}
+                  {waSharedLeadCount !== null && waSharedLeadCount > 1 && (
+                    <div className="flex items-center gap-1.5 text-xs text-stone-400">
+                      <Users className="w-3 h-3" />
+                      <span>Shared conversation · {waSharedLeadCount} leads</span>
+                    </div>
+                  )}
 
                   {/* Service window line */}
                   <div className="flex items-center justify-between gap-3 border-t border-stone-100 pt-3">
@@ -1563,6 +1579,11 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                       {windowState !== 'none' && <span className="text-stone-400 font-normal"> · {windowLabel.replace(/^(Open until|Expired)\s*/, '')}</span>}
                     </span>
                   </div>
+
+                  {/* Expired window hint */}
+                  {windowState === 'expired' && (
+                    <p className="text-xs text-stone-400 italic">Template message required</p>
+                  )}
 
                   {/* Actions */}
                   <div className="flex items-center gap-2 pt-1">
