@@ -828,7 +828,17 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                 </p>
                 {window === 'open' && (
                   <p className="text-xs text-stone-500 mt-0.5">
-                    {formatRemaining(conversation.customer_service_window_expires_at)}
+                    {(() => {
+                      const expiresAt = conversation.customer_service_window_expires_at;
+                      const normalized = /[Zz]$/.test(expiresAt) || /[+-]\d{2}:?\d{2}$/.test(expiresAt)
+                        ? expiresAt
+                        : expiresAt.replace(' ', 'T') + 'Z';
+                      const diff = new Date(normalized).getTime() - Date.now();
+                      if (diff <= 0) return 'expired';
+                      const hours = Math.floor(diff / (60 * 60 * 1000));
+                      const minutes = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000));
+                      return hours > 0 ? `${hours}h ${minutes}m remaining` : `${minutes}m remaining`;
+                    })()}
                   </p>
                 )}
                 {window === 'expiring' && (
