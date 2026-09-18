@@ -12,6 +12,7 @@ import { formatDateTime } from './utils/dateFormat';
 interface Conversation {
   id: string;
   conversation_code: string | null;
+  profile_name: string | null;
   wa_phone_number: string;
   status: string;
   last_message_at: string | null;
@@ -152,7 +153,7 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
     let q = supabase
       .from('whatsapp_conversations')
       .select(
-        'id, conversation_code, wa_phone_number, status, last_message_at, customer_service_window_expires_at, unread_count, created_at, updated_at',
+        'id, conversation_code, profile_name, wa_phone_number, status, last_message_at, customer_service_window_expires_at, unread_count, created_at, updated_at',
         { count: 'exact' },
       )
       .order('last_message_at', { ascending: false, nullsFirst: false })
@@ -454,8 +455,13 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-sm font-semibold text-stone-800 truncate">
-                            {conv.wa_phone_number}
+                            {conv.profile_name?.trim() || conv.wa_phone_number}
                           </span>
+                          {conv.profile_name?.trim() && (
+                            <span className="text-xs text-stone-500 truncate">
+                              {conv.wa_phone_number}
+                            </span>
+                          )}
                           {conv.conversation_code && (
                             <span className="text-xs text-stone-400 font-mono">
                               {conv.conversation_code}
