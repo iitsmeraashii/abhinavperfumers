@@ -55,6 +55,7 @@ interface LeadDetail {
   lead_status: string;
   capture_session_id: string | null;
   is_reviewed: boolean;
+  whatsapp_opt_out: boolean;
 }
 
 interface EventInfo {
@@ -115,6 +116,7 @@ interface LeadFollowUp {
 interface Props {
   leadId: string;
   onBack: () => void;
+  onOpenConversation?: (conversationId: string) => void;
 }
 
 const TEMP_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
@@ -456,7 +458,7 @@ function ReviewBanner({
   );
 }
 
-export default function LeadDetailPage({ leadId, onBack }: Props) {
+export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: Props) {
   const { user } = useAuth();
   const [lead, setLead] = useState<LeadDetail | null>(null);
   const [event, setEvent] = useState<EventInfo | null>(null);
@@ -510,6 +512,13 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
   const [showTempPrompt, setShowTempPrompt] = useState(false);
   const [tempPromptSaving, setTempPromptSaving] = useState(false);
   const [tempPromptError, setTempPromptError] = useState('');
+
+  // WhatsApp conversation card
+  const [waCardState, setWaCardState] = useState<'loading' | 'opted_out' | 'no_conversation' | 'connected' | 'reached' | 'customer_replied' | 'unread_reply'>('loading');
+  const [waConversationId, setWaConversationId] = useState<string | null>(null);
+  const [waLastActivity, setWaLastActivity] = useState<string | null>(null);
+  const [waLastMessagePreview, setWaLastMessagePreview] = useState<string | null>(null);
+  const [waLastMessageTime, setWaLastMessageTime] = useState<string | null>(null);
 
   // Activity log refresh — incremented to force ActivityLog remount after mutations
   const [activityRefreshKey, setActivityRefreshKey] = useState(0);
@@ -717,6 +726,114 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
       setLoading(false);
     })();
   }, [leadId, user]);
+
+  // ── WhatsApp card: load conversation state for this lead ──
+  useEffect(() => {
+    if (!lead) return;
+    let cancelled = false;
+
+    async function loadWhatsAppState() {
+      setWaCardState('loading');
+      setWaConversationId(null);
+      setWaLastActivity(null);
+      setWaLastMessagePreview(null);
+      setWaLastMessageTime(null);
+
+      // Check opt-out first
+      if (lead.whatsapp_opt_out) {
+        if (!cancelled) setWaCardState('opted_out');
+        return;
+      }
+
+      // Find conversation via the bridge table (lead → conversation)
+      const { data: bridgeRows } = await supabase
+        .from('whatsapp_conversation_leads')
+        .select('conversation_id')
+        .eq('lead_entry_id', leadId)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      let conversationId: string | null = bridgeRows?.[0]?.conversation_id ?? null;
+
+      // Fallback: match by phone number if no bridge relationship exists
+      if (!conversationId) {
+        const normalizedPhone = formatWhatsAppNumber(lead.phones?.[0] ?? '');
+        if (normalizedPhone) {
+          const { data: convByPhone } = await supabase
+            .from('whatsapp_conversations')
+            .select('id')
+            .eq('wa_phone_number', normalizedPhone)
+            .order('last_message_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          conversationId = convByPhone?.id ?? null;
+        }
+      }
+
+      if (!conversationId) {
+        if (!cancelled) setWaCardState('no_conversation');
+        return;
+      }
+
+      if (cancelled) return;
+      setWaConversationId(conversationId);
+
+      // Load conversation details
+      const { data: conversation } = await supabase
+        .from('whatsapp_conversations')
+        .select('unread_count, last_message_at')
+        .eq('id', conversationId)
+        .maybeSingle();
+
+      if (cancelled || !conversation) {
+        setWaCardState('connected');
+        return;
+      }
+
+      // Load messages to determine reached / customer_replied / unread
+      const { data: messages } = await supabase
+        .from('whatsapp_messages')
+        .select('direction, status, text_body, timestamp')
+        .eq('conversation_id', conversationId)
+        .order('timestamp', { ascending: true })
+        .limit(500);
+
+      if (cancelled) return;
+
+      const msgs = (messages as Array<{ direction: string; status: string; text_body: string | null; timestamp: string | null }>) ?? [];
+      const outboundMsgs = msgs.filter(m => m.direction?.toUpperCase() === 'OUTBOUND');
+      const inboundMsgs = msgs.filter(m => m.direction?.toUpperCase() === 'INBOUND');
+
+      const hasDelivered = outboundMsgs.some(m => {
+        const s = (m.status ?? '').toLowerCase();
+        return s === 'delivered' || s === 'read';
+      });
+
+      const hasInbound = inboundMsgs.length > 0;
+      const unreadCount = conversation.unread_count ?? 0;
+      const hasUnread = unreadCount > 0;
+
+      const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+      const lastInbound = hasInbound ? inboundMsgs[inboundMsgs.length - 1] : null;
+
+      setWaLastActivity(conversation.last_message_at ?? lastMsg?.timestamp ?? null);
+      setWaLastMessagePreview(lastInbound?.text_body ?? null);
+      setWaLastMessageTime(lastInbound?.timestamp ?? lastMsg?.timestamp ?? null);
+
+      if (hasUnread && hasInbound) {
+        setWaCardState('unread_reply');
+      } else if (hasInbound) {
+        setWaCardState('customer_replied');
+      } else if (hasDelivered) {
+        setWaCardState('reached');
+      } else {
+        setWaCardState('connected');
+      }
+    }
+
+    loadWhatsAppState();
+    return () => { cancelled = true; };
+  }, [leadId, lead?.whatsapp_opt_out]);
 
   function enterEdit() {
     if (!lead) return;
@@ -1264,6 +1381,128 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
                 <Row icon={<MapPin className="w-3.5 h-3.5" />} label="State" value={val(lead.state)} />
               </>
             )}
+          </Card>
+
+          {/* WhatsApp Conversation Card */}
+          <Card title="WhatsApp" icon={<MessageCircle className="w-4 h-4" />}>
+            {waCardState === 'loading' ? (
+              <div className="flex items-center justify-center py-6">
+                <Loader2 className="w-4 h-4 text-stone-400 animate-spin" />
+              </div>
+            ) : waCardState === 'opted_out' ? (
+              <div className="py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    Do not contact
+                  </span>
+                </div>
+                <p className="text-sm text-stone-500">Customer has opted out of WhatsApp communication.</p>
+              </div>
+            ) : waCardState === 'no_conversation' ? (
+              <div className="py-3">
+                <p className="text-sm text-stone-500 mb-3">No WhatsApp conversation exists for this number.</p>
+                <a
+                  href={`https://wa.me/${formatWhatsAppNumber(lead.phones?.[0] ?? '') ?? ''}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Send WhatsApp
+                </a>
+              </div>
+            ) : waCardState === 'connected' ? (
+              <div className="py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
+                    <Check className="w-3 h-3" />
+                    Connected
+                  </span>
+                </div>
+                <p className="text-sm text-stone-500 mb-3">No outbound message has been confirmed delivered.</p>
+                {onOpenConversation && waConversationId && (
+                  <button
+                    onClick={() => onOpenConversation(waConversationId)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    Open Conversation
+                  </button>
+                )}
+              </div>
+            ) : waCardState === 'reached' ? (
+              <div className="py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                    <Check className="w-3 h-3" />
+                    Reached
+                  </span>
+                </div>
+                {waLastActivity && (
+                  <p className="text-xs text-stone-400 mb-3">Last activity {formatDateTime(waLastActivity)}</p>
+                )}
+                {onOpenConversation && waConversationId && (
+                  <button
+                    onClick={() => onOpenConversation(waConversationId)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    Open Conversation
+                  </button>
+                )}
+              </div>
+            ) : waCardState === 'customer_replied' ? (
+              <div className="py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">
+                    <Check className="w-3 h-3" />
+                    Reached
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-blue-600 text-white">
+                    Customer replied
+                  </span>
+                </div>
+                {waLastMessageTime && (
+                  <p className="text-xs text-stone-400 mb-3">Last message {formatDateTime(waLastMessageTime)}</p>
+                )}
+                {onOpenConversation && waConversationId && (
+                  <button
+                    onClick={() => onOpenConversation(waConversationId)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    Open Conversation
+                  </button>
+                )}
+              </div>
+            ) : waCardState === 'unread_reply' ? (
+              <div className="py-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500 text-white">
+                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                    New customer message
+                  </span>
+                </div>
+                {waLastMessagePreview && (
+                  <p className="text-sm text-stone-700 truncate mb-1.5 max-w-full">
+                    {waLastMessagePreview}
+                  </p>
+                )}
+                {waLastMessageTime && (
+                  <p className="text-xs text-stone-400 mb-3">{formatDateTime(waLastMessageTime)}</p>
+                )}
+                {onOpenConversation && waConversationId && (
+                  <button
+                    onClick={() => onOpenConversation(waConversationId)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 transition"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    Reply
+                  </button>
+                )}
+              </div>
+            ) : null}
           </Card>
 
           {/* Business Details */}

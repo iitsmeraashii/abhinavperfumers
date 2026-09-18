@@ -363,6 +363,15 @@ function Layout() {
     handleSelectLead(leadId);
   }
 
+  function handleOpenConversationFromLead(conversationId: string) {
+    setSelectedLeadId(null);
+    setTab('conversations');
+    setSelectedConversationId(conversationId);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('lead');
+    window.history.pushState({}, '', url.toString());
+  }
+
   function handleTabChange(t: Tab) {
     setTab(t);
     setSelectedLeadId(null);
@@ -585,7 +594,7 @@ function Layout() {
               />
             )}
             {selectedLeadId && (
-              <LeadDetailPage leadId={selectedLeadId} onBack={handleBack} />
+              <LeadDetailPage leadId={selectedLeadId} onBack={handleBack} onOpenConversation={handleOpenConversationFromLead} />
             )}
           </>
         )}
