@@ -1,11 +1,12 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
+import { useAuth } from './AuthContext';
 import {
   ArrowLeft, Loader2, AlertCircle, MessageCircle, Phone,
   Link2, Link2Off, ExternalLink, Clock, Send,
   FileText, Image as ImageIcon, Headphones, FileVideo, FileCheck,
   CheckCheck, Check, X, Circle, Plus, Unlink,
-  AlertTriangle, Lock, FileCheck2,
+  AlertTriangle, Lock, FileCheck2, ChevronDown, ChevronUp, RotateCw,
 } from 'lucide-react';
 import { formatDateTime } from './utils/dateFormat';
 import { getAuthIdentity } from './capture/captureAuth';
@@ -41,7 +42,11 @@ interface ChatMessage {
   status: string | null;
   template_name: string | null;
   error_code: number | null;
+  error_title: string | null;
   error_message: string | null;
+  error_details: string | null;
+  retry_count: number | null;
+  retry_at: string | null;
 }
 
 function normalizeChatMessage(message: ChatMessage): ChatMessage {
@@ -244,6 +249,8 @@ function isSameDay(a: string | null, b: string | null): boolean {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function ConversationDetailPage({ conversationId, onBack, onViewLead, onUnreadCleared }: Props) {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [linkedLeads, setLinkedLeads] = useState<LinkedLead[]>([]);
@@ -256,6 +263,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
   const [unlinkTarget, setUnlinkTarget] = useState<LinkedLead | null>(null);
   const [actionError, setActionError] = useState('');
   const [unlinking, setUnlinking] = useState(false);
+
+  const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
 
   const [draftText, setDraftText] = useState('');
   const [sending, setSending] = useState(false);
@@ -354,7 +363,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
           id, direction, message_type, text_body,
           media_filename, media_mime_type, media_caption, media_url,
           timestamp, status, template_name,
-          error_code, error_message
+          error_code, error_title, error_message, error_details,
+          retry_count, retry_at
         `)
         .eq('conversation_id', conversationId)
         .order('timestamp', { ascending: true })
@@ -397,7 +407,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
           id, direction, message_type, text_body,
           media_filename, media_mime_type, media_caption, media_url,
           timestamp, status, template_name,
-          error_code, error_message
+          error_code, error_title, error_message, error_details,
+          retry_count, retry_at
         `)
         .eq('conversation_id', conversationId)
         .order('timestamp', { ascending: true })
@@ -447,7 +458,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
           id, direction, message_type, text_body,
           media_filename, media_mime_type, media_caption, media_url,
           timestamp, status, template_name,
-          error_code, error_message
+          error_code, error_title, error_message, error_details,
+          retry_count, retry_at
         `)
         .eq('conversation_id', conversationId)
         .order('timestamp', { ascending: true })
@@ -719,13 +731,52 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                             </div>
                           )}
 
-                          {/* Failed message error detail */}
-                          {(!isInbound && deriveOutboundStatus(msg) === 'failed' && msg.error_message) && (
-                            <div className="mt-1.5 px-2 py-1 rounded-lg bg-red-500/10 border border-red-500/20 text-[11px] text-red-300">
-                              {msg.error_code != null && (
-                                <span className="font-mono font-medium">[{msg.error_code}] </span>
+                          {/* Failed message state */}
+                          {(!isInbound && deriveOutboundStatus(msg) === 'failed') && (
+                            <div className="mt-1.5 space-y-1">
+                              <div className="flex items-center gap-1.5 text-[11px] text-red-300">
+                                <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                <span>Failed to send</span>
+                              </div>
+                              {msg.retry_at && (
+                                <div className="flex items-center gap-1.5 text-[10px] text-amber-300/80">
+                                  <RotateCw className="w-2.5 h-2.5 flex-shrink-0" />
+                                  <span>
+                                    Retry scheduled · Next attempt: {formatDateTime(msg.retry_at)}
+                                    {msg.retry_count != null && <span> · Attempt {msg.retry_count} / 3</span>}
+                                  </span>
+                                </div>
                               )}
-                              {msg.error_message}
+                              {(msg.error_message || msg.error_title || msg.error_details || msg.error_code != null) && (
+                                <button
+                                  onClick={() => setExpandedErrors(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(msg.id)) next.delete(msg.id);
+                                    else next.add(msg.id);
+                                    return next;
+                                  })}
+                                  className="flex items-center gap-1 text-[10px] text-stone-400 hover:text-stone-300 transition"
+                                >
+                                  {expandedErrors.has(msg.id) ? <ChevronUp className="w-2.5 h-2.5" /> : <ChevronDown className="w-2.5 h-2.5" />}
+                                  Details
+                                </button>
+                              )}
+                              {expandedErrors.has(msg.id) && (
+                                <div className="mt-1 px-2 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 text-[10px] text-red-200/90 space-y-0.5 font-mono">
+                                  {msg.error_code != null && (
+                                    <p><span className="text-red-300/60">Code:</span> {msg.error_code}</p>
+                                  )}
+                                  {msg.error_title && (
+                                    <p><span className="text-red-300/60">Title:</span> {msg.error_title}</p>
+                                  )}
+                                  {msg.error_message && (
+                                    <p><span className="text-red-300/60">Message:</span> {msg.error_message}</p>
+                                  )}
+                                  {msg.error_details && (
+                                    <p><span className="text-red-300/60">Details:</span> {msg.error_details}</p>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           )}
 
