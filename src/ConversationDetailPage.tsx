@@ -733,7 +733,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
                           {/* Failed message state */}
                           {(!isInbound && deriveOutboundStatus(msg) === 'failed') && (
-                            <div className="mt-1.5 space-y-1">
+                            <div className="mt-1.5 flex items-center justify-between gap-3 whitespace-nowrap">
                               <div className="flex items-center gap-1.5 text-[11px] text-red-300">
                                 <AlertTriangle className="w-3 h-3 flex-shrink-0" />
                                 <span>Failed to send</span>
