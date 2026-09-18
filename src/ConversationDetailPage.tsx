@@ -7,8 +7,10 @@ import {
   FileText, Image as ImageIcon, Headphones, FileVideo, FileCheck,
   CheckCheck, Check, X, Circle, Plus, Unlink,
   AlertTriangle, Lock, FileCheck2, ChevronDown, ChevronUp, RotateCw,
+  Paperclip, Search,
 } from 'lucide-react';
 import { formatDateTime } from './utils/dateFormat';
+import { formatBytes } from './utils/formatBytes';
 import { getAuthIdentity } from './capture/captureAuth';
 import LinkExistingLeadModal from './LinkExistingLeadModal';
 import CreateLeadModal from './CreateLeadModal';
@@ -73,6 +75,19 @@ interface Props {
   onViewLead: (leadId: string) => void;
   onUnreadCleared?: () => void;
 }
+
+interface PickerAsset {
+  id: string;
+  name: string;
+  description: string | null;
+  asset_type: 'DOCUMENT' | 'IMAGE';
+  file_name: string;
+  mime_type: string;
+  file_size: number | null;
+  share_message: string | null;
+}
+
+type AssetFilter = 'all' | 'DOCUMENT' | 'IMAGE';
 
 // ── Time helper ──────────────────────────────────────────────────────────────
 
@@ -270,6 +285,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
   const [draftText, setDraftText] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState('');
+  const [selectedAsset, setSelectedAsset] = useState<PickerAsset | null>(null);
+  const [showAssetPicker, setShowAssetPicker] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -423,22 +440,26 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
   async function handleSend() {
     const text = draftText.trim();
-    if (!text || sending) return;
+    const isAssetSend = !!selectedAsset;
+    if ((!text && !isAssetSend) || sending) return;
     setSending(true);
     setSendError('');
 
     try {
       const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-whatsapp-message`;
+      const payload: Record<string, string> = { conversation_id: conversationId };
+      if (isAssetSend) {
+        payload.asset_id = selectedAsset!.id;
+      } else {
+        payload.text_body = text;
+      }
       const resp = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
         },
-        body: JSON.stringify({
-          conversation_id: conversationId,
-          text_body: text,
-        }),
+        body: JSON.stringify(payload),
       });
 
       const data = await resp.json();
@@ -448,8 +469,9 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
         return;
       }
 
-      // Success — clear draft and reload messages
+      // Success — clear draft/asset and reload messages
       setDraftText('');
+      setSelectedAsset(null);
       setSendError('');
 
       // Reload messages from the database so the real outbound row appears
@@ -815,7 +837,45 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
             )}
 
             {(window === 'open' || window === 'expiring') ? (
+              <>
+              {/* Asset attachment preview */}
+              {selectedAsset && (
+                <div className="mb-2 flex items-center gap-2.5 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+                  <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-white border border-amber-200 flex items-center justify-center overflow-hidden">
+                    {selectedAsset.asset_type === 'IMAGE'
+                      ? <ImageIcon className="w-4 h-4 text-stone-500" />
+                      : <FileText className="w-4 h-4 text-stone-500" />}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-stone-800 truncate">{selectedAsset.name}</p>
+                    <p className="text-xs text-stone-500 truncate">
+                      {selectedAsset.file_name}
+                      {selectedAsset.file_size != null && ` · ${formatBytes(selectedAsset.file_size)}`}
+                    </p>
+                    {selectedAsset.share_message && (
+                      <p className="text-xs text-stone-400 italic truncate mt-0.5">
+                        "{selectedAsset.share_message}"
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setSelectedAsset(null)}
+                    className="flex-shrink-0 p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition"
+                    aria-label="Remove attachment"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
               <div className="flex items-end gap-2">
+                <button
+                  onClick={() => setShowAssetPicker(true)}
+                  disabled={sending || !!selectedAsset}
+                  className="flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition disabled:opacity-40 disabled:cursor-not-allowed border border-stone-200 bg-white text-stone-500 hover:bg-stone-50 hover:text-stone-700"
+                  title="Attach asset"
+                >
+                  <Paperclip className="w-4 h-4" />
+                </button>
                 <textarea
                   ref={textareaRef}
                   value={draftText}
@@ -823,22 +883,23 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                   onKeyDown={e => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      if (draftText.trim() && !sending) handleSend();
+                      if ((draftText.trim() || selectedAsset) && !sending) handleSend();
                     }
                   }}
-                  placeholder="Type a message…"
+                  placeholder={selectedAsset ? 'Add a message (optional)…' : 'Type a message…'}
                   rows={1}
                   className="flex-1 resize-none px-3.5 py-2.5 text-sm border border-stone-200 rounded-2xl bg-white text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition max-h-32"
                   style={{ minHeight: '42px' }}
                 />
                 <button
                   onClick={handleSend}
-                  disabled={!draftText.trim() || sending}
+                  disabled={(!draftText.trim() && !selectedAsset) || sending}
                   className="flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition disabled:bg-stone-100 disabled:cursor-not-allowed bg-stone-800 hover:bg-stone-700 text-white"
                 >
                   {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                 </button>
               </div>
+              </>
             ) : (
               <div className="flex items-center gap-2">
                 <div className="flex-1 flex items-center gap-2 px-3.5 py-3 bg-white border border-stone-200 rounded-2xl opacity-60 cursor-not-allowed select-none">
@@ -1031,6 +1092,14 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
         />
       )}
 
+      {/* ── Asset Picker Modal ── */}
+      {showAssetPicker && (
+        <AssetPickerModal
+          onSelect={(asset) => { setSelectedAsset(asset); setShowAssetPicker(false); }}
+          onClose={() => setShowAssetPicker(false)}
+        />
+      )}
+
       {/* ── Unlink Confirmation Modal ── */}
       {unlinkTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30">
@@ -1070,6 +1139,203 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Asset Picker Modal ───────────────────────────────────────────────────────
+
+interface AssetPickerModalProps {
+  onSelect: (asset: PickerAsset) => void;
+  onClose: () => void;
+}
+
+function AssetPickerModal({ onSelect, onClose }: AssetPickerModalProps) {
+  const [assets, setAssets] = useState<PickerAsset[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filter, setFilter] = useState<AssetFilter>('all');
+  const [thumbUrls, setThumbUrls] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError('');
+      let q = supabase
+        .from('whatsapp_assets')
+        .select('id, name, description, asset_type, file_name, mime_type, file_size, share_message')
+        .eq('active', true)
+        .order('name', { ascending: true });
+
+      if (filter !== 'all') q = q.eq('asset_type', filter);
+      if (searchTerm.trim()) {
+        const term = searchTerm.trim();
+        q = q.or(`name.ilike.%${term}%,file_name.ilike.%${term}%`);
+      }
+
+      const { data, error: err } = await q;
+      if (cancelled) return;
+      if (err) {
+        setError(err.message || 'Failed to load assets.');
+        setAssets([]);
+      } else {
+        setAssets((data ?? []) as PickerAsset[]);
+      }
+      setLoading(false);
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [filter, searchTerm]);
+
+  // Generate signed URLs for image thumbnails
+  useEffect(() => {
+    const imageAssets = assets.filter(a => a.asset_type === 'IMAGE');
+    if (imageAssets.length === 0) {
+      setThumbUrls({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const urls: Record<string, string> = {};
+      for (const asset of imageAssets) {
+        const { data } = await supabase.storage
+          .from('whatsapp-assets')
+          .createSignedUrl(`${asset.id}/${asset.file_name}`, 300);
+        if (data && !cancelled) urls[asset.id] = data.signedUrl;
+      }
+      if (!cancelled) setThumbUrls(urls);
+    })();
+    return () => { cancelled = true; };
+  }, [assets]);
+
+  function handleSearchChange(v: string) {
+    setSearchInput(v);
+    setTimeout(() => setSearchTerm(v), 300);
+  }
+
+  const FILTER_TABS: { label: string; value: AssetFilter }[] = [
+    { label: 'All', value: 'all' },
+    { label: 'Documents', value: 'DOCUMENT' },
+    { label: 'Images', value: 'IMAGE' },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100">
+          <h2 className="text-base font-semibold text-stone-800">Choose Asset</h2>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Search */}
+        <div className="px-5 py-3 border-b border-stone-100">
+          <div className="relative mb-2.5">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={e => handleSearchChange(e.target.value)}
+              placeholder="Search assets…"
+              className="w-full pl-9 pr-3 py-2 text-sm border border-stone-200 rounded-lg bg-white text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition"
+            />
+          </div>
+          <div className="flex items-center gap-1.5">
+            {FILTER_TABS.map(tab => {
+              const active = filter === tab.value;
+              return (
+                <button
+                  key={tab.value}
+                  onClick={() => setFilter(tab.value)}
+                  className={`flex-shrink-0 px-2.5 py-1 text-xs font-medium rounded-lg border transition ${
+                    active
+                      ? 'bg-stone-800 border-stone-800 text-white'
+                      : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-50'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* List */}
+        <div className="flex-1 overflow-y-auto px-5 py-3">
+          {loading && (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-5 h-5 text-stone-400 animate-spin" />
+            </div>
+          )}
+          {error && (
+            <div className="flex items-center gap-2 px-3 py-2.5 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              {error}
+            </div>
+          )}
+          {!loading && !error && assets.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <div className="w-12 h-12 rounded-full bg-stone-100 flex items-center justify-center mb-3">
+                <FileText className="w-5 h-5 text-stone-400" />
+              </div>
+              <p className="text-sm font-medium text-stone-500">No assets found</p>
+              <p className="text-xs text-stone-400 mt-1">
+                {searchTerm || filter !== 'all'
+                  ? 'Try adjusting your search or filters.'
+                  : 'No active assets have been added yet.'}
+              </p>
+            </div>
+          )}
+          {!loading && !error && assets.length > 0 && (
+            <div className="space-y-1.5">
+              {assets.map(asset => (
+                <button
+                  key={asset.id}
+                  onClick={() => onSelect(asset)}
+                  className="w-full flex items-start gap-3 px-3 py-2.5 rounded-xl border border-stone-100 hover:border-stone-300 hover:bg-stone-50 transition text-left"
+                >
+                  <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-stone-50 border border-stone-100 flex items-center justify-center overflow-hidden">
+                    {asset.asset_type === 'IMAGE' && thumbUrls[asset.id] ? (
+                      <img src={thumbUrls[asset.id]} alt={asset.name} className="w-full h-full object-cover" />
+                    ) : asset.asset_type === 'IMAGE' ? (
+                      <ImageIcon className="w-4 h-4 text-stone-400" />
+                    ) : (
+                      <FileText className="w-4 h-4 text-stone-400" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-stone-800 truncate">{asset.name}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium flex-shrink-0">
+                        {asset.asset_type}
+                      </span>
+                    </div>
+                    <p className="text-xs text-stone-400 mt-0.5 truncate">
+                      {asset.file_name}
+                      {asset.file_size != null && ` · ${formatBytes(asset.file_size)}`}
+                    </p>
+                    {asset.description && (
+                      <p className="text-xs text-stone-500 mt-1 line-clamp-2 leading-relaxed">{asset.description}</p>
+                    )}
+                    {asset.share_message && (
+                      <p className="text-xs text-stone-400 mt-1 italic line-clamp-1">"{asset.share_message}"</p>
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

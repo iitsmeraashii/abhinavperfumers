@@ -11,7 +11,8 @@ const GRAPH_API_VERSION = "v25.0";
 
 interface SendRequestBody {
   conversation_id: string;
-  text_body: string;
+  text_body?: string;
+  asset_id?: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -38,11 +39,28 @@ Deno.serve(async (req: Request) => {
     }
 
     const body = await req.json() as SendRequestBody;
-    const { conversation_id, text_body } = body;
+    const { conversation_id, text_body, asset_id } = body;
 
-    if (!conversation_id || !text_body?.trim()) {
+    const isTextSend = !asset_id;
+    const isMediaSend = !!asset_id;
+
+    if (!conversation_id) {
       return new Response(
-        JSON.stringify({ error: "Missing required fields: conversation_id, text_body" }),
+        JSON.stringify({ error: "Missing required field: conversation_id" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    if (isTextSend && !text_body?.trim()) {
+      return new Response(
+        JSON.stringify({ error: "Missing required field: text_body" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    if (isMediaSend && !asset_id?.trim()) {
+      return new Response(
+        JSON.stringify({ error: "Missing required field: asset_id" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
@@ -80,7 +98,6 @@ Deno.serve(async (req: Request) => {
     const toPhone = conversation.wa_phone_number;
 
     // ── Resolve sender phone number ID ──
-    // Priority: runtime_configuration.whatsapp_phone_number_id > META_PHONE_NUMBER_ID (if valid) > query Meta API
     let phoneNumberId: string | null = null;
 
     const { data: runtimeConfig } = await supabase
@@ -95,14 +112,12 @@ Deno.serve(async (req: Request) => {
 
     if (!phoneNumberId) {
       const envPhoneNumberId = Deno.env.get("META_PHONE_NUMBER_ID");
-      // Use env var only if it differs from the WABA ID (which is a common misconfiguration)
       if (envPhoneNumberId && envPhoneNumberId !== wabaId) {
         phoneNumberId = envPhoneNumberId;
       }
     }
 
     if (!phoneNumberId) {
-      // Fall back to querying the Meta API for phone numbers on the WABA
       const phoneResp = await fetch(
         `https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/phone_numbers?fields=id,display_phone_number&limit=100`,
         { headers: { Authorization: `Bearer ${token}` } },
@@ -143,107 +158,19 @@ Deno.serve(async (req: Request) => {
       fromPhone = lastOutbound?.from_phone ?? null;
     }
 
-    // ── Call Meta WhatsApp Cloud API ──
-    const metaUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
-    const metaBody = {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: toPhone,
-      type: "text",
-      text: { preview_url: false, body: text_body },
-    };
-
-    const metaResp = await fetch(metaUrl, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(metaBody),
-    });
-
-    const metaJson = await metaResp.json();
-
-    if (!metaResp.ok) {
-      // Meta rejected the message — persist a FAILED row
-      const errorObj = metaJson?.error || {};
-      const now = new Date().toISOString();
-
-      await supabase.from("whatsapp_messages").insert({
-        conversation_id,
-        direction: "OUTBOUND",
-        source: "LEADSINN",
-        message_type: "TEXT",
-        message_purpose: "CONVERSATION_REPLY",
-        from_phone: fromPhone || null,
-        to_phone: toPhone,
-        text_body,
-        status: "FAILED",
-        error_code: errorObj.code ?? null,
-        error_title: errorObj.title ?? null,
-        error_message: errorObj.message ?? null,
-        error_details: errorObj.error_data?.details ?? JSON.stringify(errorObj),
-        failed_at: now,
-        last_attempt_at: now,
-        timestamp: now,
-        raw_payload: metaJson,
-        attempt_log: [{ at: now, stage: "meta_api", error: errorObj.message ?? "Unknown error" }],
+    // ── Text message path (existing behavior, unchanged) ──
+    if (isTextSend) {
+      return await sendTextMessage({
+        supabase, token, phoneNumberId, toPhone, fromPhone,
+        conversation_id, text_body: text_body!,
       });
-
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: errorObj.message || "Meta API rejected the message",
-          error_code: errorObj.code,
-        }),
-        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
     }
 
-    // ── Meta accepted — persist the outbound message ──
-    const wamid = metaJson?.messages?.[0]?.id ?? null;
-    const now = new Date().toISOString();
-
-    const { error: insertErr } = await supabase.from("whatsapp_messages").insert({
-      conversation_id,
-      wamid,
-      direction: "OUTBOUND",
-      source: "LEADSINN",
-      message_type: "TEXT",
-      message_purpose: "CONVERSATION_REPLY",
-      from_phone: fromPhone || null,
-      to_phone: toPhone,
-      text_body,
-      status: "ACCEPTED",
-      accepted_at: now,
-      last_attempt_at: now,
-      timestamp: now,
-      raw_payload: metaJson,
-      attempt_log: [],
+    // ── Media message path (asset send) ──
+    return await sendAssetMessage({
+      supabase, token, phoneNumberId, toPhone, fromPhone,
+      conversation_id, asset_id: asset_id!,
     });
-
-    if (insertErr) {
-      console.error("[send-whatsapp-message] Failed to insert message row:", insertErr.message);
-    }
-
-    // ── Update conversation timestamps ──
-    await supabase
-      .from("whatsapp_conversations")
-      .update({
-        last_message_at: now,
-        last_outbound_at: now,
-        updated_at: now,
-      })
-      .eq("id", conversation_id);
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        wamid,
-        message: "Message sent",
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return new Response(
@@ -252,3 +179,390 @@ Deno.serve(async (req: Request) => {
     );
   }
 });
+
+// ── Text message sender (extracted from original logic) ──────────────────────
+
+async function sendTextMessage(opts: {
+  supabase: ReturnType<typeof createClient>;
+  token: string;
+  phoneNumberId: string;
+  toPhone: string;
+  fromPhone: string | null;
+  conversation_id: string;
+  text_body: string;
+}): Promise<Response> {
+  const { supabase, token, phoneNumberId, toPhone, fromPhone, conversation_id, text_body } = opts;
+
+  const metaUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+  const metaBody = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: toPhone,
+    type: "text",
+    text: { preview_url: false, body: text_body },
+  };
+
+  const metaResp = await fetch(metaUrl, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(metaBody),
+  });
+
+  const metaJson = await metaResp.json();
+
+  if (!metaResp.ok) {
+    const errorObj = metaJson?.error || {};
+    const now = new Date().toISOString();
+
+    await supabase.from("whatsapp_messages").insert({
+      conversation_id,
+      direction: "OUTBOUND",
+      source: "LEADSINN",
+      message_type: "TEXT",
+      message_purpose: "CONVERSATION_REPLY",
+      from_phone: fromPhone || null,
+      to_phone: toPhone,
+      text_body,
+      status: "FAILED",
+      error_code: errorObj.code ?? null,
+      error_title: errorObj.title ?? null,
+      error_message: errorObj.message ?? null,
+      error_details: errorObj.error_data?.details ?? JSON.stringify(errorObj),
+      failed_at: now,
+      last_attempt_at: now,
+      timestamp: now,
+      raw_payload: metaJson,
+      attempt_log: [{ at: now, stage: "meta_api", error: errorObj.message ?? "Unknown error" }],
+    });
+
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: errorObj.message || "Meta API rejected the message",
+        error_code: errorObj.code,
+      }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const wamid = metaJson?.messages?.[0]?.id ?? null;
+  const now = new Date().toISOString();
+
+  const { error: insertErr } = await supabase.from("whatsapp_messages").insert({
+    conversation_id,
+    wamid,
+    direction: "OUTBOUND",
+    source: "LEADSINN",
+    message_type: "TEXT",
+    message_purpose: "CONVERSATION_REPLY",
+    from_phone: fromPhone || null,
+    to_phone: toPhone,
+    text_body,
+    status: "ACCEPTED",
+    accepted_at: now,
+    last_attempt_at: now,
+    timestamp: now,
+    raw_payload: metaJson,
+    attempt_log: [],
+  });
+
+  if (insertErr) {
+    console.error("[send-whatsapp-message] Failed to insert text message row:", insertErr.message);
+  }
+
+  await supabase
+    .from("whatsapp_conversations")
+    .update({
+      last_message_at: now,
+      last_outbound_at: now,
+      updated_at: now,
+    })
+    .eq("id", conversation_id);
+
+  return new Response(
+    JSON.stringify({
+      success: true,
+      wamid,
+      message: "Message sent",
+    }),
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+  );
+}
+
+// ── Asset media sender ────────────────────────────────────────────────────────
+
+async function sendAssetMessage(opts: {
+  supabase: ReturnType<typeof createClient>;
+  token: string;
+  phoneNumberId: string;
+  toPhone: string;
+  fromPhone: string | null;
+  conversation_id: string;
+  asset_id: string;
+}): Promise<Response> {
+  const { supabase, token, phoneNumberId, toPhone, fromPhone, conversation_id, asset_id } = opts;
+
+  // ── Load the asset metadata ──
+  const { data: asset, error: assetError } = await supabase
+    .from("whatsapp_assets")
+    .select("id, name, asset_type, file_name, storage_path, mime_type, file_size, share_message, active")
+    .eq("id", asset_id)
+    .maybeSingle();
+
+  if (assetError || !asset) {
+    return new Response(
+      JSON.stringify({ error: "Asset not found" }),
+      { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  if (!asset.active) {
+    return new Response(
+      JSON.stringify({ error: "This asset is no longer active" }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // ── Download the file from private Storage ──
+  const { data: fileData, error: downloadError } = await supabase
+    .storage
+    .from("whatsapp-assets")
+    .download(asset.storage_path);
+
+  if (downloadError || !fileData) {
+    return new Response(
+      JSON.stringify({ error: "Failed to retrieve asset file from storage" }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const fileBytes = new Uint8Array(await fileData.arrayBuffer());
+
+  // ── Upload media to Meta ──
+  const mediaType = asset.asset_type === "IMAGE" ? "image" : "document";
+  const uploadUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/media`;
+  const formData = new FormData();
+  formData.append("messaging_product", "whatsapp");
+  formData.append("type", asset.mime_type);
+  const uploadBlob = new Blob([fileBytes], { type: asset.mime_type });
+  formData.append("file", uploadBlob, asset.file_name);
+
+  const uploadResp = await fetch(uploadUrl, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: formData,
+  });
+
+  const uploadJson = await uploadResp.json();
+
+  if (!uploadResp.ok) {
+    const errorObj = uploadJson?.error || {};
+    const now = new Date().toISOString();
+
+    await supabase.from("whatsapp_messages").insert({
+      conversation_id,
+      direction: "OUTBOUND",
+      source: "LEADSINN",
+      message_type: mediaType.toUpperCase(),
+      message_purpose: "ASSET_SHARE",
+      from_phone: fromPhone || null,
+      to_phone: toPhone,
+      media_filename: asset.file_name,
+      media_mime_type: asset.mime_type,
+      media_caption: asset.share_message ?? null,
+      status: "FAILED",
+      error_code: errorObj.code ?? null,
+      error_title: errorObj.title ?? null,
+      error_message: errorObj.message ?? null,
+      error_details: errorObj.error_data?.details ?? JSON.stringify(errorObj),
+      failed_at: now,
+      last_attempt_at: now,
+      timestamp: now,
+      raw_payload: uploadJson,
+      attempt_log: [{ at: now, stage: "meta_media_upload", error: errorObj.message ?? "Unknown error" }],
+    });
+
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: errorObj.message || "Meta API rejected the media upload",
+        error_code: errorObj.code,
+      }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const mediaId = uploadJson?.id;
+
+  if (!mediaId) {
+    return new Response(
+      JSON.stringify({ error: "Meta media upload succeeded but no media ID was returned" }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // ── Send the media message via Meta ──
+  const metaUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+
+  // Build the media message body.
+  // WhatsApp supports captions on images but NOT on documents.
+  // For documents, if a share_message exists, we send it as a separate
+  // text message after the document. For images, use the caption field.
+  const mediaObj: Record<string, unknown> = { id: mediaId };
+
+  if (mediaType === "image" && asset.share_message) {
+    mediaObj.caption = asset.share_message;
+  }
+
+  const metaBody = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: toPhone,
+    type: mediaType,
+    [mediaType]: mediaObj,
+  };
+
+  const metaResp = await fetch(metaUrl, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(metaBody),
+  });
+
+  const metaJson = await metaResp.json();
+
+  if (!metaResp.ok) {
+    const errorObj = metaJson?.error || {};
+    const now = new Date().toISOString();
+
+    await supabase.from("whatsapp_messages").insert({
+      conversation_id,
+      direction: "OUTBOUND",
+      source: "LEADSINN",
+      message_type: mediaType.toUpperCase(),
+      message_purpose: "ASSET_SHARE",
+      from_phone: fromPhone || null,
+      to_phone: toPhone,
+      media_id: mediaId,
+      media_filename: asset.file_name,
+      media_mime_type: asset.mime_type,
+      media_caption: asset.share_message ?? null,
+      status: "FAILED",
+      error_code: errorObj.code ?? null,
+      error_title: errorObj.title ?? null,
+      error_message: errorObj.message ?? null,
+      error_details: errorObj.error_data?.details ?? JSON.stringify(errorObj),
+      failed_at: now,
+      last_attempt_at: now,
+      timestamp: now,
+      raw_payload: metaJson,
+      attempt_log: [{ at: now, stage: "meta_api", error: errorObj.message ?? "Unknown error" }],
+    });
+
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: errorObj.message || "Meta API rejected the media message",
+        error_code: errorObj.code,
+      }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const wamid = metaJson?.messages?.[0]?.id ?? null;
+  const now = new Date().toISOString();
+
+  const { error: insertErr } = await supabase.from("whatsapp_messages").insert({
+    conversation_id,
+    wamid,
+    direction: "OUTBOUND",
+    source: "LEADSINN",
+    message_type: mediaType.toUpperCase(),
+    message_purpose: "ASSET_SHARE",
+    from_phone: fromPhone || null,
+    to_phone: toPhone,
+    media_id: mediaId,
+    media_filename: asset.file_name,
+    media_mime_type: asset.mime_type,
+    media_caption: asset.share_message ?? null,
+    status: "ACCEPTED",
+    accepted_at: now,
+    last_attempt_at: now,
+    timestamp: now,
+    raw_payload: metaJson,
+    attempt_log: [],
+  });
+
+  if (insertErr) {
+    console.error("[send-whatsapp-message] Failed to insert media message row:", insertErr.message);
+  }
+
+  // ── For documents with share_message, send a follow-up text ──
+  // WhatsApp does not support captions on documents. If the asset has
+  // a share_message and it's a document, send it as a separate text.
+  if (mediaType === "document" && asset.share_message?.trim()) {
+    const followUpBody = {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: toPhone,
+      type: "text",
+      text: { preview_url: false, body: asset.share_message },
+    };
+
+    const followUpResp = await fetch(metaUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(followUpBody),
+    });
+
+    const followUpJson = await followUpResp.json();
+
+    if (followUpResp.ok) {
+      const followUpWamid = followUpJson?.messages?.[0]?.id ?? null;
+      await supabase.from("whatsapp_messages").insert({
+        conversation_id,
+        wamid: followUpWamid,
+        direction: "OUTBOUND",
+        source: "LEADSINN",
+        message_type: "TEXT",
+        message_purpose: "ASSET_SHARE_CAPTION",
+        from_phone: fromPhone || null,
+        to_phone: toPhone,
+        text_body: asset.share_message,
+        status: "ACCEPTED",
+        accepted_at: now,
+        last_attempt_at: now,
+        timestamp: now,
+        raw_payload: followUpJson,
+        attempt_log: [],
+      });
+    }
+  }
+
+  // ── Update conversation timestamps ──
+  await supabase
+    .from("whatsapp_conversations")
+    .update({
+      last_message_at: now,
+      last_outbound_at: now,
+      updated_at: now,
+    })
+    .eq("id", conversation_id);
+
+  return new Response(
+    JSON.stringify({
+      success: true,
+      wamid,
+      message: "Asset sent",
+    }),
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+  );
+}
