@@ -13,6 +13,7 @@ interface SendRequestBody {
   conversation_id: string;
   text_body?: string;
   asset_id?: string;
+  share_message?: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -39,7 +40,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const body = await req.json() as SendRequestBody;
-    const { conversation_id, text_body, asset_id } = body;
+    const { conversation_id, text_body, asset_id, share_message } = body;
 
     const isTextSend = !asset_id;
     const isMediaSend = !!asset_id;
@@ -170,6 +171,7 @@ Deno.serve(async (req: Request) => {
     return await sendAssetMessage({
       supabase, token, phoneNumberId, toPhone, fromPhone,
       conversation_id, asset_id: asset_id!,
+      share_message: share_message ?? null,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -302,8 +304,14 @@ async function sendAssetMessage(opts: {
   fromPhone: string | null;
   conversation_id: string;
   asset_id: string;
+  share_message: string | null;
 }): Promise<Response> {
-  const { supabase, token, phoneNumberId, toPhone, fromPhone, conversation_id, asset_id } = opts;
+  const { supabase, token, phoneNumberId, toPhone, fromPhone, conversation_id, asset_id, share_message } = opts;
+
+  // The client-provided share_message takes precedence over the asset's
+  // stored default. The asset record is still the source of truth for
+  // existence, type, status, and file content.
+  const effectiveMessage = share_message?.trim() || null;
 
   // ── Load the asset metadata ──
   const { data: asset, error: assetError } = await supabase
@@ -372,7 +380,7 @@ async function sendAssetMessage(opts: {
       to_phone: toPhone,
       media_filename: asset.file_name,
       media_mime_type: asset.mime_type,
-      media_caption: asset.share_message ?? null,
+      media_caption: effectiveMessage,
       status: "FAILED",
       error_code: errorObj.code ?? null,
       error_title: errorObj.title ?? null,
@@ -413,8 +421,8 @@ async function sendAssetMessage(opts: {
   // text message after the document. For images, use the caption field.
   const mediaObj: Record<string, unknown> = { id: mediaId };
 
-  if (mediaType === "image" && asset.share_message) {
-    mediaObj.caption = asset.share_message;
+  if (mediaType === "image" && effectiveMessage) {
+    mediaObj.caption = effectiveMessage;
   }
 
   if (mediaType === "document") {
@@ -455,7 +463,7 @@ async function sendAssetMessage(opts: {
       media_id: mediaId,
       media_filename: asset.file_name,
       media_mime_type: asset.mime_type,
-      media_caption: asset.share_message ?? null,
+      media_caption: effectiveMessage,
       status: "FAILED",
       error_code: errorObj.code ?? null,
       error_title: errorObj.title ?? null,
@@ -493,7 +501,7 @@ async function sendAssetMessage(opts: {
     media_id: mediaId,
     media_filename: asset.file_name,
     media_mime_type: asset.mime_type,
-    media_caption: asset.share_message ?? null,
+    media_caption: effectiveMessage,
     status: "ACCEPTED",
     accepted_at: now,
     last_attempt_at: now,
@@ -509,13 +517,13 @@ async function sendAssetMessage(opts: {
   // ── For documents with share_message, send a follow-up text ──
   // WhatsApp does not support captions on documents. If the asset has
   // a share_message and it's a document, send it as a separate text.
-  if (mediaType === "document" && asset.share_message?.trim()) {
+  if (mediaType === "document" && effectiveMessage) {
     const followUpBody = {
       messaging_product: "whatsapp",
       recipient_type: "individual",
       to: toPhone,
       type: "text",
-      text: { preview_url: false, body: asset.share_message },
+      text: { preview_url: false, body: effectiveMessage },
     };
 
     const followUpResp = await fetch(metaUrl, {
@@ -540,7 +548,7 @@ async function sendAssetMessage(opts: {
         message_purpose: "ASSET_SHARE_CAPTION",
         from_phone: fromPhone || null,
         to_phone: toPhone,
-        text_body: asset.share_message,
+        text_body: effectiveMessage,
         status: "ACCEPTED",
         accepted_at: now,
         last_attempt_at: now,

@@ -286,6 +286,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState('');
   const [selectedAsset, setSelectedAsset] = useState<PickerAsset | null>(null);
+  const [assetMessage, setAssetMessage] = useState('');
   const [showAssetPicker, setShowAssetPicker] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -450,6 +451,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       const payload: Record<string, string> = { conversation_id: conversationId };
       if (isAssetSend) {
         payload.asset_id = selectedAsset!.id;
+        if (assetMessage.trim()) payload.share_message = assetMessage.trim();
       } else {
         payload.text_body = text;
       }
@@ -472,6 +474,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       // Success — clear draft/asset and reload messages
       setDraftText('');
       setSelectedAsset(null);
+      setAssetMessage('');
       setSendError('');
 
       // Reload messages from the database so the real outbound row appears
@@ -838,33 +841,44 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
             {(window === 'open' || window === 'expiring') ? (
               <>
-              {/* Asset attachment preview */}
+              {/* Asset attachment preview with editable message */}
               {selectedAsset && (
-                <div className="mb-2 flex items-center gap-2.5 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
-                  <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-white border border-amber-200 flex items-center justify-center overflow-hidden">
-                    {selectedAsset.asset_type === 'IMAGE'
-                      ? <ImageIcon className="w-4 h-4 text-stone-500" />
-                      : <FileText className="w-4 h-4 text-stone-500" />}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-stone-800 truncate">{selectedAsset.name}</p>
-                    <p className="text-xs text-stone-500 truncate">
-                      {selectedAsset.file_name}
-                      {selectedAsset.file_size != null && ` · ${formatBytes(selectedAsset.file_size)}`}
-                    </p>
-                    {selectedAsset.share_message && (
-                      <p className="text-xs text-stone-400 italic truncate mt-0.5">
-                        "{selectedAsset.share_message}"
+                <div className="mb-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                  <div className="flex items-start gap-2.5">
+                    <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-white border border-amber-200 flex items-center justify-center overflow-hidden">
+                      {selectedAsset.asset_type === 'IMAGE'
+                        ? <ImageIcon className="w-4 h-4 text-stone-500" />
+                        : <FileText className="w-4 h-4 text-stone-500" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-stone-800 truncate">{selectedAsset.name}</p>
+                      <p className="text-xs text-stone-500 truncate">
+                        {selectedAsset.file_name}
+                        {selectedAsset.file_size != null && ` · ${formatBytes(selectedAsset.file_size)}`}
                       </p>
-                    )}
+                    </div>
+                    <button
+                      onClick={() => { setSelectedAsset(null); setAssetMessage(''); }}
+                      className="flex-shrink-0 p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition"
+                      aria-label="Remove attachment"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
                   </div>
-                  <button
-                    onClick={() => setSelectedAsset(null)}
-                    className="flex-shrink-0 p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition"
-                    aria-label="Remove attachment"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
+                  <div className="mt-2">
+                    <label className="block text-[10px] font-medium text-stone-500 uppercase tracking-wide mb-1">
+                      Message for this send
+                    </label>
+                    <textarea
+                      value={assetMessage}
+                      onChange={e => setAssetMessage(e.target.value)}
+                      placeholder={selectedAsset.asset_type === 'IMAGE'
+                        ? 'Add a caption for this image…'
+                        : 'Add a message to send with this document…'}
+                      rows={2}
+                      className="w-full px-2.5 py-2 text-sm border border-amber-200 rounded-lg bg-white text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition resize-none"
+                    />
+                  </div>
                 </div>
               )}
               <div className="flex items-end gap-2">
@@ -1095,7 +1109,11 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       {/* ── Asset Picker Modal ── */}
       {showAssetPicker && (
         <AssetPickerModal
-          onSelect={(asset) => { setSelectedAsset(asset); setShowAssetPicker(false); }}
+          onSelect={(asset) => {
+            setSelectedAsset(asset);
+            setAssetMessage(asset.share_message ?? '');
+            setShowAssetPicker(false);
+          }}
           onClose={() => setShowAssetPicker(false)}
         />
       )}
