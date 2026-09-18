@@ -17,14 +17,15 @@ import MyAccountPage from './MyAccountPage';
 import SalesRepsPage from './SalesRepsPage';
 import ConversationsPage from './ConversationsPage';
 import ConversationDetailPage from './ConversationDetailPage';
+import WhatsAppAssetsPage from './WhatsAppAssetsPage';
 import { supabase } from './supabaseClient';
 import {
   LogOut, Loader2,
   LayoutDashboard, List, CalendarDays, Bell, PlusCircle,
-  MoreHorizontal, X, User, ChevronDown, Layers, Users, MessageCircle,
+  MoreHorizontal, X, User, ChevronDown, Layers, Users, MessageCircle, Package,
 } from 'lucide-react';
 
-type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'notifications' | 'salesreps' | 'account';
+type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'notifications' | 'salesreps' | 'whatsapp_assets' | 'account';
 
 // ─── Mobile bottom nav tabs ───────────────────────────────────────────────────
 
@@ -134,7 +135,7 @@ interface MobileNavProps {
 
 function MobileBottomNav({ tab, isAdmin, onTabChange, onMorePress }: MobileNavProps) {
   const visibleTabs = MOBILE_TABS.filter(t => !t.adminOnly || isAdmin);
-  const moreActive  = tab === 'notifications' || tab === 'salesreps' || tab === 'account';
+  const moreActive  = tab === 'notifications' || tab === 'salesreps' || tab === 'whatsapp_assets' || tab === 'account';
 
   return (
     <nav
@@ -226,6 +227,7 @@ function MobileMoreDrawer({
       ? [
           { id: 'notifications' as Tab, label: 'Notifications', icon: <Bell className="w-5 h-5" /> },
           { id: 'salesreps' as Tab,      label: 'Sales Reps',     icon: <Users className="w-5 h-5" /> },
+          { id: 'whatsapp_assets' as Tab, label: 'WhatsApp Assets', icon: <Package className="w-5 h-5" /> },
         ]
       : []),
   ];
@@ -301,7 +303,7 @@ function Layout() {
   const initialFollowUp = params.get('followup');
 
   const [tab,                setTab]                = useState<Tab>(() => {
-    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'account'];
+    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'whatsapp_assets', 'account'];
     const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'conversations', 'account'];
     const allowed = isAdmin ? adminTabs : repTabs;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
@@ -513,6 +515,15 @@ function Layout() {
                 <Users className="w-4 h-4" /> Sales Reps
               </button>
             )}
+            {isAdmin && (
+              <button
+                onClick={() => handleTabChange('whatsapp_assets')}
+                className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                  ${tab === 'whatsapp_assets' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+              >
+                <Package className="w-4 h-4" /> Assets
+              </button>
+            )}
           </nav>
         </div>
 
@@ -560,6 +571,7 @@ function Layout() {
             )}
             {tab === 'notifications' && isAdmin && !selectedLeadId && <SystemNotificationsPage />}
             {tab === 'salesreps' && isAdmin && !selectedLeadId && <SalesRepsPage />}
+            {tab === 'whatsapp_assets' && isAdmin && !selectedLeadId && <WhatsAppAssetsPage />}
             {tab === 'capture' && !selectedLeadId && <CaptureLeadPage key={resumeDraftId ?? 'capture'} resumeDraftId={resumeDraftId} />}
             {tab === 'queue' && !selectedLeadId && (
               <LeadQueuePage
