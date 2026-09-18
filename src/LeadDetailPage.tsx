@@ -729,6 +729,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
   }, [leadId, user]);
 
   // ── WhatsApp card: load conversation state for this lead ──
+  // Lookup strategy: 1) bridge table (authoritative), 2) phone-number fallback (display only)
   // State precedence: OPTED_OUT > UNREAD_REPLY > CUSTOMER_REPLIED > REACHED > CONNECTED > NO_CONVERSATION
   useEffect(() => {
     if (!lead) return;
@@ -748,15 +749,32 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
         return;
       }
 
-      // Find conversation via the bridge table only (no phone-number fallback)
+      // 1. PRIMARY LOOKUP — bridge table
       const { data: bridgeRows } = await supabase
         .from('whatsapp_conversation_leads')
         .select('conversation_id')
         .eq('lead_entry_id', leadId)
-        .order('created_at', { ascending: false })
+        .order('linked_at', { ascending: false })
         .limit(1);
 
-      const conversationId: string | null = bridgeRows?.[0]?.conversation_id ?? null;
+      let conversationId: string | null = bridgeRows?.[0]?.conversation_id ?? null;
+
+      // 2. FALLBACK — phone number (display only, does NOT create a bridge row)
+      if (!conversationId) {
+        const normalizedPhone = formatWhatsAppNumber(lead.phones?.[0] ?? '');
+        if (normalizedPhone) {
+          const { data: convByPhone } = await supabase
+            .from('whatsapp_conversations')
+            .select('id')
+            .eq('wa_phone_number', normalizedPhone)
+            .order('last_message_at', { ascending: false })
+            .limit(1);
+          // Safe handling: if multiple conversations match, use the most recent.
+          // The card displays a single conversation; the conversation detail page
+          // remains the source of full multi-conversation context.
+          conversationId = convByPhone?.[0]?.id ?? null;
+        }
+      }
 
       if (!conversationId) {
         if (!cancelled) setWaCardState('no_conversation');
