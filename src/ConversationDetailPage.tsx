@@ -6,8 +6,8 @@ import {
   Link2, Link2Off, ExternalLink, Clock, Send,
   FileText, Image as ImageIcon, Headphones, FileVideo, FileCheck,
   CheckCheck, Check, X, Circle, Plus, Unlink,
-  AlertTriangle, Lock, FileCheck2, ChevronDown, ChevronUp, RotateCw,
-  Paperclip, Search,
+  AlertTriangle, Lock, ChevronDown, ChevronUp, RotateCw,
+  Paperclip, Search, Globe, LayoutTemplate,
 } from 'lucide-react';
 import { formatDateTime } from './utils/dateFormat';
 import { formatBytes } from './utils/formatBytes';
@@ -89,6 +89,54 @@ interface PickerAsset {
 
 type AssetFilter = 'all' | 'DOCUMENT' | 'IMAGE';
 
+interface MetaTemplateComponent {
+  type: string;
+  format?: string;
+  text?: string;
+  example?: Record<string, unknown>;
+}
+
+interface MetaTemplate {
+  name: string;
+  id: string;
+  status: string;
+  category: string;
+  language: string;
+  components: MetaTemplateComponent[];
+}
+
+function getTemplateHeaderFormat(tpl: MetaTemplate): string | null {
+  const header = tpl.components.find(c => c.type.toLowerCase() === 'header');
+  return header?.format?.toUpperCase() ?? null;
+}
+
+function getTemplateBodyExampleParams(tpl: MetaTemplate): string[] {
+  const body = tpl.components.find(c => c.type.toLowerCase() === 'body');
+  if (!body?.text) return [];
+  const matches = body.text.match(/\{\{(\d+)\}\}/g);
+  if (!matches) return [];
+  const indices = [...new Set(matches.map(m => m.replace(/[{}]/g, '')))];
+  return indices.sort();
+}
+
+function isTemplateCompatible(tpl: MetaTemplate, assetType: 'IMAGE' | 'DOCUMENT'): boolean {
+  const fmt = getTemplateHeaderFormat(tpl);
+  if (!fmt) return false;
+  if (assetType === 'IMAGE') return fmt === 'IMAGE';
+  if (assetType === 'DOCUMENT') return fmt === 'DOCUMENT';
+  return false;
+}
+
+function isTextOnlyTemplate(tpl: MetaTemplate): boolean {
+  const fmt = getTemplateHeaderFormat(tpl);
+  return !fmt || fmt === 'TEXT';
+}
+
+function getTemplateBodyText(tpl: MetaTemplate): string | null {
+  const body = tpl.components.find(c => c.type.toLowerCase() === 'body');
+  return body?.text ?? null;
+}
+
 // ── Time helper ──────────────────────────────────────────────────────────────
 
 function formatTimeOnly(iso: string | null | undefined): string | null {
@@ -100,8 +148,15 @@ function formatTimeOnly(iso: string | null | undefined): string | null {
   });
 }
 
+function normalizeIso(iso: string): string {
+  return /[Zz]$/.test(iso) || /[+-]\d{2}:?\d{2}$/.test(iso)
+    ? iso
+    : iso.replace(' ', 'T') + 'Z';
+}
+
 function formatRemaining(expiresAt: string): string {
-  const expires = new Date(expiresAt.endsWith('Z') ? expiresAt : expiresAt + 'Z').getTime();
+  const expires = new Date(normalizeIso(expiresAt)).getTime();
+  if (isNaN(expires)) return '';
   const diff = expires - Date.now();
   if (diff <= 0) return 'expired';
   const hours = Math.floor(diff / (60 * 60 * 1000));
@@ -111,7 +166,8 @@ function formatRemaining(expiresAt: string): string {
 }
 
 function formatExpiredAgo(expiresAt: string): string {
-  const expires = new Date(expiresAt.endsWith('Z') ? expiresAt : expiresAt + 'Z').getTime();
+  const expires = new Date(normalizeIso(expiresAt)).getTime();
+  if (isNaN(expires)) return '';
   const diff = Date.now() - expires;
   if (diff <= 0) return '';
   const hours = Math.floor(diff / (60 * 60 * 1000));
@@ -127,7 +183,8 @@ type ServiceWindowState = 'open' | 'expiring' | 'closed' | 'none';
 function deriveServiceWindow(expiresAt: string | null): ServiceWindowState {
   if (!expiresAt) return 'none';
   const now = Date.now();
-  const expires = new Date(expiresAt.endsWith('Z') ? expiresAt : expiresAt + 'Z').getTime();
+  const expires = new Date(normalizeIso(expiresAt)).getTime();
+  if (isNaN(expires)) return 'none';
   if (expires <= now) return 'closed';
   const fourHours = 4 * 60 * 60 * 1000;
   if (expires - now < fourHours) return 'expiring';
@@ -289,6 +346,15 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
   const [assetMessage, setAssetMessage] = useState('');
   const [showAssetPicker, setShowAssetPicker] = useState(false);
 
+  // Template send state (expired window)
+  const [selectedTemplate, setSelectedTemplate] = useState<MetaTemplate | null>(null);
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
+  const [templateParams, setTemplateParams] = useState<string[]>([]);
+
+  const [textOnlyTemplate, setTextOnlyTemplate] = useState<MetaTemplate | null>(null);
+  const [showTextOnlyPicker, setShowTextOnlyPicker] = useState(false);
+  const [textOnlyParams, setTextOnlyParams] = useState<string[]>([]);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const onUnreadClearedRef = useRef(onUnreadCleared);
@@ -441,15 +507,39 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
   async function handleSend() {
     const text = draftText.trim();
-    const isAssetSend = !!selectedAsset;
-    if ((!text && !isAssetSend) || sending) return;
+    const sw = deriveServiceWindow(conversation?.customer_service_window_expires_at ?? null);
+    const isAssetSend = !!selectedAsset && (sw === 'open' || sw === 'expiring');
+    const isTemplateAssetSend = !!selectedAsset && !!selectedTemplate && (sw === 'closed' || sw === 'none');
+    const isTextOnlySend = !!textOnlyTemplate && !selectedAsset && (sw === 'closed' || sw === 'none');
+    if ((!text && !isAssetSend && !isTemplateAssetSend && !isTextOnlySend) || sending) return;
     setSending(true);
     setSendError('');
 
     try {
       const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-whatsapp-message`;
-      const payload: Record<string, string> = { conversation_id: conversationId };
-      if (isAssetSend) {
+      const payload: Record<string, unknown> = { conversation_id: conversationId };
+      if (isTemplateAssetSend) {
+        payload.asset_id = selectedAsset!.id;
+        payload.template_name = selectedTemplate!.name;
+        payload.template_language = selectedTemplate!.language;
+        const bodyParamIndices = getTemplateBodyExampleParams(selectedTemplate!);
+        if (bodyParamIndices.length > 0 && templateParams.some(p => p.trim())) {
+          payload.template_params = bodyParamIndices.map((_, i) => ({
+            type: 'text',
+            text: templateParams[i]?.trim() || '',
+          }));
+        }
+      } else if (isTextOnlySend) {
+        payload.template_name = textOnlyTemplate!.name;
+        payload.template_language = textOnlyTemplate!.language;
+        const bodyParamIndices = getTemplateBodyExampleParams(textOnlyTemplate!);
+        if (bodyParamIndices.length > 0 && textOnlyParams.some(p => p.trim())) {
+          payload.template_params = bodyParamIndices.map((_, i) => ({
+            type: 'text',
+            text: textOnlyParams[i]?.trim() || '',
+          }));
+        }
+      } else if (isAssetSend) {
         payload.asset_id = selectedAsset!.id;
         if (assetMessage.trim()) payload.share_message = assetMessage.trim();
       } else {
@@ -471,10 +561,14 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
         return;
       }
 
-      // Success — clear draft/asset and reload messages
+      // Success — clear draft/asset/template and reload messages
       setDraftText('');
       setSelectedAsset(null);
       setAssetMessage('');
+      setSelectedTemplate(null);
+      setTemplateParams([]);
+      setTextOnlyTemplate(null);
+      setTextOnlyParams([]);
       setSendError('');
 
       // Reload messages from the database so the real outbound row appears
@@ -578,8 +672,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
   if (!conversation) return null;
 
-  const window = deriveServiceWindow(conversation.customer_service_window_expires_at);
-  const wCfg = WINDOW_CONFIG[window];
+  const serviceWindow = deriveServiceWindow(conversation.customer_service_window_expires_at);
+  const wCfg = WINDOW_CONFIG[serviceWindow];
   const hasLeads = linkedLeads.length > 0;
   const existingLeadIds = linkedLeads.map(l => l.leadEntryId);
 
@@ -764,36 +858,38 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
                           {/* Failed message state */}
                           {(!isInbound && deriveOutboundStatus(msg) === 'failed') && (
-                            <div className="mt-1.5 flex items-center justify-between gap-3 whitespace-nowrap">
-                              <div className="flex items-center gap-1.5 text-[11px] text-red-300">
-                                <AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                                <span>Failed to send</span>
-                              </div>
-                              {msg.retry_at && (
-                                <div className="flex items-center gap-1.5 text-[10px] text-amber-300/80">
-                                  <RotateCw className="w-2.5 h-2.5 flex-shrink-0" />
-                                  <span>
-                                    Retry scheduled · Next attempt: {formatDateTime(msg.retry_at)}
-                                    {msg.retry_count != null && <span> · Attempt {msg.retry_count} / 3</span>}
-                                  </span>
+                            <div className="mt-1.5">
+                              <div className="flex items-center justify-between gap-3 whitespace-nowrap">
+                                <div className="flex items-center gap-1.5 text-[11px] text-red-300">
+                                  <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                  <span>Failed to send</span>
                                 </div>
-                              )}
-                              {(msg.error_message || msg.error_title || msg.error_details || msg.error_code != null) && (
-                                <button
-                                  onClick={() => setExpandedErrors(prev => {
-                                    const next = new Set(prev);
-                                    if (next.has(msg.id)) next.delete(msg.id);
-                                    else next.add(msg.id);
-                                    return next;
-                                  })}
-                                  className="flex items-center gap-1 text-[10px] text-stone-400 hover:text-stone-300 transition"
-                                >
-                                  {expandedErrors.has(msg.id) ? <ChevronUp className="w-2.5 h-2.5" /> : <ChevronDown className="w-2.5 h-2.5" />}
-                                  Details
-                                </button>
-                              )}
+                                {msg.retry_at && (
+                                  <div className="flex items-center gap-1.5 text-[10px] text-amber-300/80">
+                                    <RotateCw className="w-2.5 h-2.5 flex-shrink-0" />
+                                    <span>
+                                      Retry scheduled · Next attempt: {formatDateTime(msg.retry_at)}
+                                      {msg.retry_count != null && <span> · Attempt {msg.retry_count} / 3</span>}
+                                    </span>
+                                  </div>
+                                )}
+                                {(msg.error_message || msg.error_title || msg.error_details || msg.error_code != null) && (
+                                  <button
+                                    onClick={() => setExpandedErrors(prev => {
+                                      const next = new Set(prev);
+                                      if (next.has(msg.id)) next.delete(msg.id);
+                                      else next.add(msg.id);
+                                      return next;
+                                    })}
+                                    className="flex items-center gap-1 text-[10px] text-stone-400 hover:text-stone-300 transition"
+                                  >
+                                    {expandedErrors.has(msg.id) ? <ChevronUp className="w-2.5 h-2.5" /> : <ChevronDown className="w-2.5 h-2.5" />}
+                                    Details
+                                  </button>
+                                )}
+                              </div>
                               {expandedErrors.has(msg.id) && (
-                                <div className="mt-1 px-2 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 text-[10px] text-red-200/90 space-y-0.5 font-mono">
+                                <div className="mt-1 w-full max-h-32 overflow-x-auto overflow-y-auto px-2 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 text-[10px] text-red-200/90 space-y-0.5 font-mono break-all">
                                   {msg.error_code != null && (
                                     <p><span className="text-red-300/60">Code:</span> {msg.error_code}</p>
                                   )}
@@ -839,7 +935,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
               </div>
             )}
 
-            {(window === 'open' || window === 'expiring') ? (
+            {(serviceWindow === 'open' || serviceWindow === 'expiring') ? (
               <>
               {/* Asset attachment preview with editable message */}
               {selectedAsset && (
@@ -915,22 +1011,282 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
               </div>
               </>
             ) : (
-              <div className="flex items-center gap-2">
-                <div className="flex-1 flex items-center gap-2 px-3.5 py-3 bg-white border border-stone-200 rounded-2xl opacity-60 cursor-not-allowed select-none">
-                  <Lock className="w-4 h-4 text-stone-400 flex-shrink-0" />
-                  <span className="text-sm text-stone-400">
-                    {window === 'closed'
-                      ? 'Service window expired. Free-form replies are unavailable.'
-                      : 'No service window. Free-form replies are unavailable.'}
+              <div className="space-y-2">
+                {/* Expired window info banner */}
+                <div className="flex items-center gap-2 px-3 py-2 bg-stone-100 border border-stone-200 rounded-lg">
+                  <Lock className="w-3.5 h-3.5 text-stone-400 flex-shrink-0" />
+                  <span className="text-xs text-stone-500">
+                    {serviceWindow === 'closed'
+                      ? 'Service window expired. Send an approved template with an asset.'
+                      : 'No service window. Send an approved template with an asset.'}
                   </span>
                 </div>
-                <button
-                  disabled
-                  className="flex-shrink-0 w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center opacity-50 cursor-not-allowed"
-                  title="Choose Template (coming soon)"
-                >
-                  <FileCheck2 className="w-4 h-4 text-stone-400" />
-                </button>
+
+                {/* Asset selection for template send */}
+                {selectedAsset && selectedTemplate ? (
+                  <div className="px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
+                    {/* Asset info */}
+                    <div className="flex items-start gap-2.5">
+                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-white border border-amber-200 flex items-center justify-center overflow-hidden">
+                        {selectedAsset.asset_type === 'IMAGE'
+                          ? <ImageIcon className="w-4 h-4 text-stone-500" />
+                          : <FileText className="w-4 h-4 text-stone-500" />}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-stone-800 truncate">{selectedAsset.name}</p>
+                        <p className="text-xs text-stone-500 truncate">
+                          {selectedAsset.file_name}
+                          {selectedAsset.file_size != null && ` · ${formatBytes(selectedAsset.file_size)}`}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => { setSelectedAsset(null); setSelectedTemplate(null); setTemplateParams([]); }}
+                        className="flex-shrink-0 p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition"
+                        aria-label="Remove attachment"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* Template info */}
+                    <div className="flex items-start gap-2.5 pt-2 border-t border-amber-200/60">
+                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-white border border-amber-200 flex items-center justify-center">
+                        <LayoutTemplate className="w-4 h-4 text-stone-500" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-stone-800 truncate">{selectedTemplate.name}</p>
+                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium">
+                            {getTemplateHeaderFormat(selectedTemplate) ?? 'No header'}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium flex items-center gap-0.5">
+                            <Globe className="w-2.5 h-2.5" />
+                            {selectedTemplate.language}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium">
+                            {selectedTemplate.category}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => { setSelectedTemplate(null); setTemplateParams([]); }}
+                        className="flex-shrink-0 text-[10px] font-medium text-stone-500 hover:text-stone-700 transition px-1.5 py-1 rounded"
+                      >
+                        Change
+                      </button>
+                    </div>
+
+                    {/* Template body parameters */}
+                    {(() => {
+                      const bodyParams = getTemplateBodyExampleParams(selectedTemplate);
+                      if (bodyParams.length === 0) return null;
+                      return (
+                        <div className="pt-2 border-t border-amber-200/60">
+                          <label className="block text-[10px] font-medium text-stone-500 uppercase tracking-wide mb-1.5">
+                            Template Parameters
+                          </label>
+                          <div className="space-y-1.5">
+                            {bodyParams.map((idx, i) => (
+                              <div key={idx}>
+                                <label className="block text-[10px] text-stone-400 mb-0.5">Parameter {idx}</label>
+                                <input
+                                  type="text"
+                                  value={templateParams[i] ?? ''}
+                                  onChange={e => {
+                                    const next = [...templateParams];
+                                    next[i] = e.target.value;
+                                    setTemplateParams(next);
+                                  }}
+                                  placeholder={`Value for {{${idx}}}`}
+                                  className="w-full px-2.5 py-1.5 text-sm border border-amber-200 rounded-lg bg-white text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Send button */}
+                    <div className="flex items-center gap-2 pt-2 border-t border-amber-200/60">
+                      <button
+                        onClick={() => { setSelectedAsset(null); setSelectedTemplate(null); setTemplateParams([]); }}
+                        disabled={sending}
+                        className="flex-1 px-3 py-2 text-sm font-medium text-stone-600 border border-stone-200 rounded-lg hover:bg-stone-50 transition disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleSend}
+                        disabled={sending}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium text-white bg-stone-800 hover:bg-stone-700 rounded-lg transition disabled:opacity-50"
+                      >
+                        {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                        Send Template
+                      </button>
+                    </div>
+                  </div>
+                ) : textOnlyTemplate ? (
+                  /* Text-only template selected (no asset) */
+                  <div className="px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
+                    <div className="flex items-start gap-2.5">
+                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-white border border-amber-200 flex items-center justify-center">
+                        <LayoutTemplate className="w-4 h-4 text-stone-500" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-stone-800 truncate">{textOnlyTemplate.name}</p>
+                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium">
+                            Text only
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium flex items-center gap-0.5">
+                            <Globe className="w-2.5 h-2.5" />
+                            {textOnlyTemplate.language}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium">
+                            {textOnlyTemplate.category}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => { setTextOnlyTemplate(null); setTextOnlyParams([]); }}
+                        className="flex-shrink-0 p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition"
+                        aria-label="Remove template"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* Template body preview */}
+                    {(() => {
+                      const bodyText = getTemplateBodyText(textOnlyTemplate);
+                      if (!bodyText) return null;
+                      return (
+                        <div className="pt-2 border-t border-amber-200/60">
+                          <label className="block text-[10px] font-medium text-stone-500 uppercase tracking-wide mb-1">
+                            Template Body
+                          </label>
+                          <p className="text-xs text-stone-600 leading-relaxed bg-white border border-amber-200/50 rounded-lg px-2.5 py-2">
+                            {bodyText}
+                          </p>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Template body parameters */}
+                    {(() => {
+                      const bodyParams = getTemplateBodyExampleParams(textOnlyTemplate);
+                      if (bodyParams.length === 0) return null;
+                      return (
+                        <div className="pt-2 border-t border-amber-200/60">
+                          <label className="block text-[10px] font-medium text-stone-500 uppercase tracking-wide mb-1.5">
+                            Template Parameters
+                          </label>
+                          <div className="space-y-1.5">
+                            {bodyParams.map((idx, i) => (
+                              <div key={idx}>
+                                <label className="block text-[10px] text-stone-400 mb-0.5">Parameter {idx}</label>
+                                <input
+                                  type="text"
+                                  value={textOnlyParams[i] ?? ''}
+                                  onChange={e => {
+                                    const next = [...textOnlyParams];
+                                    next[i] = e.target.value;
+                                    setTextOnlyParams(next);
+                                  }}
+                                  placeholder={`Value for {{${idx}}}`}
+                                  className="w-full px-2.5 py-1.5 text-sm border border-amber-200 rounded-lg bg-white text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Send / Cancel */}
+                    <div className="flex items-center gap-2 pt-2 border-t border-amber-200/60">
+                      <button
+                        onClick={() => { setTextOnlyTemplate(null); setTextOnlyParams([]); }}
+                        disabled={sending}
+                        className="flex-1 px-3 py-2 text-sm font-medium text-stone-600 border border-stone-200 rounded-lg hover:bg-stone-50 transition disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleSend}
+                        disabled={sending}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium text-white bg-stone-800 hover:bg-stone-700 rounded-lg transition disabled:opacity-50"
+                      >
+                        {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                        Send Template
+                      </button>
+                    </div>
+                  </div>
+                ) : selectedAsset ? (
+                  /* Asset selected, need template */
+                  <div className="space-y-2">
+                    <div className="flex items-start gap-2.5 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-white border border-amber-200 flex items-center justify-center overflow-hidden">
+                        {selectedAsset.asset_type === 'IMAGE'
+                          ? <ImageIcon className="w-4 h-4 text-stone-500" />
+                          : <FileText className="w-4 h-4 text-stone-500" />}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-stone-800 truncate">{selectedAsset.name}</p>
+                        <p className="text-xs text-stone-500 truncate">
+                          {selectedAsset.file_name}
+                          {selectedAsset.file_size != null && ` · ${formatBytes(selectedAsset.file_size)}`}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => { setSelectedAsset(null); setTemplateParams([]); }}
+                        className="flex-shrink-0 p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition"
+                        aria-label="Remove attachment"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => setShowTemplatePicker(true)}
+                      className="w-full flex items-center justify-center gap-1.5 px-3 py-2.5 text-sm font-medium text-stone-700 border border-stone-200 rounded-lg hover:bg-stone-50 transition bg-white"
+                    >
+                      <LayoutTemplate className="w-4 h-4" />
+                      Choose Template
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 flex items-center gap-2 px-3.5 py-3 bg-white border border-stone-200 rounded-2xl opacity-60 cursor-not-allowed select-none">
+                        <Lock className="w-4 h-4 text-stone-400 flex-shrink-0" />
+                        <span className="text-sm text-stone-400">
+                          {serviceWindow === 'closed'
+                            ? 'Service window expired. Free-form replies are unavailable.'
+                            : 'No service window. Free-form replies are unavailable.'}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setShowTextOnlyPicker(true)}
+                        disabled={sending}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-sm font-medium text-stone-700 border border-stone-200 rounded-lg hover:bg-stone-50 transition bg-white"
+                      >
+                        <LayoutTemplate className="w-4 h-4" />
+                        Use Template
+                      </button>
+                      <button
+                        onClick={() => setShowAssetPicker(true)}
+                        disabled={sending}
+                        className="flex items-center justify-center gap-1.5 px-3 py-2.5 text-sm font-medium text-stone-700 border border-stone-200 rounded-lg hover:bg-stone-50 transition bg-white"
+                      >
+                        <Paperclip className="w-4 h-4" />
+                        Asset + Template
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -958,33 +1314,23 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                 <p className="text-sm font-semibold text-stone-800">
                   {wCfg.label}
                 </p>
-                {window === 'open' && (
+                {serviceWindow === 'open' && (
                   <p className="text-xs text-stone-500 mt-0.5">
-                    {(() => {
-                      const expiresAt = conversation.customer_service_window_expires_at;
-                      const normalized = /[Zz]$/.test(expiresAt) || /[+-]\d{2}:?\d{2}$/.test(expiresAt)
-                        ? expiresAt
-                        : expiresAt.replace(' ', 'T') + 'Z';
-                      const diff = new Date(normalized).getTime() - Date.now();
-                      if (diff <= 0) return 'expired';
-                      const hours = Math.floor(diff / (60 * 60 * 1000));
-                      const minutes = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000));
-                      return hours > 0 ? `${hours}h ${minutes}m remaining` : `${minutes}m remaining`;
-                    })()}
+                    {formatRemaining(conversation.customer_service_window_expires_at)}
                   </p>
                 )}
-                {window === 'expiring' && (
+                {serviceWindow === 'expiring' && (
                   <p className="text-xs text-amber-600 mt-0.5 font-medium">
                     {formatRemaining(conversation.customer_service_window_expires_at)}
                   </p>
                 )}
-                {window === 'closed' && (
+                {serviceWindow === 'closed' && (
                   <p className="text-xs text-stone-400 mt-0.5">
                     {formatExpiredAgo(conversation.customer_service_window_expires_at)}
                   </p>
                 )}
                 <p className="text-[10px] text-stone-400 mt-1">
-                  {window === 'closed' ? 'Expired' : 'Expires'}: {formatDateTime(conversation.customer_service_window_expires_at)}
+                  {serviceWindow === 'closed' ? 'Expired' : 'Expires'}: {formatDateTime(conversation.customer_service_window_expires_at)}
                 </p>
               </div>
             ) : (
@@ -1115,6 +1461,31 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
             setShowAssetPicker(false);
           }}
           onClose={() => setShowAssetPicker(false)}
+        />
+      )}
+
+      {/* ── Template Picker Modal (asset flow) ── */}
+      {showTemplatePicker && selectedAsset && (
+        <TemplatePickerModal
+          assetType={selectedAsset.asset_type}
+          onSelect={(tpl) => {
+            setSelectedTemplate(tpl);
+            setTemplateParams([]);
+            setShowTemplatePicker(false);
+          }}
+          onClose={() => setShowTemplatePicker(false)}
+        />
+      )}
+
+      {/* ── Text-Only Template Picker Modal ── */}
+      {showTextOnlyPicker && (
+        <TextOnlyTemplatePickerModal
+          onSelect={(tpl) => {
+            setTextOnlyTemplate(tpl);
+            setTextOnlyParams([]);
+            setShowTextOnlyPicker(false);
+          }}
+          onClose={() => setShowTextOnlyPicker(false)}
         />
       )}
 
@@ -1351,6 +1722,400 @@ function AssetPickerModal({ onSelect, onClose }: AssetPickerModalProps) {
                 </button>
               ))}
             </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Template Picker Modal ─────────────────────────────────────────────────────
+
+interface TemplatePickerModalProps {
+  assetType: 'IMAGE' | 'DOCUMENT';
+  onSelect: (template: MetaTemplate) => void;
+  onClose: () => void;
+}
+
+function TemplatePickerModal({ assetType, onSelect, onClose }: TemplatePickerModalProps) {
+  const [templates, setTemplates] = useState<MetaTemplate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError('');
+      try {
+        const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/fetch-whatsapp-templates?limit=100`;
+        const resp = await fetch(apiUrl, {
+          headers: {
+            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+          },
+        });
+        if (!cancelled) {
+          const data = await resp.json();
+          if (!resp.ok) {
+            setError(data.error || 'Failed to load templates.');
+            setTemplates([]);
+          } else {
+            setTemplates(data.templates ?? []);
+            setNextCursor(data.nextCursor ?? null);
+          }
+        }
+      } catch {
+        if (!cancelled) setError('Failed to load templates.');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  async function loadMore() {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/fetch-whatsapp-templates?limit=100&after=${nextCursor}`;
+      const resp = await fetch(apiUrl, {
+        headers: { 'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
+      });
+      const data = await resp.json();
+      if (resp.ok) {
+        setTemplates(prev => [...prev, ...(data.templates ?? [])]);
+        setNextCursor(data.nextCursor ?? null);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  function handleSearchChange(v: string) {
+    setSearchInput(v);
+    setTimeout(() => setSearchTerm(v), 300);
+  }
+
+  const approvedTemplates = templates.filter(t => t.status.toLowerCase() === 'approved');
+  const compatibleTemplates = approvedTemplates.filter(t => isTemplateCompatible(t, assetType));
+  const filtered = searchTerm.trim()
+    ? compatibleTemplates.filter(t =>
+        t.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        t.language.toLowerCase().includes(searchTerm.toLowerCase()))
+    : compatibleTemplates;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100">
+          <div>
+            <h2 className="text-base font-semibold text-stone-800">Choose Template</h2>
+            <p className="text-xs text-stone-400 mt-0.5">
+              Showing approved templates with {assetType === 'IMAGE' ? 'IMAGE' : 'DOCUMENT'} header
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Search */}
+        <div className="px-5 py-3 border-b border-stone-100">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={e => handleSearchChange(e.target.value)}
+              placeholder="Search templates…"
+              className="w-full pl-9 pr-3 py-2 text-sm border border-stone-200 rounded-lg bg-white text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition"
+            />
+          </div>
+        </div>
+
+        {/* List */}
+        <div className="flex-1 overflow-y-auto px-5 py-3">
+          {loading && (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-5 h-5 text-stone-400 animate-spin" />
+            </div>
+          )}
+          {error && (
+            <div className="flex items-center gap-2 px-3 py-2.5 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              {error}
+            </div>
+          )}
+          {!loading && !error && filtered.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <div className="w-12 h-12 rounded-full bg-stone-100 flex items-center justify-center mb-3">
+                <LayoutTemplate className="w-5 h-5 text-stone-400" />
+              </div>
+              <p className="text-sm font-medium text-stone-500">No compatible templates found</p>
+              <p className="text-xs text-stone-400 mt-1">
+                {searchTerm
+                  ? 'Try adjusting your search.'
+                  : `No approved templates with ${assetType} header exist yet.`}
+              </p>
+            </div>
+          )}
+          {!loading && !error && filtered.length > 0 && (
+            <>
+              <div className="space-y-1.5">
+                {filtered.map(tpl => {
+                  const headerFmt = getTemplateHeaderFormat(tpl);
+                  const bodyParams = getTemplateBodyExampleParams(tpl);
+                  return (
+                    <button
+                      key={tpl.id}
+                      onClick={() => onSelect(tpl)}
+                      className="w-full flex items-start gap-3 px-3 py-2.5 rounded-xl border border-stone-100 hover:border-stone-300 hover:bg-stone-50 transition text-left"
+                    >
+                      <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-stone-50 border border-stone-100 flex items-center justify-center">
+                        <LayoutTemplate className="w-4 h-4 text-stone-400" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-stone-800 truncate">{tpl.name}</span>
+                          {headerFmt && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 font-medium flex-shrink-0">
+                              {headerFmt}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium flex items-center gap-0.5">
+                            <Globe className="w-2.5 h-2.5" />
+                            {tpl.language}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium">
+                            {tpl.category}
+                          </span>
+                          {bodyParams.length > 0 && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-500 font-medium">
+                              {bodyParams.length} param{bodyParams.length > 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              {nextCursor && (
+                <button
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2.5 mt-2 text-sm text-stone-500 hover:text-stone-700 hover:bg-stone-50 rounded-lg transition"
+                >
+                  {loadingMore ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronDown className="w-4 h-4" />}
+                  Load more
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Text-Only Template Picker Modal ───────────────────────────────────────────
+
+interface TextOnlyTemplatePickerModalProps {
+  onSelect: (template: MetaTemplate) => void;
+  onClose: () => void;
+}
+
+function TextOnlyTemplatePickerModal({ onSelect, onClose }: TextOnlyTemplatePickerModalProps) {
+  const [templates, setTemplates] = useState<MetaTemplate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError('');
+      try {
+        const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/fetch-whatsapp-templates?limit=100`;
+        const resp = await fetch(apiUrl, {
+          headers: {
+            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+          },
+        });
+        if (!cancelled) {
+          const data = await resp.json();
+          if (!resp.ok) {
+            setError(data.error || 'Failed to load templates.');
+            setTemplates([]);
+          } else {
+            setTemplates(data.templates ?? []);
+            setNextCursor(data.nextCursor ?? null);
+          }
+        }
+      } catch {
+        if (!cancelled) setError('Failed to load templates.');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  async function loadMore() {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/fetch-whatsapp-templates?limit=100&after=${nextCursor}`;
+      const resp = await fetch(apiUrl, {
+        headers: { 'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
+      });
+      const data = await resp.json();
+      if (resp.ok) {
+        setTemplates(prev => [...prev, ...(data.templates ?? [])]);
+        setNextCursor(data.nextCursor ?? null);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  function handleSearchChange(v: string) {
+    setSearchInput(v);
+    setTimeout(() => setSearchTerm(v), 300);
+  }
+
+  const approvedTemplates = templates.filter(t => t.status.toLowerCase() === 'approved');
+  const textOnlyTemplates = approvedTemplates.filter(isTextOnlyTemplate);
+  const filtered = searchTerm.trim()
+    ? textOnlyTemplates.filter(t =>
+        t.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        t.language.toLowerCase().includes(searchTerm.toLowerCase()))
+    : textOnlyTemplates;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100">
+          <div>
+            <h2 className="text-base font-semibold text-stone-800">Choose Text Template</h2>
+            <p className="text-xs text-stone-400 mt-0.5">Approved templates without media headers</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="px-5 py-3 border-b border-stone-100">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={e => handleSearchChange(e.target.value)}
+              placeholder="Search templates…"
+              className="w-full pl-9 pr-3 py-2 text-sm border border-stone-200 rounded-lg bg-white text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition"
+            />
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-3">
+          {loading && (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-5 h-5 text-stone-400 animate-spin" />
+            </div>
+          )}
+          {error && (
+            <div className="flex items-center gap-2 px-3 py-2.5 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              {error}
+            </div>
+          )}
+          {!loading && !error && filtered.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <div className="w-12 h-12 rounded-full bg-stone-100 flex items-center justify-center mb-3">
+                <LayoutTemplate className="w-5 h-5 text-stone-400" />
+              </div>
+              <p className="text-sm font-medium text-stone-500">No text-only templates found</p>
+              <p className="text-xs text-stone-400 mt-1">
+                {searchTerm ? 'Try adjusting your search.' : 'No approved text-only templates exist yet.'}
+              </p>
+            </div>
+          )}
+          {!loading && !error && filtered.length > 0 && (
+            <>
+              <div className="space-y-1.5">
+                {filtered.map(tpl => {
+                  const bodyParams = getTemplateBodyExampleParams(tpl);
+                  const bodyText = getTemplateBodyText(tpl);
+                  return (
+                    <button
+                      key={tpl.id}
+                      onClick={() => onSelect(tpl)}
+                      className="w-full flex items-start gap-3 px-3 py-2.5 rounded-xl border border-stone-100 hover:border-stone-300 hover:bg-stone-50 transition text-left"
+                    >
+                      <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-stone-50 border border-stone-100 flex items-center justify-center">
+                        <LayoutTemplate className="w-4 h-4 text-stone-400" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <span className="text-sm font-medium text-stone-800 truncate">{tpl.name}</span>
+                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium flex items-center gap-0.5">
+                            <Globe className="w-2.5 h-2.5" />
+                            {tpl.language}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 text-stone-500 font-medium">
+                            {tpl.category}
+                          </span>
+                          {bodyParams.length > 0 && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-500 font-medium">
+                              {bodyParams.length} param{bodyParams.length > 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
+                        {bodyText && (
+                          <p className="text-xs text-stone-400 mt-1 line-clamp-2 leading-relaxed">{bodyText}</p>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              {nextCursor && (
+                <button
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2.5 mt-2 text-sm text-stone-500 hover:text-stone-700 hover:bg-stone-50 rounded-lg transition"
+                >
+                  {loadingMore ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronDown className="w-4 h-4" />}
+                  Load more
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>

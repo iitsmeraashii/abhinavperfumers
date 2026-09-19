@@ -14,6 +14,9 @@ interface SendRequestBody {
   text_body?: string;
   asset_id?: string;
   share_message?: string;
+  template_name?: string;
+  template_language?: string;
+  template_params?: { type: string; [key: string]: unknown }[];
 }
 
 Deno.serve(async (req: Request) => {
@@ -40,10 +43,12 @@ Deno.serve(async (req: Request) => {
     }
 
     const body = await req.json() as SendRequestBody;
-    const { conversation_id, text_body, asset_id, share_message } = body;
+    const { conversation_id, text_body, asset_id, share_message, template_name, template_language, template_params } = body;
 
-    const isTextSend = !asset_id;
-    const isMediaSend = !!asset_id;
+    const isTextSend = !asset_id && !template_name;
+    const isMediaSend = !!asset_id && !template_name;
+    const isTemplateAssetSend = !!template_name && !!asset_id;
+    const isTextOnlyTemplateSend = !!template_name && !asset_id;
 
     if (!conversation_id) {
       return new Response(
@@ -62,6 +67,13 @@ Deno.serve(async (req: Request) => {
     if (isMediaSend && !asset_id?.trim()) {
       return new Response(
         JSON.stringify({ error: "Missing required field: asset_id" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    if (isTextOnlyTemplateSend && !template_name?.trim()) {
+      return new Response(
+        JSON.stringify({ error: "Missing required field: template_name" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
@@ -89,7 +101,11 @@ Deno.serve(async (req: Request) => {
     const expiresAt = conversation.customer_service_window_expires_at
       ? new Date(conversation.customer_service_window_expires_at).getTime()
       : 0;
-    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    const windowOpen = Number.isFinite(expiresAt) && expiresAt > Date.now();
+
+    // Template sends (both text-only and asset-backed) are allowed when the window is expired/closed.
+    // Free-form text and direct media sends require an open window.
+    if (!isTemplateAssetSend && !isTextOnlyTemplateSend && !windowOpen) {
       return new Response(
         JSON.stringify({ error: "The customer service window has expired. Start a new conversation with an approved template." }),
         { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
@@ -157,6 +173,26 @@ Deno.serve(async (req: Request) => {
         .maybeSingle();
 
       fromPhone = lastOutbound?.from_phone ?? null;
+    }
+
+    // ── Text-only template send path (expired window, no asset) ──
+    if (isTextOnlyTemplateSend) {
+      return await sendTextOnlyTemplateMessage({
+        supabase, token, wabaId, phoneNumberId, toPhone, fromPhone,
+        conversation_id, template_name: template_name!,
+        template_language: template_language || null,
+        template_params: template_params ?? [],
+      });
+    }
+
+    // ── Template + asset media send path (expired window) ──
+    if (isTemplateAssetSend) {
+      return await sendTemplateAssetMessage({
+        supabase, token, wabaId, phoneNumberId, toPhone, fromPhone,
+        conversation_id, asset_id: asset_id!, template_name: template_name!,
+        template_language: template_language || null,
+        template_params: template_params ?? [],
+      });
     }
 
     // ── Text message path (existing behavior, unchanged) ──
@@ -574,6 +610,523 @@ async function sendAssetMessage(opts: {
       success: true,
       wamid,
       message: "Asset sent",
+    }),
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+  );
+}
+
+// ── Template + asset media sender (expired service window) ────────────────────
+
+async function sendTemplateAssetMessage(opts: {
+  supabase: ReturnType<typeof createClient>;
+  token: string;
+  wabaId: string;
+  phoneNumberId: string;
+  toPhone: string;
+  fromPhone: string | null;
+  conversation_id: string;
+  asset_id: string;
+  template_name: string;
+  template_language: string | null;
+  template_params: { type: string; [key: string]: unknown }[];
+}): Promise<Response> {
+  const {
+    supabase, token, wabaId, phoneNumberId, toPhone, fromPhone,
+    conversation_id, asset_id, template_name, template_language, template_params,
+  } = opts;
+
+  // ── Validate the asset ──
+  const { data: asset, error: assetError } = await supabase
+    .from("whatsapp_assets")
+    .select("id, name, asset_type, file_name, storage_path, mime_type, file_size, active")
+    .eq("id", asset_id)
+    .maybeSingle();
+
+  if (assetError || !asset) {
+    return new Response(
+      JSON.stringify({ error: "Asset not found" }),
+      { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  if (!asset.active) {
+    return new Response(
+      JSON.stringify({ error: "This asset is no longer active" }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // ── Fetch the template from Meta to validate it's still approved ──
+  const templateUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/message_templates?limit=500`;
+  const templateResp = await fetch(templateUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!templateResp.ok) {
+    const errBody = await templateResp.text();
+    return new Response(
+      JSON.stringify({ error: `Failed to verify template status: ${errBody}` }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const templateData = await templateResp.json() as {
+    data?: {
+      id: string;
+      name: string;
+      status: string;
+      language: string;
+      category: string;
+      components?: { type: string; format?: string; text?: string }[];
+    }[];
+  };
+
+  const matchedTemplate = (templateData.data ?? []).find(
+    (t) => t.name === template_name && (!template_language || t.language === template_language),
+  );
+
+  if (!matchedTemplate) {
+    return new Response(
+      JSON.stringify({ error: "The selected template could not be found. It may have been deleted." }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  if (matchedTemplate.status.toLowerCase() !== "approved") {
+    return new Response(
+      JSON.stringify({ error: `Template "${template_name}" is no longer approved (status: ${matchedTemplate.status}).` }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // ── Validate header compatibility ──
+  const headerComponent = (matchedTemplate.components ?? []).find(
+    (c) => c.type.toLowerCase() === "header",
+  );
+
+  const headerFormat = headerComponent?.format?.toUpperCase() ?? null;
+  const assetType = asset.asset_type.toUpperCase();
+
+  if (!headerFormat) {
+    return new Response(
+      JSON.stringify({ error: "The selected template does not have a media header." }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  if (assetType === "IMAGE" && headerFormat !== "IMAGE") {
+    return new Response(
+      JSON.stringify({ error: `This image asset requires a template with an IMAGE header, but the template has a ${headerFormat} header.` }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  if (assetType === "DOCUMENT" && headerFormat !== "DOCUMENT") {
+    return new Response(
+      JSON.stringify({ error: `This document asset requires a template with a DOCUMENT header, but the template has a ${headerFormat} header.` }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // ── Download the asset from private storage ──
+  const { data: fileData, error: downloadError } = await supabase
+    .storage
+    .from("whatsapp-assets")
+    .download(asset.storage_path);
+
+  if (downloadError || !fileData) {
+    return new Response(
+      JSON.stringify({ error: "Failed to retrieve asset file from storage" }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const fileBytes = new Uint8Array(await fileData.arrayBuffer());
+
+  // ── Upload media to Meta ──
+  const mediaType = assetType === "IMAGE" ? "image" : "document";
+  const uploadUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/media`;
+  const formData = new FormData();
+  formData.append("messaging_product", "whatsapp");
+  formData.append("type", asset.mime_type);
+  const uploadBlob = new Blob([fileBytes], { type: asset.mime_type });
+  formData.append("file", uploadBlob, asset.file_name);
+
+  const uploadResp = await fetch(uploadUrl, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: formData,
+  });
+
+  const uploadJson = await uploadResp.json();
+
+  if (!uploadResp.ok) {
+    const errorObj = uploadJson?.error || {};
+    const now = new Date().toISOString();
+
+    await supabase.from("whatsapp_messages").insert({
+      conversation_id,
+      direction: "OUTBOUND",
+      source: "LEADSINN",
+      message_type: "TEMPLATE",
+      message_purpose: "TEMPLATE_ASSET_SHARE",
+      from_phone: fromPhone || null,
+      to_phone: toPhone,
+      template_id: matchedTemplate.id,
+      template_name: template_name,
+      media_filename: asset.file_name,
+      media_mime_type: asset.mime_type,
+      status: "FAILED",
+      error_code: errorObj.code ?? null,
+      error_title: errorObj.title ?? null,
+      error_message: errorObj.message ?? null,
+      error_details: errorObj.error_data?.details ?? JSON.stringify(errorObj),
+      failed_at: now,
+      last_attempt_at: now,
+      timestamp: now,
+      raw_payload: uploadJson,
+      attempt_log: [{ at: now, stage: "meta_media_upload", error: errorObj.message ?? "Unknown error" }],
+    });
+
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: errorObj.message || "Meta API rejected the media upload",
+        error_code: errorObj.code,
+      }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const mediaId = uploadJson?.id;
+
+  if (!mediaId) {
+    return new Response(
+      JSON.stringify({ error: "Meta media upload succeeded but no media ID was returned" }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // ── Build the template message with media header ──
+  const metaUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+
+  // Build header parameter with the uploaded media
+  const headerParams = [{
+    type: mediaType,
+    [mediaType]: { id: mediaId },
+  }];
+
+  // Build body parameters from the client-provided params
+  const bodyParams = (template_params ?? []).map((p) => ({
+    type: p.type,
+    text: p.text ?? p.payload ?? "",
+  }));
+
+  const components: Record<string, unknown>[] = [];
+  components.push({ type: "header", parameters: headerParams });
+  if (bodyParams.length > 0) {
+    components.push({ type: "body", parameters: bodyParams });
+  }
+
+  const metaBody = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: toPhone,
+    type: "template",
+    template: {
+      name: template_name,
+      language: { code: template_language || matchedTemplate.language },
+      components,
+    },
+  };
+
+  const metaResp = await fetch(metaUrl, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(metaBody),
+  });
+
+  const metaJson = await metaResp.json();
+
+  if (!metaResp.ok) {
+    const errorObj = metaJson?.error || {};
+    const now = new Date().toISOString();
+
+    await supabase.from("whatsapp_messages").insert({
+      conversation_id,
+      direction: "OUTBOUND",
+      source: "LEADSINN",
+      message_type: "TEMPLATE",
+      message_purpose: "TEMPLATE_ASSET_SHARE",
+      from_phone: fromPhone || null,
+      to_phone: toPhone,
+      template_id: matchedTemplate.id,
+      template_name: template_name,
+      media_id: mediaId,
+      media_filename: asset.file_name,
+      media_mime_type: asset.mime_type,
+      status: "FAILED",
+      error_code: errorObj.code ?? null,
+      error_title: errorObj.title ?? null,
+      error_message: errorObj.message ?? null,
+      error_details: errorObj.error_data?.details ?? JSON.stringify(errorObj),
+      failed_at: now,
+      last_attempt_at: now,
+      timestamp: now,
+      raw_payload: metaJson,
+      attempt_log: [{ at: now, stage: "meta_api", error: errorObj.message ?? "Unknown error" }],
+    });
+
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: errorObj.message || "Meta API rejected the template message",
+        error_code: errorObj.code,
+      }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const wamid = metaJson?.messages?.[0]?.id ?? null;
+  const now = new Date().toISOString();
+
+  const { error: insertErr } = await supabase.from("whatsapp_messages").insert({
+    conversation_id,
+    wamid,
+    direction: "OUTBOUND",
+    source: "LEADSINN",
+    message_type: "TEMPLATE",
+    message_purpose: "TEMPLATE_ASSET_SHARE",
+    from_phone: fromPhone || null,
+    to_phone: toPhone,
+    template_id: matchedTemplate.id,
+    template_name: template_name,
+    media_id: mediaId,
+    media_filename: asset.file_name,
+    media_mime_type: asset.mime_type,
+    status: "ACCEPTED",
+    accepted_at: now,
+    last_attempt_at: now,
+    timestamp: now,
+    raw_payload: metaJson,
+    attempt_log: [],
+  });
+
+  if (insertErr) {
+    console.error("[send-whatsapp-message] Failed to insert template message row:", insertErr.message);
+  }
+
+  // ── Update conversation timestamps ──
+  await supabase
+    .from("whatsapp_conversations")
+    .update({
+      last_message_at: now,
+      last_outbound_at: now,
+      updated_at: now,
+    })
+    .eq("id", conversation_id);
+
+  return new Response(
+    JSON.stringify({
+      success: true,
+      wamid,
+      message: "Template sent",
+    }),
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+  );
+}
+
+// ── Text-only template sender (no asset, expired window) ──────────────────────
+
+async function sendTextOnlyTemplateMessage(opts: {
+  supabase: ReturnType<typeof createClient>;
+  token: string;
+  wabaId: string;
+  phoneNumberId: string;
+  toPhone: string;
+  fromPhone: string | null;
+  conversation_id: string;
+  template_name: string;
+  template_language: string | null;
+  template_params: { type: string; [key: string]: unknown }[];
+}): Promise<Response> {
+  const {
+    supabase, token, wabaId, phoneNumberId, toPhone, fromPhone,
+    conversation_id, template_name, template_language, template_params,
+  } = opts;
+
+  // ── Fetch the template from Meta to validate it's still approved ──
+  const templateUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/message_templates?limit=500`;
+  const templateResp = await fetch(templateUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!templateResp.ok) {
+    const errBody = await templateResp.text();
+    return new Response(
+      JSON.stringify({ error: `Failed to verify template status: ${errBody}` }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const templateData = await templateResp.json() as {
+    data?: {
+      id: string;
+      name: string;
+      status: string;
+      language: string;
+      category: string;
+      components?: { type: string; format?: string; text?: string }[];
+    }[];
+  };
+
+  const matchedTemplate = (templateData.data ?? []).find(
+    (t) => t.name === template_name && (!template_language || t.language === template_language),
+  );
+
+  if (!matchedTemplate) {
+    return new Response(
+      JSON.stringify({ error: "The selected template could not be found. It may have been deleted." }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  if (matchedTemplate.status.toLowerCase() !== "approved") {
+    return new Response(
+      JSON.stringify({ error: `Template "${template_name}" is no longer approved (status: ${matchedTemplate.status}).` }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // ── Validate that the template has no media header (text-only) ──
+  const headerComponent = (matchedTemplate.components ?? []).find(
+    (c) => c.type.toLowerCase() === "header",
+  );
+
+  const headerFormat = headerComponent?.format?.toUpperCase() ?? null;
+
+  if (headerFormat === "IMAGE" || headerFormat === "DOCUMENT" || headerFormat === "VIDEO") {
+    return new Response(
+      JSON.stringify({ error: `The selected template requires a ${headerFormat} media header. Use the asset template flow instead.` }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // ── Build body parameters from the client-provided params ──
+  const bodyParams = (template_params ?? []).map((p) => ({
+    type: p.type,
+    text: p.text ?? p.payload ?? "",
+  }));
+
+  const components: Record<string, unknown>[] = [];
+  if (bodyParams.length > 0) {
+    components.push({ type: "body", parameters: bodyParams });
+  }
+
+  const metaBody = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: toPhone,
+    type: "template",
+    template: {
+      name: template_name,
+      language: { code: template_language || matchedTemplate.language },
+      components,
+    },
+  };
+
+  const metaUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+  const metaResp = await fetch(metaUrl, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(metaBody),
+  });
+
+  const metaJson = await metaResp.json();
+
+  if (!metaResp.ok) {
+    const errorObj = metaJson?.error || {};
+    const now = new Date().toISOString();
+
+    await supabase.from("whatsapp_messages").insert({
+      conversation_id,
+      direction: "OUTBOUND",
+      source: "LEADSINN",
+      message_type: "TEMPLATE",
+      message_purpose: "TEMPLATE_SHARE",
+      from_phone: fromPhone || null,
+      to_phone: toPhone,
+      template_id: matchedTemplate.id,
+      template_name: template_name,
+      status: "FAILED",
+      error_code: errorObj.code ?? null,
+      error_title: errorObj.title ?? null,
+      error_message: errorObj.message ?? null,
+      error_details: errorObj.error_data?.details ?? JSON.stringify(errorObj),
+      failed_at: now,
+      last_attempt_at: now,
+      timestamp: now,
+      raw_payload: metaJson,
+      attempt_log: [{ at: now, stage: "meta_api", error: errorObj.message ?? "Unknown error" }],
+    });
+
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: errorObj.message || "Meta API rejected the template message",
+        error_code: errorObj.code,
+      }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  const wamid = metaJson?.messages?.[0]?.id ?? null;
+  const now = new Date().toISOString();
+
+  const { error: insertErr } = await supabase.from("whatsapp_messages").insert({
+    conversation_id,
+    wamid,
+    direction: "OUTBOUND",
+    source: "LEADSINN",
+    message_type: "TEMPLATE",
+    message_purpose: "TEMPLATE_SHARE",
+    from_phone: fromPhone || null,
+    to_phone: toPhone,
+    template_id: matchedTemplate.id,
+    template_name: template_name,
+    status: "ACCEPTED",
+    accepted_at: now,
+    last_attempt_at: now,
+    timestamp: now,
+    raw_payload: metaJson,
+    attempt_log: [],
+  });
+
+  if (insertErr) {
+    console.error("[send-whatsapp-message] Failed to insert text-only template message row:", insertErr.message);
+  }
+
+  // ── Update conversation timestamps ──
+  await supabase
+    .from("whatsapp_conversations")
+    .update({
+      last_message_at: now,
+      last_outbound_at: now,
+      updated_at: now,
+    })
+    .eq("id", conversation_id);
+
+  return new Response(
+    JSON.stringify({
+      success: true,
+      wamid,
+      message: "Template sent",
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );
