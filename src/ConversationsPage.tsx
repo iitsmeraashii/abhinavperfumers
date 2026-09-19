@@ -53,10 +53,17 @@ const PAGE_SIZE = 25;
 
 type ServiceWindowState = 'open' | 'expiring' | 'closed' | 'none';
 
+function normalizeIso(iso: string): string {
+  return /[Zz]$/.test(iso) || /[+-]\d{2}:?\d{2}$/.test(iso)
+    ? iso
+    : iso.replace(' ', 'T') + 'Z';
+}
+
 function deriveServiceWindow(expiresAt: string | null): ServiceWindowState {
   if (!expiresAt) return 'none';
   const now = Date.now();
-  const expires = new Date(expiresAt.endsWith('Z') ? expiresAt : expiresAt + 'Z').getTime();
+  const expires = new Date(normalizeIso(expiresAt)).getTime();
+  if (isNaN(expires)) return 'none';
   if (expires <= now) return 'closed';
   const fourHours = 4 * 60 * 60 * 1000;
   if (expires - now < fourHours) return 'expiring';
