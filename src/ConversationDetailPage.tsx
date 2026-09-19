@@ -409,7 +409,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       if (cancelled) return;
 
       if (convErr) {
-        setError(convErr.message || 'Failed to load conversation.');
+        console.error('[ConversationDetail] Conversation load failed', convErr);
+        setError('We couldn\u2019t load this conversation right now. Please try again.');
         setLoading(false);
         return;
       }
@@ -458,7 +459,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       if (cancelled) return;
 
       if (msgErr) {
-        setError(msgErr.message || 'Failed to load messages.');
+        console.error('[ConversationDetail] Message load failed', msgErr);
+        setError('We couldn\u2019t load messages for this conversation. Please try again.');
         setLoading(false);
         return;
       }
@@ -597,8 +599,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
         last_outbound_at: nowIso,
       } : prev);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to send message';
-      setSendError(msg);
+      console.error('[ConversationDetail] Send failed', err);
+      setSendError('We couldn\u2019t send your message. Please try again.');
     } finally {
       setSending(false);
       requestAnimationFrame(() => textareaRef.current?.focus());
@@ -617,7 +619,8 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       .eq('lead_entry_id', unlinkTarget.leadEntryId);
 
     if (delErr) {
-      setActionError(delErr.message || 'Failed to unlink lead.');
+      console.error('[ConversationDetail] Unlink failed', delErr);
+      setActionError('We couldn\u2019t unlink this lead. Please try again.');
       setUnlinking(false);
       return;
     }
@@ -1568,7 +1571,8 @@ function AssetPickerModal({ onSelect, onClose }: AssetPickerModalProps) {
       const { data, error: err } = await q;
       if (cancelled) return;
       if (err) {
-        setError(err.message || 'Failed to load assets.');
+        console.error('[AssetPicker] Load failed', err);
+        setError('We couldn\u2019t load assets right now. Please try again.');
         setAssets([]);
       } else {
         setAssets((data ?? []) as PickerAsset[]);
@@ -1761,15 +1765,17 @@ function TemplatePickerModal({ assetType, onSelect, onClose }: TemplatePickerMod
         if (!cancelled) {
           const data = await resp.json();
           if (!resp.ok) {
-            setError(data.error || 'Failed to load templates.');
+            console.error('[TemplatePicker] Load failed', data);
+            setError('We couldn\u2019t load templates right now. Please try again.');
             setTemplates([]);
           } else {
             setTemplates(data.templates ?? []);
             setNextCursor(data.nextCursor ?? null);
           }
         }
-      } catch {
-        if (!cancelled) setError('Failed to load templates.');
+      } catch (err) {
+        console.error('[TemplatePicker] Fetch error', err);
+        if (!cancelled) setError('We couldn\u2019t load templates right now. Please try again.');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -1963,15 +1969,17 @@ function TextOnlyTemplatePickerModal({ onSelect, onClose }: TextOnlyTemplatePick
         if (!cancelled) {
           const data = await resp.json();
           if (!resp.ok) {
-            setError(data.error || 'Failed to load templates.');
+            console.error('[TemplatePicker] Load failed', data);
+            setError('We couldn\u2019t load templates right now. Please try again.');
             setTemplates([]);
           } else {
             setTemplates(data.templates ?? []);
             setNextCursor(data.nextCursor ?? null);
           }
         }
-      } catch {
-        if (!cancelled) setError('Failed to load templates.');
+      } catch (err) {
+        console.error('[TemplatePicker] Fetch error', err);
+        if (!cancelled) setError('We couldn\u2019t load templates right now. Please try again.');
       } finally {
         if (!cancelled) setLoading(false);
       }

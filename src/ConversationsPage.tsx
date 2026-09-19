@@ -146,7 +146,8 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
         .limit(200);
 
       if (msgErr) {
-        setError(msgErr.message || 'Failed to search messages.');
+        console.error('[ConversationsPage] Message search failed', msgErr);
+        setError('We couldn’t load conversations right now. Please try again.');
         setRows([]);
         setTotal(0);
         setLoading(false);
@@ -201,7 +202,8 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
     const { data, count, error: err } = await q;
 
     if (err) {
-      setError(err.message || 'Failed to load conversations.');
+      console.error('[ConversationsPage] Conversation load failed', err);
+      setError('We couldn’t load conversations right now. Please try again.');
       setRows([]);
       setTotal(0);
       setLoading(false);
