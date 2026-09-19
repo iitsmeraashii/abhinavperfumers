@@ -83,6 +83,48 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
+    // ── Verify caller identity and conversation authorization ──
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Missing authorization token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    const callerJwt = authHeader.replace("Bearer ", "");
+
+    // Create a client with the caller's JWT to resolve their identity through RLS
+    const userClient = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: `Bearer ${callerJwt}` } } },
+    );
+
+    const { data: { user }, error: userError } = await userClient.auth.getUser();
+    if (userError || !user) {
+      return new Response(
+        JSON.stringify({ error: "Invalid or expired session" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // Resolve the caller's rep profile (role + rep_code)
+    const { data: repProfile, error: repError } = await supabase
+      .from("sales_representatives")
+      .select("rep_code, role")
+      .eq("auth_user_id", user.id)
+      .maybeSingle();
+
+    if (repError || !repProfile) {
+      return new Response(
+        JSON.stringify({ error: "No sales rep profile found for this account" }),
+        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    const isCallerAdmin = repProfile.role === "admin";
+
     // ── Load conversation ──
     const { data: conversation, error: conversationError } = await supabase
       .from("whatsapp_conversations")
@@ -95,6 +137,39 @@ Deno.serve(async (req: Request) => {
         JSON.stringify({ error: "Conversation not found" }),
         { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
+    }
+
+    // ── Authorization: sales_rep must have at least one linked lead assigned to them ──
+    if (!isCallerAdmin) {
+      const { data: accessCheck } = await supabase
+        .from("whatsapp_conversation_leads")
+        .select("lead_entry_id")
+        .eq("conversation_id", conversation_id)
+        .limit(1);
+
+      if (!accessCheck || accessCheck.length === 0) {
+        return new Response(
+          JSON.stringify({ error: "This conversation is not linked to any lead assigned to you." }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+
+      // Check that at least one linked lead belongs to this rep
+      const leadIds = accessCheck.map((r: { lead_entry_id: string }) => r.lead_entry_id);
+      const { data: ownLead } = await supabase
+        .from("lead_entries")
+        .select("id")
+        .in("id", leadIds)
+        .eq("sales_rep_code", repProfile.rep_code)
+        .limit(1)
+        .maybeSingle();
+
+      if (!ownLead) {
+        return new Response(
+          JSON.stringify({ error: "You do not have access to this conversation." }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
     }
 
     // ── Enforce service window server-side ──
