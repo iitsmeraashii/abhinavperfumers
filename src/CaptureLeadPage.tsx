@@ -5,7 +5,7 @@ import { useAuth } from './AuthContext';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
 import { useAutosave } from './capture/useAutosave';
-import { loadDraft, clearDraft, loadSavedDraft, saveSavedDraft } from './capture/captureDraftStorage';
+import { loadDraft, clearDraft, loadSavedDraft, saveSavedDraft, deleteSavedDraft } from './capture/captureDraftStorage';
 import { deleteSessionAssets } from './capture/captureAssetStorage';
 import { OfflineBanner } from './capture/OfflineBanner';
 import { CaptureMethodPicker } from './capture/CaptureMethodPicker';
@@ -52,8 +52,24 @@ const QrScannerView = lazy(() =>
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: string | null }) {
-  const { selectedEvent } = useEvent();
+  const { selectedEvent, activeEvents } = useEvent();
   const { salesRep } = useAuth();
+
+  // Resolve the effective event for a capture session: the per-lead override
+  // in draftData.captureEventId takes priority, falling back to the My Account
+  // default (selectedEvent). Returns { id, code, name } or nulls.
+  const resolveEvent = useCallback((draftData: DraftData) => {
+    const overrideId = draftData.captureEventId;
+    if (overrideId && overrideId !== selectedEvent?.id) {
+      const ev = activeEvents.find(e => e.id === overrideId);
+      if (ev) return { id: ev.id, eventCode: ev.event_code, eventName: ev.name };
+    }
+    return {
+      id:        selectedEvent?.id         ?? null,
+      eventCode: selectedEvent?.event_code ?? null,
+      eventName: selectedEvent?.name       ?? null,
+    };
+  }, [selectedEvent, activeEvents]);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isFlushing, setIsFlushing] = useState(false);
   const [promotionToast, setPromotionToast] = useState<{ message: string; isError: boolean } | null>(null);
@@ -259,13 +275,13 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
           draftData:     normalised.draftData,
           sessionStatus: normalised.sessionStatus,
           localDraftKey: 'active_capture_draft',
-          eventId:       selectedEvent?.id ?? null,
+          eventId:       resolveEvent(normalised.draftData).id,
         },
         normalised.sync.backendSessionId,
         makeRoutingCbs(),
       );
     }
-  }, [pendingDraft, actions, selectedEvent, isOnline, makeRoutingCbs, queue]);
+  }, [pendingDraft, actions, selectedEvent, activeEvents, isOnline, makeRoutingCbs, queue, resolveEvent]);
 
   // User chose to discard the recovered draft
   const handleRecoveryDiscard = useCallback(async () => {
@@ -329,7 +345,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
         {
           sessionId:     backendSessionId,
           captureMethod: 'QR',
-          draftData:     {},
+          draftData:     { captureEventId: selectedEvent?.id },
           sessionStatus: 'CAPTURING',
           localDraftKey: 'active_capture_draft',
           eventId:       selectedEvent?.id ?? null,
@@ -360,7 +376,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
         {
           sessionId:     backendSessionId,
           captureMethod: 'BUSINESS_CARD',
-          draftData:     { cardSessionId: backendSessionId },
+          draftData:     { cardSessionId: backendSessionId, captureEventId: selectedEvent?.id },
           sessionStatus: 'CAPTURING',
           localDraftKey: 'active_capture_draft',
           eventId:       selectedEvent?.id ?? null,
@@ -380,7 +396,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
         {
           sessionId:     backendSessionId,
           captureMethod: method,
-          draftData:     {},
+          draftData:     { captureEventId: selectedEvent?.id },
           sessionStatus: 'CAPTURING',
           localDraftKey: 'active_capture_draft',
           eventId:       selectedEvent?.id ?? null,
@@ -390,7 +406,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       );
       addEntryRef.current('Session created/queued (MANUAL)', { backendSessionId });
     }
-  }, [actions, form, isOnline, makeRoutingCbs, selectedEvent]);
+  }, [actions, form, isOnline, makeRoutingCbs, selectedEvent, resolveEvent]);
 
   // ── Back / discard ────────────────────────────────────────────────────────
   const handleBackToOptions = useCallback(() => {
@@ -465,8 +481,9 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       // Capture all values needed by the background task BEFORE resetting
       // session state, since refs will point at the fresh (empty) session.
       const sessionSnapshot = s;
-      const eventId   = selectedEvent?.id ?? null;
-      const eventName = selectedEvent?.name ?? null;
+      const ev        = resolveEvent(s.draftData);
+      const eventId   = ev.id;
+      const eventName = ev.eventName;
 
       // Flush deferred (ON_SAVE) business card uploads BEFORE resetting the
       // UI. In Exhibition mode, cardUploadTiming is ON_SAVE, so the evidence
@@ -492,13 +509,13 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       submitCaptureSession({
         session:          sessionSnapshot,
         backendSessionId: bsid,
-        eventCode:        selectedEvent?.event_code ?? null,
+        eventCode:        ev.eventCode,
         eventId,
         eventName,
         plan:             null,
         isOnline,
         correlationId:    correlationIdRef.current,
-      }).then((result: AdapterResult) => {
+      }).then(async (result: AdapterResult) => {
         logOperationEnd(saveOp, {
           error: result.outcome === 'failed' ? result.error : null,
           extra: { outcome: result.outcome, jobId: result.jobId },
@@ -509,7 +526,11 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
           addEntryRef.current('Save & Next — background submission failed', err, 'warn');
           setPromotionToast({ message: `Background save failed: ${err}`, isError: true });
           setTimeout(() => setPromotionToast(null), 8000);
-        } else if (result.outcome === 'queued') {
+          return;
+        }
+
+        if (resumeDraftId) { await deleteSavedDraft(resumeDraftId); }
+        if (result.outcome === 'queued') {
           setPendingSyncCount(n => n + 1);
           addEntryRef.current('Save & Next — background job queued', { bsid, online: isOnline });
         } else {
@@ -543,12 +564,13 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     }
 
     // ── Legacy CRM path: await processing (unchanged behaviour) ────────────
+    const ev2    = resolveEvent(s.draftData);
     const result: AdapterResult = await submitCaptureSession({
       session:          s,
       backendSessionId: bsid,
-      eventCode:        selectedEvent?.event_code ?? null,
-      eventId:          selectedEvent?.id ?? null,
-      eventName:        selectedEvent?.name ?? null,
+      eventCode:        ev2.eventCode,
+      eventId:          ev2.id,
+      eventName:        ev2.eventName,
       plan:             p,
       isOnline,
       correlationId:    correlationIdRef.current,
@@ -587,7 +609,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       setTimeout(() => setPromotionToast(null), 3000);
     }
 
-    logOperationEnd(saveOp, { error: result.outcome === 'failed' ? result.error : null, extra: { outcome: result.outcome, jobId: result.jobId } });
+    logOperationEnd(saveOp, { error: null, extra: { outcome: result.outcome, jobId: result.jobId } });
     form.handleReset();
     actions.resetSession();
     profileEngine.reset();
@@ -598,10 +620,11 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     setLastOcrResult(null);
     notifySessionReset();
     await clearDraft();
+    if (resumeDraftId) { await deleteSavedDraft(resumeDraftId); }
     clearCorrelation();
     correlationIdRef.current = null;
     evidenceManager.setCorrelationId(null);
-  }, [actions, form, selectedEvent, isOnline]);
+  }, [actions, form, selectedEvent, activeEvents, isOnline, resumeDraftId, resolveEvent]);
 
   // ── Save as Draft (explicit user action) ──────────────────────────────────
   // Saves the current session as an independent saved_draft:<uuid>, then resets
@@ -706,16 +729,17 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       executionEngine.routeFieldSync(queue, isOnline, bsid, draft, makeRoutingCbs());
 
       // Persist to completed_leads so the Queue screen can show it
+      const qrEv = resolveEvent(draft as import('./capture/types').DraftData);
       const lead = buildCompletedLead(
         bsid, sessionRef.current.originalCaptureMethod ?? 'QR', draft as import('./capture/types').DraftData,
-        bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
+        bsid, qrEv.id, qrEv.eventName,
       );
       lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
       await saveCompletedLead(lead);
 
       addEntryRef.current('QR extraction queued/synced', { bsid });
     }, 0);
-  }, [actions, form, handleQrExtraction, makeRoutingCbs, selectedEvent, isOnline]);
+  }, [actions, form, handleQrExtraction, makeRoutingCbs, selectedEvent, isOnline, resolveEvent]);
 
   // ── Business card assets changed ─────────────────────────────────────────
   const handleCardAssetsChanged = useCallback(async (
@@ -758,7 +782,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
         draftData:     sessionRef.current.draftData,
         sessionStatus: sessionRef.current.sessionStatus,
         localDraftKey: 'active_capture_draft',
-        eventId:       selectedEvent?.id ?? null,
+        eventId:       resolveEvent(sessionRef.current.draftData).id,
       }, {
         onSyncing:  () => {},
         onSynced:   () => { logOperationEnd(sessionOp, { sessionExistsBefore: true }); },
@@ -787,7 +811,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     // Register image bytes with the Processing Engine's Evidence Stage.
     // The engine delegates to evidenceManager, which owns upload decisions.
     registerCardEvidence(bsid, { front, back }, cardUploadTiming);
-  }, [actions, isOnline, makeRoutingCbs, queue, cardUploadTiming]);
+  }, [actions, isOnline, makeRoutingCbs, queue, cardUploadTiming, resolveEvent]);
 
   // ── Voice note recorded ───────────────────────────────────────────────────
   const handleVoiceNoteRecorded = useCallback((blob: Blob, durationMs: number, mimeType: string) => {
@@ -944,11 +968,12 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
           draftData:     newDraft as import('./capture/types').DraftData,
           sessionStatus: 'CAPTURING',
           localDraftKey:  'active_capture_draft',
-          eventId:       selectedEvent?.id ?? null,
+          eventId:       resolveEvent(newDraft as import('./capture/types').DraftData).id,
         }, bsid, makeRoutingCbs());
+        const cardEv = resolveEvent(newDraft as import('./capture/types').DraftData);
         const lead = buildCompletedLead(
           bsid, originalMethod, newDraft as import('./capture/types').DraftData,
-          bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
+          bsid, cardEv.id, cardEv.eventName,
         );
         lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
         await saveCompletedLead(lead);
@@ -963,15 +988,16 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       addEntryRef.current('Session fields queued/synced after card complete', { bsid });
 
       // Persist to completed_leads so the Queue screen can show it
+      const cardEv2 = resolveEvent(newDraft as import('./capture/types').DraftData);
       const lead = buildCompletedLead(
         bsid, originalMethod, newDraft as import('./capture/types').DraftData,
-        bsid, selectedEvent?.id ?? null, selectedEvent?.name ?? null,
+        bsid, cardEv2.id, cardEv2.eventName,
       );
       lead.status = executionEngine.deriveCompletedLeadStatus(isOnline);
       await saveCompletedLead(lead);
       addEntryRef.current('Card complete — lead saved to completed_leads', { id: bsid, status: lead.status });
     }
-  }, [actions, session.draftData, cardSessionId, lastOcrResult, isOnline, makeRoutingCbs, queue, selectedEvent]);
+  }, [actions, session.draftData, cardSessionId, lastOcrResult, isOnline, makeRoutingCbs, queue, selectedEvent, resolveEvent]);
 
   // ── Exhibition post-capture actions ──────────────────────────────────────
   const handleExhibitionSaveAndNext = useCallback(async () => {
@@ -1103,6 +1129,8 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
             onSaveAsDraft={handleSaveAsDraft}
             onVoiceNoteRecorded={handleVoiceNoteRecorded}
             contactDetailsOptional={session.captureProfile === 'EXHIBITION'}
+            activeEvents={activeEvents}
+            defaultEvent={selectedEvent}
           />
         )}
 

@@ -102,7 +102,7 @@ function openDB(): Promise<IDBDatabase> {
 
 // ─── Low-level helpers ────────────────────────────────────────────────────────
 
-async function put(record: CompletedLead): Promise<void> {
+async function put(record: CompletedLead): Promise<boolean> {
   try {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
@@ -111,7 +111,9 @@ async function put(record: CompletedLead): Promise<void> {
       req.onsuccess = () => resolve();
       req.onerror   = () => reject(req.error);
     });
+    return true;
   } catch { /* storage errors must not crash UI */ }
+  return false;
 }
 
 async function getAll(): Promise<CompletedLead[]> {
@@ -170,11 +172,12 @@ export async function updateCompletedLeadStatus(
   id: string,
   status: CompletedLeadStatus,
   extra?: Partial<Pick<CompletedLead, 'syncedAt' | 'retries' | 'lastError' | 'backendSessionId' | 'failedStage' | 'lastAttemptAt' | 'failedAt' | 'isExhausted'>>,
-): Promise<void> {
+): Promise<boolean> {
   const existing = await get(id);
-  if (!existing) return;
-  await put({ ...existing, status, updatedAt: new Date().toISOString(), ...extra });
-  notify();
+  if (!existing) return false;
+  const ok = await put({ ...existing, status, updatedAt: new Date().toISOString(), ...extra });
+  if (ok) notify();
+  return ok;
 }
 
 export async function deleteCompletedLead(id: string): Promise<void> {

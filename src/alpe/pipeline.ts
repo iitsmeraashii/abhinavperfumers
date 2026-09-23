@@ -509,7 +509,10 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
 
   ctx.result = { outcome: 'success', leadId: result.leadId, error: null, failedStage: null };
   traceStage(backendSessionId, 'PROMOTION_COMPLETE', { outcome: 'success', leadId: result.leadId });
-  alpeLog('Promotion completion', { outcome: 'success', leadId: result.leadId });
+  alpeLog('PROMOTION_SUCCESS', {
+    captureSessionId: backendSessionId,
+    leadId: result.leadId,
+  });
 }
 
 // ─── Engine entry point ───────────────────────────────────────────────────────

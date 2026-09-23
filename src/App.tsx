@@ -8,7 +8,6 @@ import type { LeadsInitialFilters } from './LeadsPage';
 import LeadDetailPage from './LeadDetailPage';
 import DashboardPage from './DashboardPage';
 import type { DashboardFilter } from './DashboardPage';
-import TemplatesPage from './TemplatesPage';
 import EventsPage from './EventsPage';
 import SystemNotificationsPage from './SystemNotificationsPage';
 import FollowUpCompleteModal from './FollowUpCompleteModal';
@@ -16,14 +15,17 @@ import CaptureLeadPage from './CaptureLeadPage';
 import LeadQueuePage from './LeadQueuePage';
 import MyAccountPage from './MyAccountPage';
 import SalesRepsPage from './SalesRepsPage';
+import ConversationsPage from './ConversationsPage';
+import ConversationDetailPage from './ConversationDetailPage';
+import WhatsAppAssetsPage from './WhatsAppAssetsPage';
 import { supabase } from './supabaseClient';
 import {
   LogOut, Loader2,
-  LayoutDashboard, List, FileText, CalendarDays, Bell, PlusCircle,
-  MoreHorizontal, X, User, ChevronDown, Layers, Users,
+  LayoutDashboard, List, CalendarDays, Bell, PlusCircle,
+  MoreHorizontal, X, User, ChevronDown, Layers, Users, MessageCircle, Package,
 } from 'lucide-react';
 
-type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'templates' | 'events' | 'notifications' | 'salesreps' | 'account';
+type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'notifications' | 'salesreps' | 'whatsapp_assets' | 'account';
 
 // ─── Mobile bottom nav tabs ───────────────────────────────────────────────────
 
@@ -39,8 +41,9 @@ const MOBILE_TABS: MobileTab[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-5 h-5" />, adminOnly: true },
   { id: 'leads',     label: 'Leads',     icon: <List className="w-5 h-5" /> },
   { id: 'capture',   label: 'Capture',   icon: <PlusCircle className="w-5 h-5" />, emphasize: true },
-  { id: 'queue',     label: 'Queue',     icon: <Layers className="w-5 h-5" /> },
-  { id: 'events',    label: 'Events',    icon: <CalendarDays className="w-5 h-5" />, adminOnly: true },
+  { id: 'queue',          label: 'Queue',         icon: <Layers className="w-5 h-5" /> },
+  { id: 'conversations',  label: 'WhatsApp',      icon: <MessageCircle className="w-5 h-5" /> },
+  { id: 'events',          label: 'Events',        icon: <CalendarDays className="w-5 h-5" />, adminOnly: true },
 ];
 
 // ─── Profile dropdown (desktop) ───────────────────────────────────────────────
@@ -132,7 +135,7 @@ interface MobileNavProps {
 
 function MobileBottomNav({ tab, isAdmin, onTabChange, onMorePress }: MobileNavProps) {
   const visibleTabs = MOBILE_TABS.filter(t => !t.adminOnly || isAdmin);
-  const moreActive  = tab === 'templates' || tab === 'notifications' || tab === 'salesreps' || tab === 'account';
+  const moreActive  = tab === 'notifications' || tab === 'salesreps' || tab === 'whatsapp_assets' || tab === 'account';
 
   return (
     <nav
@@ -222,9 +225,9 @@ function MobileMoreDrawer({
     { id: 'account', label: 'My Account', icon: <User className="w-5 h-5" /> },
     ...(isAdmin
       ? [
-          { id: 'templates' as Tab,     label: 'Templates',     icon: <FileText className="w-5 h-5" /> },
           { id: 'notifications' as Tab, label: 'Notifications', icon: <Bell className="w-5 h-5" /> },
           { id: 'salesreps' as Tab,      label: 'Sales Reps',     icon: <Users className="w-5 h-5" /> },
+          { id: 'whatsapp_assets' as Tab, label: 'WhatsApp Assets', icon: <Package className="w-5 h-5" /> },
         ]
       : []),
   ];
@@ -300,14 +303,16 @@ function Layout() {
   const initialFollowUp = params.get('followup');
 
   const [tab,                setTab]                = useState<Tab>(() => {
-    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'templates', 'events', 'notifications', 'salesreps', 'account'];
-    const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'account'];
+    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'whatsapp_assets', 'account'];
+    const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'conversations', 'account'];
     const allowed = isAdmin ? adminTabs : repTabs;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
     if (saved && allowed.includes(saved)) return saved;
     return isAdmin ? 'dashboard' : 'capture';
   });
   const [selectedLeadId,     setSelectedLeadId]     = useState<string | null>(initialLeadId);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [conversationsRefreshKey, setConversationsRefreshKey] = useState(0);
   const [leadsEventFilter,   setLeadsEventFilter]   = useState<string | undefined>(undefined);
   const [leadsInitialFilters,setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
@@ -346,9 +351,33 @@ function Layout() {
     window.history.pushState({}, '', url.toString());
   }
 
+  function handleBackFromConversation() {
+    setSelectedConversationId(null);
+    setConversationsRefreshKey(k => k + 1);
+  }
+
+  function handleSelectConversation(id: string) {
+    setSelectedConversationId(id);
+  }
+
+  function handleViewLeadFromConversation(leadId: string) {
+    setSelectedConversationId(null);
+    handleSelectLead(leadId);
+  }
+
+  function handleOpenConversationFromLead(conversationId: string) {
+    setSelectedLeadId(null);
+    setTab('conversations');
+    setSelectedConversationId(conversationId);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('lead');
+    window.history.pushState({}, '', url.toString());
+  }
+
   function handleTabChange(t: Tab) {
     setTab(t);
     setSelectedLeadId(null);
+    setSelectedConversationId(null);
     setMoreDrawerOpen(false);
     if (t !== 'capture') setResumeDraftId(null);
     localStorage.setItem('activeTab', t);
@@ -452,6 +481,13 @@ function Layout() {
             >
               <Layers className="w-4 h-4" /> Queue
             </button>
+            <button
+              onClick={() => handleTabChange('conversations')}
+              className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                ${tab === 'conversations' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+            >
+              <MessageCircle className="w-4 h-4" /> WhatsApp
+            </button>
             {isAdmin && (
               <button
                 onClick={() => handleTabChange('events')}
@@ -459,15 +495,6 @@ function Layout() {
                   ${tab === 'events' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
               >
                 <CalendarDays className="w-4 h-4" /> Events
-              </button>
-            )}
-            {isAdmin && (
-              <button
-                onClick={() => handleTabChange('templates')}
-                className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
-                  ${tab === 'templates' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
-              >
-                <FileText className="w-4 h-4" /> Templates
               </button>
             )}
             {isAdmin && (
@@ -486,6 +513,15 @@ function Layout() {
                   ${tab === 'salesreps' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
               >
                 <Users className="w-4 h-4" /> Sales Reps
+              </button>
+            )}
+            {isAdmin && (
+              <button
+                onClick={() => handleTabChange('whatsapp_assets')}
+                className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                  ${tab === 'whatsapp_assets' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+              >
+                <Package className="w-4 h-4" /> Assets
               </button>
             )}
           </nav>
@@ -533,9 +569,9 @@ function Layout() {
             {tab === 'events' && isAdmin && !selectedLeadId && (
               <EventsPage onViewLeads={handleViewLeads} />
             )}
-            {tab === 'templates' && isAdmin && !selectedLeadId && <TemplatesPage />}
             {tab === 'notifications' && isAdmin && !selectedLeadId && <SystemNotificationsPage />}
             {tab === 'salesreps' && isAdmin && !selectedLeadId && <SalesRepsPage />}
+            {tab === 'whatsapp_assets' && isAdmin && !selectedLeadId && <WhatsAppAssetsPage />}
             {tab === 'capture' && !selectedLeadId && <CaptureLeadPage key={resumeDraftId ?? 'capture'} resumeDraftId={resumeDraftId} />}
             {tab === 'queue' && !selectedLeadId && (
               <LeadQueuePage
@@ -547,6 +583,20 @@ function Layout() {
                 onViewLead={handleViewLeadFromQueue}
               />
             )}
+            {tab === 'conversations' && !selectedLeadId && !selectedConversationId && (
+              <ConversationsPage
+                key={`conv-${conversationsRefreshKey}`}
+                onSelectConversation={handleSelectConversation}
+              />
+            )}
+            {tab === 'conversations' && !selectedLeadId && selectedConversationId && (
+              <ConversationDetailPage
+                conversationId={selectedConversationId}
+                onBack={handleBackFromConversation}
+                onViewLead={handleViewLeadFromConversation}
+                onUnreadCleared={() => setConversationsRefreshKey(k => k + 1)}
+              />
+            )}
             {tab === 'leads' && !selectedLeadId && (
               <LeadsPage
                 key={[leadsEventFilter ?? '', JSON.stringify(leadsInitialFilters ?? {})].join('|')}
@@ -556,7 +606,7 @@ function Layout() {
               />
             )}
             {selectedLeadId && (
-              <LeadDetailPage leadId={selectedLeadId} onBack={handleBack} />
+              <LeadDetailPage leadId={selectedLeadId} onBack={handleBack} onOpenConversation={handleOpenConversationFromLead} />
             )}
           </>
         )}

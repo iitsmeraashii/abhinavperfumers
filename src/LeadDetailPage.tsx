@@ -7,7 +7,7 @@ import {
   User, Users, Thermometer, Hash, FileText, Image, MessageCircle,
   AlertCircle, Clock, RefreshCw, Pencil, Check, X as XIcon,
   StickyNote, Plus, Send, ChevronDown, Bell, CheckCircle2, Link2,
-  ShieldAlert, Flame, Snowflake,
+  ShieldAlert, Flame, Snowflake, Eye,
 } from 'lucide-react';
 import {
   REVIEW_REASON_LABELS, fieldLabel, formatConfidencePercent,
@@ -55,6 +55,7 @@ interface LeadDetail {
   lead_status: string;
   capture_session_id: string | null;
   is_reviewed: boolean;
+  whatsapp_opt_out: boolean;
 }
 
 interface EventInfo {
@@ -115,6 +116,7 @@ interface LeadFollowUp {
 interface Props {
   leadId: string;
   onBack: () => void;
+  onOpenConversation?: (conversationId: string) => void;
 }
 
 const TEMP_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
@@ -456,7 +458,7 @@ function ReviewBanner({
   );
 }
 
-export default function LeadDetailPage({ leadId, onBack }: Props) {
+export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: Props) {
   const { user } = useAuth();
   const [lead, setLead] = useState<LeadDetail | null>(null);
   const [event, setEvent] = useState<EventInfo | null>(null);
@@ -510,6 +512,15 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
   const [showTempPrompt, setShowTempPrompt] = useState(false);
   const [tempPromptSaving, setTempPromptSaving] = useState(false);
   const [tempPromptError, setTempPromptError] = useState('');
+
+  // WhatsApp conversation card
+  const [waCardState, setWaCardState] = useState<'loading' | 'opted_out' | 'no_conversation' | 'connected' | 'reached' | 'customer_replied' | 'unread_reply'>('loading');
+  const [waConversationId, setWaConversationId] = useState<string | null>(null);
+  const [waLastActivity, setWaLastActivity] = useState<string | null>(null);
+  const [waLastMessagePreview, setWaLastMessagePreview] = useState<string | null>(null);
+  const [waLastMessageTime, setWaLastMessageTime] = useState<string | null>(null);
+  const [waWindowExpiresAt, setWaWindowExpiresAt] = useState<string | null>(null);
+  const [waSharedLeadCount, setWaSharedLeadCount] = useState<number | null>(null);
 
   // Activity log refresh — incremented to force ActivityLog remount after mutations
   const [activityRefreshKey, setActivityRefreshKey] = useState(0);
@@ -717,6 +728,132 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
       setLoading(false);
     })();
   }, [leadId, user]);
+
+  // ── WhatsApp card: load conversation state for this lead ──
+  // Lookup strategy: 1) bridge table (authoritative), 2) phone-number fallback (display only)
+  // State precedence: OPTED_OUT > UNREAD_REPLY > CUSTOMER_REPLIED > REACHED > CONNECTED > NO_CONVERSATION
+  useEffect(() => {
+    if (!lead) return;
+    let cancelled = false;
+
+    async function loadWhatsAppState() {
+      setWaCardState('loading');
+      setWaConversationId(null);
+      setWaLastActivity(null);
+      setWaLastMessagePreview(null);
+      setWaLastMessageTime(null);
+      setWaWindowExpiresAt(null);
+      setWaSharedLeadCount(null);
+
+      // A. OPTED_OUT — highest priority, suppresses everything
+      if (lead.whatsapp_opt_out) {
+        if (!cancelled) setWaCardState('opted_out');
+        return;
+      }
+
+      // 1. PRIMARY LOOKUP — bridge table
+      const { data: bridgeRows } = await supabase
+        .from('whatsapp_conversation_leads')
+        .select('conversation_id')
+        .eq('lead_entry_id', leadId)
+        .order('linked_at', { ascending: false })
+        .limit(1);
+
+      let conversationId: string | null = bridgeRows?.[0]?.conversation_id ?? null;
+
+      // 2. FALLBACK — phone number (display only, does NOT create a bridge row)
+      if (!conversationId) {
+        const normalizedPhone = formatWhatsAppNumber(lead.phones?.[0] ?? '');
+        if (normalizedPhone) {
+          const { data: convByPhone } = await supabase
+            .from('whatsapp_conversations')
+            .select('id')
+            .eq('wa_phone_number', normalizedPhone)
+            .order('last_message_at', { ascending: false })
+            .limit(1);
+          conversationId = convByPhone?.[0]?.id ?? null;
+        }
+      }
+
+      if (!conversationId) {
+        if (!cancelled) setWaCardState('no_conversation');
+        return;
+      }
+
+      if (cancelled) return;
+      setWaConversationId(conversationId);
+
+      // Load conversation details including service window
+      const { data: conversation } = await supabase
+        .from('whatsapp_conversations')
+        .select('unread_count, last_message_at, customer_service_window_expires_at')
+        .eq('id', conversationId)
+        .maybeSingle();
+
+      if (cancelled || !conversation) {
+        setWaCardState('connected');
+        return;
+      }
+
+      setWaWindowExpiresAt(conversation.customer_service_window_expires_at ?? null);
+
+      // Count how many leads are linked to this conversation (for "Shared conversation" indicator)
+      const { count: linkedLeadCount } = await supabase
+        .from('whatsapp_conversation_leads')
+        .select('lead_entry_id', { count: 'exact', head: true })
+        .eq('conversation_id', conversationId);
+
+      if (!cancelled) setWaSharedLeadCount(linkedLeadCount ?? 1);
+
+      // Load messages to determine reached / customer_replied / unread + last message preview
+      const { data: messages } = await supabase
+        .from('whatsapp_messages')
+        .select('direction, status, text_body, timestamp')
+        .eq('conversation_id', conversationId)
+        .order('timestamp', { ascending: true })
+        .limit(500);
+
+      if (cancelled) return;
+
+      const msgs = (messages as Array<{ direction: string; status: string; text_body: string | null; timestamp: string | null }>) ?? [];
+      const outboundMsgs = msgs.filter(m => m.direction?.toUpperCase() === 'OUTBOUND');
+      const inboundMsgs = msgs.filter(m => m.direction?.toUpperCase() === 'INBOUND');
+
+      const hasDelivered = outboundMsgs.some(m => {
+        const s = (m.status ?? '').toLowerCase();
+        return s === 'delivered' || s === 'read';
+      });
+
+      const hasInbound = inboundMsgs.length > 0;
+      const unreadCount = conversation.unread_count ?? 0;
+      const hasUnread = unreadCount > 0;
+
+      // Last message overall (for preview) — not just inbound
+      const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+      const lastInbound = hasInbound ? inboundMsgs[inboundMsgs.length - 1] : null;
+
+      setWaLastActivity(conversation.last_message_at ?? lastMsg?.timestamp ?? null);
+
+      // Preview: use the latest message's text body, with a fallback for media/template messages
+      const previewText = lastMsg?.text_body?.trim() || null;
+      setWaLastMessagePreview(previewText ?? 'Media message');
+      setWaLastMessageTime(lastMsg?.timestamp ?? null);
+
+      // State precedence: UNREAD_REPLY > CUSTOMER_REPLIED > REACHED > CONNECTED
+      if (hasUnread && hasInbound) {
+        setWaCardState('unread_reply');
+      } else if (hasInbound) {
+        setWaCardState('customer_replied');
+      } else if (hasDelivered) {
+        setWaCardState('reached');
+      } else {
+        setWaCardState('connected');
+      }
+    }
+
+    loadWhatsAppState();
+    return () => { cancelled = true; };
+  }, [leadId, lead?.whatsapp_opt_out]);
 
   function enterEdit() {
     if (!lead) return;
@@ -952,41 +1089,58 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
       {/* Lead Temperature Prompt — NEW leads with no temperature */}
       {showTempPrompt && lead && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 backdrop-blur-sm px-4"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-stone-900/40 backdrop-blur-sm px-0 sm:px-4"
           onClick={() => setShowTempPrompt(false)}
         >
           <div
-            className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200"
+            className="w-full sm:max-w-md bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl border border-stone-200 overflow-hidden animate-in fade-in slide-in-from-bottom-4 sm:zoom-in-95 duration-200"
             onClick={e => e.stopPropagation()}
           >
-            <div className="px-6 pt-6 pb-2 text-center">
-              <h2 className="text-lg font-bold text-stone-900">Set Lead Temperature</h2>
-              <p className="text-sm text-stone-500 mt-1">How would you rate the potential of this lead?</p>
+            {/* Header with lead context */}
+            <div className="px-6 pt-6 pb-4 border-b border-stone-100">
+              <div className="flex items-start gap-3 mb-3">
+                <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-amber-100 text-amber-600 shrink-0">
+                  <Thermometer className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-lg font-bold text-stone-900">Set Lead Temperature</h2>
+                  <p className="text-sm text-stone-500 mt-0.5">Choose the potential of this lead.</p>
+                </div>
+              </div>
+              {/* Lead context summary */}
+              <div className="flex items-center gap-2 px-3 py-2 bg-stone-50 rounded-lg text-sm text-stone-600">
+                <User className="w-3.5 h-3.5 text-stone-400 shrink-0" />
+                <span className="font-medium text-stone-800 truncate">{lead.client_name || 'Unknown'}</span>
+                {(val(lead.company) || val(lead.designation)) && (
+                  <span className="text-stone-400 truncate hidden sm:inline">
+                    · {[val(lead.company), val(lead.designation)].filter(Boolean).join(' · ')}
+                  </span>
+                )}
+              </div>
             </div>
+
+            {/* Temperature options — stacked for mobile, comfortable touch targets */}
             <div className="px-6 py-5 space-y-3">
-              {TEMP_PROMPT_OPTIONS.map(opt => {
-                  const active = false; // selection saves immediately, no pre-select
-                  return (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      disabled={tempPromptSaving}
-                      onClick={() => handleTempPromptSelect(opt.value)}
-                      className={`w-full flex items-center gap-4 px-5 py-4 rounded-xl font-medium text-sm
-                        transition-all duration-150 ring-2 active:scale-[0.98] text-left
-                        ${active
-                          ? `${opt.activeColor} shadow-sm`
-                          : `border ${opt.inactiveColor} ring-transparent`}
-                        ${tempPromptSaving ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-                    >
-                      <span className="flex-shrink-0">{opt.icon}</span>
-                      <div className="flex-1 min-w-0">
-                        <p className="font-semibold">{opt.label}</p>
-                        <p className="text-xs opacity-80 mt-0.5">{opt.description}</p>
-                      </div>
-                    </button>
-                  );
-                })}
+              {TEMP_PROMPT_OPTIONS.map(opt => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  disabled={tempPromptSaving}
+                  aria-label={`Set temperature to ${opt.label}`}
+                  onClick={() => handleTempPromptSelect(opt.value)}
+                  className={`w-full flex items-center gap-4 px-5 py-4 rounded-xl font-medium text-sm
+                    transition-all duration-150 ring-2 active:scale-[0.98] text-left
+                    border ring-transparent
+                    ${opt.inactiveColor}
+                    ${tempPromptSaving ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:shadow-sm'}`}
+                >
+                  <span className="flex-shrink-0">{opt.icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold">{opt.label}</p>
+                    <p className="text-xs opacity-80 mt-0.5">{opt.description}</p>
+                  </div>
+                </button>
+              ))}
               {tempPromptError && (
                 <div className="flex items-center gap-2 px-4 py-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -999,6 +1153,24 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
                   Saving…
                 </div>
               )}
+            </div>
+
+            {/* Review Lead First — secondary action */}
+            <div className="px-6 pb-6 pt-1 border-t border-stone-100">
+              <button
+                type="button"
+                disabled={tempPromptSaving}
+                onClick={() => setShowTempPrompt(false)}
+                className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl
+                  text-sm font-semibold text-stone-600
+                  border border-stone-200 bg-white hover:bg-stone-50
+                  active:scale-[0.98] transition-all duration-150
+                  disabled:opacity-50"
+                aria-label="Review lead before setting temperature"
+              >
+                <Eye className="w-4 h-4" />
+                Review Lead First
+              </button>
             </div>
           </div>
         </div>
@@ -1231,6 +1403,201 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
             )}
           </Card>
 
+          {/* WhatsApp Conversation Card */}
+          <Card title="WhatsApp" icon={<MessageCircle className="w-4 h-4" />}>
+            {waCardState === 'loading' ? (
+              <div className="flex items-center justify-center py-6">
+                <Loader2 className="w-4 h-4 text-stone-400 animate-spin" />
+              </div>
+            ) : waCardState === 'opted_out' ? (
+              <div className="py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    Do not contact
+                  </span>
+                </div>
+                <p className="text-sm text-stone-500">Customer has opted out of WhatsApp communication.</p>
+              </div>
+            ) : waCardState === 'no_conversation' ? (
+              <div className="py-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-stone-100 text-stone-500">
+                    <span className="w-1.5 h-1.5 rounded-full bg-stone-400" />
+                    Not connected
+                  </span>
+                </div>
+                <p className="text-sm text-stone-500 mb-3">No WhatsApp conversation exists for this number.</p>
+                <a
+                  href={`https://wa.me/${formatWhatsAppNumber(lead.phones?.[0] ?? '') ?? ''}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Send WhatsApp
+                </a>
+              </div>
+            ) : (() => {
+              // ── Service window computation for linked conversations ──
+              const windowState: 'open' | 'expired' | 'none' = (() => {
+                if (!waWindowExpiresAt) return 'none';
+                const normalized = /[Zz]$/.test(waWindowExpiresAt) || /[+-]\d{2}:?\d{2}$/.test(waWindowExpiresAt)
+                  ? waWindowExpiresAt
+                  : waWindowExpiresAt.replace(' ', 'T') + 'Z';
+                const diff = new Date(normalized).getTime() - Date.now();
+                return diff > 0 ? 'open' : 'expired';
+              })();
+
+              const windowLabel = windowState === 'open'
+                ? (() => {
+                    const normalized = /[Zz]$/.test(waWindowExpiresAt!) || /[+-]\d{2}:?\d{2}$/.test(waWindowExpiresAt!)
+                      ? waWindowExpiresAt!
+                      : waWindowExpiresAt!.replace(' ', 'T') + 'Z';
+                    const diff = new Date(normalized).getTime() - Date.now();
+                    const hours = Math.floor(diff / (60 * 60 * 1000));
+                    const minutes = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000));
+                    const expiresAt = formatDateTime(waWindowExpiresAt);
+                    const remaining = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+                    return `Open until ${expiresAt} · Expires in ${remaining}`;
+                  })()
+                : windowState === 'expired'
+                  ? (() => {
+                      const normalized = /[Zz]$/.test(waWindowExpiresAt!) || /[+-]\d{2}:?\d{2}$/.test(waWindowExpiresAt!)
+                        ? waWindowExpiresAt!
+                        : waWindowExpiresAt!.replace(' ', 'T') + 'Z';
+                      const diff = Date.now() - new Date(normalized).getTime();
+                      const hours = Math.floor(diff / (60 * 60 * 1000));
+                      const minutes = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000));
+                      const ago = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+                      return `Expired ${ago} ago`;
+                    })()
+                  : 'No window';
+
+              const windowBadgeCls = windowState === 'open'
+                ? 'bg-green-100 text-green-700'
+                : windowState === 'expired'
+                  ? 'bg-stone-100 text-stone-500'
+                  : 'bg-stone-100 text-stone-400';
+
+              const canReply = windowState === 'open';
+
+              const openConversationBtn = onOpenConversation && waConversationId && (
+                <button
+                  onClick={() => onOpenConversation(waConversationId)}
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" />
+                  Open Conversation
+                </button>
+              );
+
+              const replyBtn = onOpenConversation && waConversationId && canReply && (
+                <button
+                  onClick={() => onOpenConversation(waConversationId)}
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 transition"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Reply
+                </button>
+              );
+
+              return (
+                <div className="py-3 space-y-3">
+                  {/* Status badges */}
+                  {waCardState === 'unread_reply' ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                        <Check className="w-3 h-3" />
+                        Reached
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500 text-white">
+                        <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                        New reply
+                      </span>
+                    </div>
+                  ) : waCardState === 'customer_replied' ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                        <Check className="w-3 h-3" />
+                        Reached
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-blue-600 text-white">
+                        Customer replied
+                      </span>
+                    </div>
+                  ) : waCardState === 'reached' ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                        <Check className="w-3 h-3" />
+                        Reached
+                      </span>
+                    </div>
+                  ) : waCardState === 'connected' ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
+                        <Check className="w-3 h-3" />
+                        Connected
+                      </span>
+                    </div>
+                  ) : null}
+
+                  {/* Last message preview — shown for all linked conversation states */}
+                  {waLastMessagePreview && (
+                    <div className="space-y-1">
+                      {waLastMessageTime && (
+                        <p className="text-xs text-stone-500">
+                          <span className="text-stone-400">Last message</span>
+                          <span className="mx-1.5 text-stone-300">·</span>
+                          {formatDateTime(waLastMessageTime)}
+                        </p>
+                      )}
+                      <p className="rounded-lg bg-stone-50 px-3 py-2 text-sm leading-5 text-stone-700 truncate max-w-full">
+                        {waLastMessagePreview}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* State-specific detail for connected (no last message to show) */}
+                  {waCardState === 'connected' && !waLastMessagePreview && (
+                    <p className="text-sm leading-5 text-stone-500">No outbound message has been confirmed delivered.</p>
+                  )}
+
+                  {/* Shared conversation indicator */}
+                  {waSharedLeadCount !== null && waSharedLeadCount > 1 && (
+                    <div className="flex items-center gap-1.5 text-xs text-stone-400">
+                      <Users className="w-3 h-3" />
+                      <span>Shared conversation · {waSharedLeadCount} leads</span>
+                    </div>
+                  )}
+
+                  {/* Service window line */}
+                  <div className="flex items-center justify-between gap-3 border-t border-stone-100 pt-3">
+                    <span className="text-xs text-stone-400">Reply window</span>
+                    <span className={`text-xs font-medium text-right ${windowState === 'open' ? 'text-green-700' : 'text-stone-500'}`}>
+                      {windowState === 'open' ? 'Open until' : windowState === 'expired' ? 'Expired' : 'No window'}
+                      {windowState !== 'none' && <span className="text-stone-400 font-normal"> · {windowLabel.replace(/^(Open until|Expired)\s*/, '')}</span>}
+                    </span>
+                  </div>
+
+                  {/* Expired window hint */}
+                  {windowState === 'expired' && (
+                    <p className="text-xs text-stone-400 italic">Template message required</p>
+                  )}
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-2 pt-1">
+                    {waCardState === 'unread_reply' ? (
+                      canReply ? replyBtn : openConversationBtn
+                    ) : (
+                      openConversationBtn
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+          </Card>
+
           {/* Business Details */}
           <Card title="Business Details" icon={<Briefcase className="w-4 h-4" />}>
             {editMode && draft ? (
@@ -1360,7 +1727,28 @@ export default function LeadDetailPage({ leadId, onBack }: Props) {
               </>
             ) : (
               <>
-                <Row icon={<Thermometer className="w-3.5 h-3.5" />} label="Temperature" value={val(lead.lead_temperature)} />
+                <div className="flex items-start gap-3 py-2.5 border-b border-stone-100 last:border-0">
+                  <span className="mt-0.5 text-stone-400 flex-shrink-0"><Thermometer className="w-3.5 h-3.5" /></span>
+                  <div className="min-w-0 flex-1 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-stone-400 mb-0.5">Temperature</p>
+                      <p className={`text-sm ${val(lead.lead_temperature) ? 'text-stone-800' : 'text-stone-300'}`}>
+                        {val(lead.lead_temperature) ?? 'Not Set'}
+                      </p>
+                    </div>
+                    {!val(lead.lead_temperature) && canEdit && !editMode && (
+                      <button
+                        onClick={enterEdit}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg
+                          bg-amber-100 text-amber-700 border border-amber-200
+                          hover:bg-amber-200 active:scale-95 transition-all shrink-0"
+                      >
+                        <Thermometer className="w-3.5 h-3.5" />
+                        Set Temperature
+                      </button>
+                    )}
+                  </div>
+                </div>
                 <TagRow icon={<Hash className="w-3.5 h-3.5" />} label="Keywords" values={parseTagString(lead.quick_keywords)} />
               </>
             )}
