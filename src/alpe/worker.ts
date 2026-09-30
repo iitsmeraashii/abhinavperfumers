@@ -26,6 +26,7 @@ import type {
 } from '../capture/types';
 import type { QueueEntry } from './types';
 import { alpeLog, alpeError, updateAlpeRuntime } from './diagnostics';
+import { isConsoleEnabled, isRuntimeDumpsEnabled } from '../runtime/runtimeDiagnostics';
 import type { AssetReference, EvidenceAssets } from './assetReference';
 import { EMPTY_EVIDENCE } from './assetReference';
 
@@ -219,6 +220,10 @@ function reconstructDraftData(
     phone:           (ef.phone as string)        ?? undefined,
     email:           (ef.email as string)        ?? undefined,
     designation:     (ef.designation as string)  ?? undefined,
+    address:         (ef.address as string)      ?? undefined,
+    website:         (ef.website as string)      ?? undefined,
+    country:         (ef.country as string)      ?? undefined,
+    phoneCountryCode:(ef.phoneCountryCode as string) ?? undefined,
     notes:           row.notes ?? undefined,
     notesImageDataUrl: row.notes_image_url ?? undefined,
     voiceNoteDurationMs: row.voice_note_duration_ms ?? undefined,
@@ -259,6 +264,9 @@ function reconstructDraftData(
   }
   // voice_note duration is read from the session row, not the asset row
 
+  // [DIAG:ADDRESS_FLOW] log reconstructed draftData address
+  console.log('[DIAG:ADDRESS_FLOW] reconstructDraftData ef.address =', ef.address, '-> draft.address =', draft.address);
+
   return draft;
 }
 
@@ -280,7 +288,8 @@ function resolveProfile(): CaptureProfile {
 function traceStage(backendSessionId: string, stage: string, payload: Record<string, unknown>): void {
   const ts = new Date().toISOString();
   const entry = { stage, ts, ...payload };
-  console.log(`[ALPE TRACE] ${stage}`, entry);
+  if (isConsoleEnabled()) console.log(`[ALPE TRACE] ${stage}`, entry);
+  if (!isRuntimeDumpsEnabled()) return;
   try {
     supabase.from('alpe_runtime_dumps').insert({
       id: `trace_${backendSessionId}_${stage}_${ts}`,
@@ -351,7 +360,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
   const assets = await fetchBackendAssets(backendSessionId);
 
   // ── TEMPORARY DIAGNOSTICS: Asset hydration ──
-  console.log('[ALPE DIAG] Assets loaded:', {
+  if (isConsoleEnabled()) console.log('[ALPE DIAG] Assets loaded:', {
     count: assets.length,
     assets: assets.map(a => ({
       id:           a.id,
@@ -363,20 +372,22 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
       upload_status: a.storage_upload_status,
     })),
   });
-  try {
-    supabase.from('alpe_runtime_dumps').insert({
-      id: `assets_${backendSessionId}`,
-      job_id: backendSessionId,
-      dump_point: 'ASSETS_LOADED',
-      dump_data: {
-        count: assets.length,
-        assets: assets.map(a => ({
-          id: a.id, asset_type: a.asset_type, side: a.asset_side ?? a.side,
-          local_id: a.local_asset_id, storage_path: a.storage_path,
-        })),
-      },
-    }).then(() => {}, () => {});
-  } catch { /* ignore */ }
+  if (isRuntimeDumpsEnabled()) {
+    try {
+      supabase.from('alpe_runtime_dumps').insert({
+        id: `assets_${backendSessionId}`,
+        job_id: backendSessionId,
+        dump_point: 'ASSETS_LOADED',
+        dump_data: {
+          count: assets.length,
+          assets: assets.map(a => ({
+            id: a.id, asset_type: a.asset_type, side: a.asset_side ?? a.side,
+            local_id: a.local_asset_id, storage_path: a.storage_path,
+          })),
+        },
+      }).then(() => {}, () => {});
+    } catch { /* ignore */ }
+  }
 
   // 1c. Wait for extractable assets (business_card, qr) to finish uploading.
   // In Exhibition mode, card uploads are deferred (ON_SAVE) and start when the
@@ -474,6 +485,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     completedLeadId:  backendSessionId,
     plan,
     evidence,
+    ownerId:          (row as Record<string, unknown>).user_id as string | null ?? null,
     correlationId:   (job.metadata as Record<string, unknown> | null)?.correlationId as string | null ?? null,
   };
 
@@ -508,15 +520,17 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
     extractionConfidence: ctx.session.draftData.extractionConfidence ?? null,
     backendAssetIds:      ctx.session.sync.backendAssetIds,
   };
-  console.log('[ALPE DIAG] Hydrated ProcessingContext:', hydratedDump);
-  try {
-    supabase.from('alpe_runtime_dumps').insert({
-      id: `hydrated_${backendSessionId}`,
-      job_id: backendSessionId,
-      dump_point: 'HYDRATED_CONTEXT',
-      dump_data: hydratedDump,
-    }).then(() => {}, () => {});
-  } catch { /* ignore */ }
+  if (isConsoleEnabled()) console.log('[ALPE DIAG] Hydrated ProcessingContext:', hydratedDump);
+  if (isRuntimeDumpsEnabled()) {
+    try {
+      supabase.from('alpe_runtime_dumps').insert({
+        id: `hydrated_${backendSessionId}`,
+        job_id: backendSessionId,
+        dump_point: 'HYDRATED_CONTEXT',
+        dump_data: hydratedDump,
+      }).then(() => {}, () => {});
+    } catch { /* ignore */ }
+  }
 
   // 5. Run the existing pipeline
   traceStage(backendSessionId, 'PIPELINE_START', {});

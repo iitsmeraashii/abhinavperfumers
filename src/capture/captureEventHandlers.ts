@@ -41,6 +41,7 @@ export function registerVoiceNoteEvidence(
   durationMs: number,
   mimeType: string,
   uploadTiming: UploadTiming,
+  ownerId?: string | null,
 ): void {
   console.log('[VOICE_DIAG] registerVoiceNoteEvidence ENTRY', {
     ts: new Date().toISOString(),
@@ -50,8 +51,9 @@ export function registerVoiceNoteEvidence(
     blobSize: audioBlob?.size ?? null,
     mimeType,
     durationMs,
+    ownerId,
   });
-  evidenceManager.register({ type: 'voice_note', sessionId, audioBlob, durationMs, mimeType, uploadTiming });
+  evidenceManager.register({ type: 'voice_note', sessionId, audioBlob, durationMs, mimeType, uploadTiming, ownerId: ownerId ?? null });
   console.log('[VOICE_DIAG] registerVoiceNoteEvidence EXIT', {
     ts: new Date().toISOString(),
     backendSessionId: sessionId,
@@ -59,8 +61,8 @@ export function registerVoiceNoteEvidence(
   });
 }
 
-export function notifySessionReset(): void {
-  evidenceManager.onSessionReset();
+export function notifySessionReset(ownerId?: string | null): void {
+  evidenceManager.onSessionReset(ownerId ?? null);
 }
 
 // ─── Extraction Stage — real-time event handlers ──────────────────────────────
@@ -75,8 +77,9 @@ export async function handleVisionExtraction(params: {
   queue:            QueuePolicy;
   isOnline:         boolean;
   syncCbs:          ExtractionSyncCallbacks;
+  ownerId:          string | null;
 }): Promise<ExtractionHandlerOutcome> {
-  const { result, backendSessionId, backendAssetId, queue, isOnline, syncCbs } = params;
+  const { result, backendSessionId, backendAssetId, queue, isOnline, syncCbs, ownerId } = params;
 
   if (result.source !== 'openai_vision') return 'skipped';
 
@@ -85,7 +88,7 @@ export async function handleVisionExtraction(params: {
   const extractionId = crypto.randomUUID();
   const payload = { extractionId, backendSessionId, backendAssetId, visionResult: result };
 
-  executionEngine.routeVisionExtraction(queue, isOnline, backendSessionId, payload, syncCbs);
+  executionEngine.routeVisionExtraction(queue, isOnline, backendSessionId, payload, syncCbs, ownerId);
 
   executionEngine.routeVisionExtractionMeta(queue, isOnline, {
     backendSessionId,
@@ -104,15 +107,16 @@ export async function handleOcrExtraction(params: {
   queue:            QueuePolicy;
   isOnline:         boolean;
   syncCbs:          ExtractionSyncCallbacks;
+  ownerId:          string | null;
 }): Promise<ExtractionHandlerOutcome> {
-  const { result, backendSessionId, backendAssetId, queue, isOnline, syncCbs } = params;
+  const { result, backendSessionId, backendAssetId, queue, isOnline, syncCbs, ownerId } = params;
 
   if (extractionCoordinator.hasVisionExtraction(result.assetId)) return 'skipped';
 
   const extractionId = crypto.randomUUID();
   const payload = { extractionId, backendSessionId, backendAssetId, ocrResult: result };
 
-  executionEngine.routeOcrExtraction(queue, isOnline, backendSessionId, payload, syncCbs);
+  executionEngine.routeOcrExtraction(queue, isOnline, backendSessionId, payload, syncCbs, ownerId);
 
   return isOnline ? 'synced' : 'queued';
 }
@@ -124,13 +128,14 @@ export async function handleQrExtraction(params: {
   queue:            QueuePolicy;
   isOnline:         boolean;
   syncCbs:          ExtractionSyncCallbacks;
+  ownerId:          string | null;
 }): Promise<ExtractionHandlerOutcome> {
-  const { parsed, backendSessionId, durationMs, queue, isOnline, syncCbs } = params;
+  const { parsed, backendSessionId, durationMs, queue, isOnline, syncCbs, ownerId } = params;
 
   const extractionId = crypto.randomUUID();
   const payload = { extractionId, backendSessionId, parsed, durationMs };
 
-  executionEngine.routeQrExtraction(queue, isOnline, backendSessionId, payload, syncCbs);
+  executionEngine.routeQrExtraction(queue, isOnline, backendSessionId, payload, syncCbs, ownerId);
 
   return isOnline ? 'synced' : 'queued';
 }

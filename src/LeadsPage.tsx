@@ -231,6 +231,7 @@ export interface LeadsInitialFilters {
   dateFilter?: 'today' | '7days' | '30days';
   systemStatus?: string;
   leadStatus?: string;
+  temperature?: string;
 }
 
 interface LeadsPageProps {
@@ -265,10 +266,11 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   const [repFilter, setRepFilter] = useState(init.repFilter);
   const [statusFilter, setStatusFilter] = useState(initialFilters?.leadStatus ?? init.adv.leadStatus);
 
-  // Advanced filters — system_status comes in via initialFilters
+  // Advanced filters — system_status and temperature come in via initialFilters
   const initAdv: AdvancedFilters = {
     ...init.adv,
     ...(initialFilters?.systemStatus ? { systemStatus: initialFilters.systemStatus } : {}),
+    ...(initialFilters?.temperature ? { temperature: initialFilters.temperature } : {}),
   };
 
   // Advanced filters (draft = what's in the panel, applied = active)
@@ -398,8 +400,10 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (eventFilt) query = query.eq('event_code', eventFilt);
 
     if (adv.leadType) query = query.eq('lead_type', adv.leadType);
-    if (adv.temperature) query = query.eq('lead_temperature', adv.temperature);
-    if (adv.state) query = query.eq('state', adv.state);
+    if (adv.temperature === '__unassigned__') query = query.or('lead_temperature.is.null,lead_temperature.eq.');
+    else if (adv.temperature) query = query.eq('lead_temperature', adv.temperature);
+    if (adv.state === '__unassigned__') query = query.or('state.is.null,state.eq.');
+    else if (adv.state) query = query.eq('state', adv.state);
     if (adv.application) query = query.ilike('application', `%${adv.application}%`);
     if (adv.systemStatus) query = query.eq('system_status', adv.systemStatus);
     const effectiveStatus = statusFilt || adv.leadStatus;
@@ -467,8 +471,10 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (quickDateStart) query = query.gte('created_at', quickDateStart);
     if (eventFilter) query = query.eq('event_code', eventFilter);
     if (applied.leadType) query = query.eq('lead_type', applied.leadType);
-    if (applied.temperature) query = query.eq('lead_temperature', applied.temperature);
-    if (applied.state) query = query.eq('state', applied.state);
+    if (applied.temperature === '__unassigned__') query = query.or('lead_temperature.is.null,lead_temperature.eq.');
+    else if (applied.temperature) query = query.eq('lead_temperature', applied.temperature);
+    if (applied.state === '__unassigned__') query = query.or('state.is.null,state.eq.');
+    else if (applied.state) query = query.eq('state', applied.state);
     if (applied.application) query = query.ilike('application', `%${applied.application}%`);
     if (applied.dateFrom) query = query.gte('created_at', new Date(applied.dateFrom).toISOString());
     if (applied.dateTo) {
@@ -490,8 +496,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
       filterLines.push(`Event: ${ev ? `${ev.name} (${eventFilter})` : eventFilter}`);
     }
     if (applied.leadType) filterLines.push(`Lead Type: ${applied.leadType}`);
-    if (applied.temperature) filterLines.push(`Temperature: ${applied.temperature}`);
-    if (applied.state) filterLines.push(`State: ${applied.state}`);
+    if (applied.temperature) filterLines.push(`Temperature: ${applied.temperature === '__unassigned__' ? 'UNASSIGNED' : applied.temperature}`);
+    if (applied.state) filterLines.push(`State: ${applied.state === '__unassigned__' ? 'UNASSIGNED' : applied.state}`);
     if (applied.application) filterLines.push(`Application: ${applied.application}`);
     if (applied.dateFrom) filterLines.push(`Date From: ${applied.dateFrom}`);
     if (applied.dateTo) filterLines.push(`Date To: ${applied.dateTo}`);
@@ -611,8 +617,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
 
   const advancedChips: { label: string; key: keyof AdvancedFilters }[] = [
     applied.leadType ? { label: `Type: ${applied.leadType}`, key: 'leadType' } : null,
-    applied.temperature ? { label: `Temp: ${applied.temperature}`, key: 'temperature' } : null,
-    applied.state ? { label: `State: ${applied.state}`, key: 'state' } : null,
+    applied.temperature ? { label: `Temp: ${applied.temperature === '__unassigned__' ? 'UNASSIGNED' : applied.temperature}`, key: 'temperature' } : null,
+    applied.state ? { label: `State: ${applied.state === '__unassigned__' ? 'UNASSIGNED' : applied.state}`, key: 'state' } : null,
     applied.application ? { label: `App: ${applied.application}`, key: 'application' } : null,
     applied.systemStatus ? { label: `System: ${applied.systemStatus.replace(/_/g, ' ')}`, key: 'systemStatus' } : null,
     applied.dateFrom ? { label: `From: ${applied.dateFrom}`, key: 'dateFrom' } : null,
@@ -1144,7 +1150,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
             onClick={() => setPanelOpen(false)}
           />
 
-          <div className="fixed right-0 top-0 h-full w-80 bg-white shadow-2xl z-40 flex flex-col">
+          <div className="fixed right-0 top-0 h-dvh w-80 bg-white shadow-2xl z-50 flex flex-col">
             <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100">
               <div className="flex items-center gap-2">
                 <SlidersHorizontal className="w-4 h-4 text-stone-600" />
@@ -1177,6 +1183,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
                   { label: 'Hot', value: 'Hot' },
                   { label: 'Warm', value: 'Warm' },
                   { label: 'Cold', value: 'Cold' },
+                  { label: 'UNASSIGNED', value: '__unassigned__' },
                 ]}
               />
 
@@ -1184,7 +1191,10 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
                 label="State"
                 value={draft.state}
                 onChange={v => patchDraft('state', v)}
-                options={stateOptions.map(s => ({ label: s, value: s }))}
+                options={[
+                  { label: 'UNASSIGNED', value: '__unassigned__' },
+                  ...stateOptions.map(s => ({ label: s, value: s })),
+                ]}
               />
 
               <SelectField
@@ -1217,7 +1227,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
               </div>
             </div>
 
-            <div className="px-5 py-4 border-t border-stone-100 flex gap-3">
+            <div className="px-5 pt-4 pb-[calc(3.75rem+env(safe-area-inset-bottom))] md:py-4 border-t border-stone-100 flex gap-3">
               <button
                 onClick={clearAdvanced}
                 className="flex-1 px-4 py-2 text-sm font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition"

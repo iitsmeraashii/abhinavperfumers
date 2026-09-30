@@ -5,7 +5,7 @@ import {
   ArrowLeft, Loader2, AlertCircle, MessageCircle, Phone,
   Link2, Link2Off, ExternalLink, Clock, Send,
   FileText, Image as ImageIcon, Headphones, FileVideo, FileCheck,
-  CheckCheck, Check, X, Circle, Plus, Unlink,
+  CheckCheck, Check, X, Plus, Unlink,
   AlertTriangle, Lock, ChevronDown, ChevronUp, RotateCw,
   Paperclip, Search, Globe, LayoutTemplate,
 } from 'lucide-react';
@@ -135,6 +135,14 @@ function isTextOnlyTemplate(tpl: MetaTemplate): boolean {
 function getTemplateBodyText(tpl: MetaTemplate): string | null {
   const body = tpl.components.find(c => c.type.toLowerCase() === 'body');
   return body?.text ?? null;
+}
+
+function templateParamsValid(params: string[], paramCount: number): boolean {
+  if (paramCount === 0) return true;
+  for (let i = 0; i < paramCount; i++) {
+    if (!params[i] || !params[i].trim()) return false;
+  }
+  return true;
 }
 
 // ── Time helper ──────────────────────────────────────────────────────────────
@@ -514,6 +522,22 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
     const isTemplateAssetSend = !!selectedAsset && !!selectedTemplate && (sw === 'closed' || sw === 'none');
     const isTextOnlySend = !!textOnlyTemplate && !selectedAsset && (sw === 'closed' || sw === 'none');
     if ((!text && !isAssetSend && !isTemplateAssetSend && !isTextOnlySend) || sending) return;
+
+    if (isTemplateAssetSend) {
+      const bodyParamIndices = getTemplateBodyExampleParams(selectedTemplate!);
+      if (!templateParamsValid(templateParams, bodyParamIndices.length)) {
+        setSendError('Please fill in all template parameters before sending.');
+        return;
+      }
+    }
+    if (isTextOnlySend) {
+      const bodyParamIndices = getTemplateBodyExampleParams(textOnlyTemplate!);
+      if (!templateParamsValid(textOnlyParams, bodyParamIndices.length)) {
+        setSendError('Please fill in all template parameters before sending.');
+        return;
+      }
+    }
+
     setSending(true);
     setSendError('');
 
@@ -680,6 +704,11 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
   const hasLeads = linkedLeads.length > 0;
   const existingLeadIds = linkedLeads.map(l => l.leadEntryId);
 
+  const templateParamCount = selectedTemplate ? getTemplateBodyExampleParams(selectedTemplate).length : 0;
+  const canSendTemplate = !sending && templateParamsValid(templateParams, templateParamCount);
+  const textOnlyParamCount = textOnlyTemplate ? getTemplateBodyExampleParams(textOnlyTemplate).length : 0;
+  const canSendTextOnly = !sending && templateParamsValid(textOnlyParams, textOnlyParamCount);
+
   return (
     <div className="max-w-6xl mx-auto p-4 md:p-6">
       {/* ── Back button ── */}
@@ -708,23 +737,12 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                   </span>
                 )}
                 {conversation.conversation_code && (
-                  <span className="text-xs text-stone-400 font-mono px-1.5 py-0.5 bg-stone-50 rounded">
+                  <span className="hidden">
                     {conversation.conversation_code}
                   </span>
                 )}
               </div>
               <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                {/* Status badge */}
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${
-                  conversation.status.toLowerCase() === 'active'
-                    ? 'bg-green-50 text-green-700 border-green-200'
-                    : 'bg-stone-100 text-stone-600 border-stone-200'
-                }`}>
-                  <Circle className={`w-1.5 h-1.5 fill-current ${
-                    conversation.status.toLowerCase() === 'active' ? 'text-green-500' : 'text-stone-400'
-                  }`} />
-                  {conversation.status}
-                </span>
                 {/* Service window badge */}
                 <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium border ${wCfg.badgeCls}`}>
                   <span className={`w-1.5 h-1.5 rounded-full ${wCfg.dotCls}`} />
@@ -766,10 +784,11 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       {/* ── Main layout: chat + info panel ── */}
       <div className="flex flex-col lg:flex-row gap-4">
         {/* ── Chat area ── */}
-        <div className="flex-1 flex flex-col bg-white border border-stone-200 rounded-xl overflow-hidden min-w-0"
-             style={{ minHeight: '400px', maxHeight: 'calc(100vh - 280px)' }}>
+        <div className="flex-1 flex flex-col bg-white border border-stone-200 rounded-xl min-w-0"
+             style={{ minHeight: '400px' }}>
           {/* Messages scroll area */}
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 md:px-4 py-4 space-y-1 bg-stone-50/50">
+          <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0 px-3 md:px-4 py-4 space-y-1 bg-stone-50/50"
+               style={{ maxHeight: 'calc(100vh - 280px)' }}>
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center py-12">
                 <div className="w-14 h-14 rounded-full bg-stone-100 flex items-center justify-center mb-3">
@@ -929,7 +948,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
           </div>
 
           {/* ── Composer ── */}
-          <div className="border-t border-stone-100 px-3 md:px-4 py-3 bg-stone-50">
+          <div className="flex-shrink-0 border-t border-stone-100 px-3 md:px-4 py-3 bg-stone-50">
             {/* Send error */}
             {sendError && (
               <div className="mb-2 flex items-center gap-1.5 px-3 py-1.5 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">
@@ -1079,6 +1098,22 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                       </button>
                     </div>
 
+                    {/* Template body preview */}
+                    {(() => {
+                      const bodyText = getTemplateBodyText(selectedTemplate);
+                      if (!bodyText) return null;
+                      return (
+                        <div className="pt-2 border-t border-amber-200/60">
+                          <label className="block text-[10px] font-medium text-stone-500 uppercase tracking-wide mb-1">
+                            Template Body
+                          </label>
+                          <p className="text-xs text-stone-600 leading-relaxed bg-white border border-amber-200/50 rounded-lg px-2.5 py-2">
+                            {bodyText}
+                          </p>
+                        </div>
+                      );
+                    })()}
+
                     {/* Template body parameters */}
                     {(() => {
                       const bodyParams = getTemplateBodyExampleParams(selectedTemplate);
@@ -1121,7 +1156,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                       </button>
                       <button
                         onClick={handleSend}
-                        disabled={sending}
+                        disabled={!canSendTemplate}
                         className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium text-white bg-stone-800 hover:bg-stone-700 rounded-lg transition disabled:opacity-50"
                       >
                         {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
@@ -1218,7 +1253,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
                       </button>
                       <button
                         onClick={handleSend}
-                        disabled={sending}
+                        disabled={!canSendTextOnly}
                         className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium text-white bg-stone-800 hover:bg-stone-700 rounded-lg transition disabled:opacity-50"
                       >
                         {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}

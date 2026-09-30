@@ -4,6 +4,7 @@
 // Each record is keyed by its stable frontend sessionId (UUID).
 
 import type { CaptureMethod, DraftData } from './types';
+import { openDB } from './db';
 
 // ─── Change notification ─────────────────────────────────────────────────────
 // Lightweight pub/sub so subscribers (e.g. LeadQueuePage) can react to
@@ -38,6 +39,7 @@ export type CompletedLeadStatus =
 
 export interface CompletedLead {
   id:               string;   // stable UUID (= backendSessionId or frontend-generated)
+  ownerId:          string | null;  // auth UID of the rep who created this record
   status:           CompletedLeadStatus;
   captureMethod:    CaptureMethod | null;
   draftData:        DraftData;
@@ -56,49 +58,7 @@ export interface CompletedLead {
   isExhausted:     boolean;  // true when retry_count >= MAX_RETRY_COUNT
 }
 
-const DB_NAME    = 'capture_app';
-const DB_VERSION = 5;  // v5 adds completed_leads store
-const STORE      = 'completed_leads';
-
-function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-
-    req.onupgradeneeded = (event) => {
-      const db  = (event.target as IDBOpenDBRequest).result;
-      const old = (event.target as IDBOpenDBRequest).transaction;
-
-      // Preserve all existing stores
-      const existing = ['drafts', 'assets', 'pending_ops', 'lead_queue'];
-      existing.forEach(name => {
-        if (!db.objectStoreNames.contains(name)) {
-          if (name === 'drafts') {
-            db.createObjectStore(name, { keyPath: 'id' });
-          } else if (name === 'assets') {
-            const s = db.createObjectStore(name, { keyPath: 'id' });
-            s.createIndex('by_session', 'sessionId', { unique: false });
-          } else if (name === 'pending_ops' || name === 'lead_queue') {
-            const s = db.createObjectStore(name, { keyPath: 'id' });
-            s.createIndex('by_session', 'sessionId', { unique: false });
-            s.createIndex('by_created', 'createdAt', { unique: false });
-          }
-        }
-      });
-
-      // New store
-      if (!db.objectStoreNames.contains(STORE)) {
-        const s = db.createObjectStore(STORE, { keyPath: 'id' });
-        s.createIndex('by_status',  'status',    { unique: false });
-        s.createIndex('by_created', 'createdAt', { unique: false });
-      }
-
-      void old; // suppress unused variable warning
-    };
-
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
-}
+const STORE = 'completed_leads';
 
 // ─── Low-level helpers ────────────────────────────────────────────────────────
 
@@ -116,12 +76,15 @@ async function put(record: CompletedLead): Promise<boolean> {
   return false;
 }
 
-async function getAll(): Promise<CompletedLead[]> {
+async function getAll(ownerId?: string): Promise<CompletedLead[]> {
   try {
     const db = await openDB();
     return new Promise<CompletedLead[]>((resolve, reject) => {
       const tx  = db.transaction(STORE, 'readonly');
-      const req = tx.objectStore(STORE).getAll();
+      const store = tx.objectStore(STORE);
+      const req = ownerId
+        ? store.index('by_owner').getAll(ownerId)
+        : store.getAll();
       req.onsuccess = () => resolve((req.result as CompletedLead[]) ?? []);
       req.onerror   = () => reject(req.error);
     });
@@ -159,8 +122,8 @@ export async function saveCompletedLead(lead: CompletedLead): Promise<void> {
   notify();
 }
 
-export async function loadCompletedLeads(): Promise<CompletedLead[]> {
-  const records = await getAll();
+export async function loadCompletedLeads(ownerId?: string): Promise<CompletedLead[]> {
+  const records = await getAll(ownerId);
   return records.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -172,17 +135,61 @@ export async function updateCompletedLeadStatus(
   id: string,
   status: CompletedLeadStatus,
   extra?: Partial<Pick<CompletedLead, 'syncedAt' | 'retries' | 'lastError' | 'backendSessionId' | 'failedStage' | 'lastAttemptAt' | 'failedAt' | 'isExhausted'>>,
+  ownerId?: string,
 ): Promise<boolean> {
   const existing = await get(id);
   if (!existing) return false;
+  if (ownerId && existing.ownerId !== ownerId) return false;
   const ok = await put({ ...existing, status, updatedAt: new Date().toISOString(), ...extra });
   if (ok) notify();
   return ok;
 }
 
-export async function deleteCompletedLead(id: string): Promise<void> {
+export async function deleteCompletedLead(id: string, ownerId?: string): Promise<boolean> {
+  const existing = await get(id);
+  if (!existing) return true;
+  if (ownerId && existing.ownerId !== ownerId) return false;
   await remove(id);
   notify();
+  return true;
+}
+
+/**
+ * Delete synced completed_leads records older than `maxAgeMs`.
+ *
+ * Only records matching ALL of these conditions are deleted:
+ *   - status === 'synced'
+ *   - syncedAt is a non-null, parseable timestamp
+ *   - Date.parse(syncedAt) <= Date.now() - maxAgeMs
+ *
+ * Records with missing/invalid syncedAt are NEVER deleted (no fallback to
+ * updatedAt).  Only the local IndexedDB record is removed — this never
+ * touches lead_entries, processing_queue, pending_ops, drafts, or any
+ * backend data.
+ *
+ * Returns the number of records deleted.
+ */
+export async function cleanupOldSyncedCompletedLeads(
+  ownerId: string,
+  maxAgeMs: number,
+): Promise<number> {
+  try {
+    const all = await getAll(ownerId);
+    const cutoff = Date.now() - maxAgeMs;
+    const toDelete = all.filter(r => {
+      if (r.status !== 'synced') return false;
+      if (!r.syncedAt) return false;
+      const ts = Date.parse(r.syncedAt);
+      if (Number.isNaN(ts)) return false;
+      return ts <= cutoff;
+    });
+    if (toDelete.length === 0) return 0;
+    await Promise.all(toDelete.map(r => remove(r.id)));
+    notify();
+    return toDelete.length;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -198,9 +205,9 @@ export async function deleteCompletedLead(id: string): Promise<void> {
  *
  * Returns the count of deleted records.
  */
-export async function deleteAllSyncedCompletedLeads(): Promise<number> {
+export async function deleteAllSyncedCompletedLeads(ownerId?: string): Promise<number> {
   try {
-    const all = await getAll();
+    const all = await getAll(ownerId);
     const synced = all.filter(r => r.status === 'synced');
     if (synced.length === 0) return 0;
     await Promise.all(synced.map(r => remove(r.id)));
@@ -218,12 +225,14 @@ export function buildCompletedLead(
   backendSessionId: string | null,
   eventId: string | null = null,
   eventName: string | null = null,
+  ownerId: string | null = null,
 ): CompletedLead {
   const hasKey = !!(draftData.clientName?.trim() || draftData.company?.trim());
   const status: CompletedLeadStatus = hasKey ? 'local_only' : 'needs_review';
   const now = new Date().toISOString();
   return {
     id:               sessionId,
+    ownerId,
     status,
     captureMethod,
     draftData,

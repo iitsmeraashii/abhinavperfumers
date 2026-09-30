@@ -8,6 +8,7 @@
 import { supabase } from '../supabaseClient';
 import type { AssetReference } from './assetReference';
 import { alpeLog } from './diagnostics';
+import { isConsoleEnabled } from '../runtime/runtimeDiagnostics';
 
 // ─── Resolution result model ─────────────────────────────────────────────────
 
@@ -49,11 +50,11 @@ export async function resolveEvidence(
   ref: AssetReference | null,
 ): Promise<ResolvedEvidence> {
   if (!ref) {
-    console.log('[ALPE TRACE] EVIDENCE_RESOLVE', { input: null, result: 'no_asset' });
+    if (isConsoleEnabled()) console.log('[ALPE TRACE] EVIDENCE_RESOLVE', { input: null, result: 'no_asset' });
     return emptyResult(null, 'no_asset', null);
   }
 
-  console.log('[ALPE TRACE] EVIDENCE_RESOLVE_INPUT', {
+  if (isConsoleEnabled()) console.log('[ALPE TRACE] EVIDENCE_RESOLVE_INPUT', {
     assetId: ref.assetId,
     assetType: ref.assetType,
     storagePath: ref.storagePath ?? null,
@@ -104,7 +105,7 @@ export async function resolveEvidence(
       });
 
       if (idMismatch) {
-        console.error('[EVIDENCE_DIAG] ID MISMATCH in EvidenceResolver!', {
+        if (isConsoleEnabled()) console.error('[EVIDENCE_DIAG] ID MISMATCH in EvidenceResolver!', {
           resolverAssetId: ref.assetId,
           dbRowId: r.id,
           localAssetId: ref.localAssetId,

@@ -23,6 +23,9 @@ export interface BusinessCardAsset {
   storedHeight: number;
   sizeBytes: number;
   createdAt: string;
+  /** Supabase auth UID of the user who created this asset.
+   *  null on legacy records created before this field was added. */
+  ownerId?: string | null;
 }
 
 export type OcrStatus = 'idle' | 'processing' | 'done' | 'error';
@@ -162,6 +165,12 @@ export interface DraftData {
   emails?:            string[];
   website?:           string;
   address?:           string;
+  country?:           string;
+  /** Phone dial code for phone-country context (e.g. '+91', '+971').
+   *  Conceptually separate from `country` (lead/business country).
+   *  Used by future normalization to convert local numbers to international form.
+   *  Defaults to '+91' only for MANUAL capture mode. */
+  phoneCountryCode?:  string;
   // Per-lead event override (defaults to My Account event)
   captureEventId?:    string;
   // Card session references

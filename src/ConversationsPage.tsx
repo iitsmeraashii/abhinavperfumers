@@ -472,7 +472,7 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
                             </span>
                           )}
                           {conv.conversation_code && (
-                            <span className="text-xs text-stone-400 font-mono">
+                            <span className="hidden">
                               {conv.conversation_code}
                             </span>
                           )}

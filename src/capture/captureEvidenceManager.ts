@@ -22,6 +22,8 @@ import {
 } from './assetStorageUpload';
 import type { BusinessCardUploadResult } from './assetStorageUpload';
 import { voiceEvidenceManager } from './voiceEvidenceManager';
+import { dbPut, dbDelete }     from './db';
+import { enqueueOp }           from './captureOfflineQueue';
 
 let _uploadSeq = 0;
 function _diag(stage: string, payload: Record<string, unknown>): void {
@@ -51,6 +53,7 @@ interface NotesImageEvidence {
   dataUrl:      string;
   uploadTiming: UploadTiming;
   correlationId?: string | null;
+  ownerId?:      string | null;
 }
 
 interface VoiceNoteEvidence {
@@ -61,6 +64,7 @@ interface VoiceNoteEvidence {
   mimeType:     string;
   uploadTiming: UploadTiming;
   correlationId?: string | null;
+  ownerId?:      string | null;
 }
 
 export type CaptureEvidence = BusinessCardEvidence | NotesImageEvidence | VoiceNoteEvidence;
@@ -68,15 +72,33 @@ export type CaptureEvidence = BusinessCardEvidence | NotesImageEvidence | VoiceN
 // ─── Manager ──────────────────────────────────────────────────────────────────
 
 class CaptureEvidenceManager {
-  private _pendingNotes: { sessionId: string; dataUrl: string } | null = null;
+  private _pendingNotes: { sessionId: string; dataUrl: string; ownerId: string | null; localOpId: string } | null = null;
   private _pendingReconciliation: BusinessCardAsset[] = [];
   private _pendingCardUploads: Map<string, BusinessCardAsset[]> = new Map();
   private _uploadTrackers: Map<string, Promise<void>[]> = new Map();
   private _correlationId: string | null = null;
-  private _reconciliationCorrelationId: string | null = null;
+  /** Asset IDs that have been intentionally discarded by the user.
+   *  Uploads for these assets are cancelled before metadata write. */
+  private _abandonedAssetIds: Set<string> = new Set();
 
   setCorrelationId(corrId: string | null): void {
     this._correlationId = corrId;
+  }
+
+  /** Mark an asset as intentionally discarded. Any in-flight or deferred
+   *  upload for this asset will be cancelled before the metadata write,
+   *  preventing an unexpected backend capture_assets record. */
+  abandonAsset(assetId: string): void {
+    this._abandonedAssetIds.add(assetId);
+    // Also remove from any deferred pending uploads so flush/reset won't dispatch
+    for (const [sid, assets] of this._pendingCardUploads) {
+      this._pendingCardUploads.set(sid, assets.filter(a => a.id !== assetId));
+    }
+  }
+
+  /** Check whether an asset has been abandoned (used by _uploadBusinessCard). */
+  isAssetAbandoned(assetId: string): boolean {
+    return this._abandonedAssetIds.has(assetId);
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -116,28 +138,49 @@ class CaptureEvidenceManager {
         break;
       }
 
-      case 'notes_image':
+      case 'notes_image': {
         if (evidence.dataUrl?.startsWith('data:')) {
-          this._pendingNotes = { sessionId: evidence.sessionId, dataUrl: evidence.dataUrl };
+          // ── Durable persistence BEFORE any upload attempt ──
+          // Persist the notes image to pending_ops so it survives refresh,
+          // tab close, upload failure, and user switching. The op is removed
+          // only after a successful upload.
+          const ownerId = evidence.ownerId ?? null;
+          const localOpId = `notes_${evidence.sessionId}_${Date.now()}`;
+          const opRecord = {
+            id:          localOpId,
+            ownerId,
+            type:        'upload_notes_image',
+            sessionId:   evidence.sessionId,
+            createdAt:   new Date().toISOString(),
+            retries:     0,
+            payload:     { sessionId: evidence.sessionId, dataUrl: evidence.dataUrl, ownerId },
+          };
+          void dbPut('pending_ops', opRecord).catch(err =>
+            console.warn('[evidenceManager] notes image persist failed:', err),
+          );
+          this._pendingNotes = { sessionId: evidence.sessionId, dataUrl: evidence.dataUrl, ownerId, localOpId };
         }
         break;
+      }
 
       case 'voice_note':
         // Delegated to VoiceEvidenceManager, which owns the full upload →
         // transcription lifecycle including offline queueing.
-        // Pass uploadTiming so the manager can respect IMMEDIATE vs ON_SAVE.
+        // Pass uploadTiming and ownerId so the manager can respect IMMEDIATE
+        // vs ON_SAVE and capture the original owner at registration time.
         voiceEvidenceManager.register(
           evidence.sessionId,
           evidence.audioBlob,
           evidence.durationMs,
           evidence.mimeType,
           evidence.uploadTiming,
+          evidence.ownerId ?? null,
         );
         break;
     }
   }
 
-  onSaveAndNext(sessionId: string, correlationId?: string | null): void {
+  onSaveAndNext(sessionId: string, correlationId?: string | null, ownerId?: string | null): void {
     // Voice evidence is handled by VoiceEvidenceManager — it manages its own
     // online/offline routing, so it must be called before the navigator.onLine
     // gate that applies to notes and reconciliation.
@@ -150,7 +193,7 @@ class CaptureEvidenceManager {
       branch: _voiceMgrExists && _onSaveExists ? 'WILL_CALL' : 'SKIP',
     });
     if (_voiceMgrExists && _onSaveExists) {
-      voiceEvidenceManager.onSaveAndNext(sessionId);
+      voiceEvidenceManager.onSaveAndNext(sessionId, ownerId ?? null);
       _diag('VOICE_ONSAVEANDNEXT_POST', {
         backendSessionId: sessionId,
         branch: 'CALLED',
@@ -167,9 +210,14 @@ class CaptureEvidenceManager {
     if (!navigator.onLine) return;
 
     if (this._pendingNotes?.sessionId === sessionId) {
-      const { dataUrl } = this._pendingNotes;
+      const { dataUrl, ownerId, localOpId } = this._pendingNotes;
       this._pendingNotes = null;
-      const p = uploadNotesImage(sessionId, dataUrl, correlationId).catch(() => {});
+      const p = uploadNotesImage(sessionId, dataUrl, correlationId, ownerId).then(() => {
+        // Remove the durable local copy only after successful upload.
+        if (localOpId) {
+          void dbDelete('pending_ops', localOpId).catch(() => {});
+        }
+      }).catch(() => {});
       this._trackUpload(sessionId, p);
     }
 
@@ -278,17 +326,45 @@ class CaptureEvidenceManager {
     this._uploadTrackers.delete(sessionId);
   }
 
-  onSessionReset(): void {
+  onSessionReset(ownerId: string | null = null): void {
     _diag('SESSION_RESET', {
       pendingUploadsBefore: Array.from(this._pendingCardUploads.keys()).map(k => ({ key: k, count: this._pendingCardUploads.get(k)?.length ?? 0 })),
       trackedUploadsBefore: Array.from(this._uploadTrackers.keys()).map(k => ({ key: k, count: this._uploadTrackers.get(k)?.length ?? 0 })),
     });
+
+    // ── Durable enqueue of any remaining deferred card uploads ──
+    // If flushPendingUploads() was called first, the map is empty and this
+    // is a no-op. If it was NOT called (e.g. handleBackToOptions), we
+    // preserve the evidence by enqueuing it to pending_ops — the existing
+    // offline queue mechanism can process it later on reconnect.
+    for (const [sessionId, assets] of this._pendingCardUploads) {
+      for (const asset of assets) {
+        if (this._abandonedAssetIds.has(asset.id)) continue;
+        const payload = {
+          assetId:      asset.id,
+          sessionId:    asset.sessionId,
+          side:         asset.side,
+          dataUrl:      asset.dataUrl,
+          mimeType:     asset.mimeType,
+          sizeBytes:    asset.sizeBytes,
+          originalWidth:  asset.originalWidth,
+          originalHeight: asset.originalHeight,
+          storedWidth:    asset.storedWidth,
+          storedHeight:   asset.storedHeight,
+          ownerId:       asset.ownerId ?? ownerId,
+        };
+        void enqueueOp('upload_business_card', sessionId, payload, payload.ownerId ?? null)
+          .catch(err => console.warn('[evidenceManager] onSessionReset enqueue failed:', err));
+      }
+    }
+
     this._pendingNotes = null;
     this._pendingReconciliation = [];
     this._pendingCardUploads.clear();
+    this._abandonedAssetIds.clear();
     // Do NOT clear _uploadTrackers — produceProcessingJob may still need
     // to await them after the session has been reset.
-    voiceEvidenceManager.onSessionReset();
+    voiceEvidenceManager.onSessionReset(ownerId);
   }
 
   // ── Private upload helpers ─────────────────────────────────────────────────
@@ -341,6 +417,16 @@ class CaptureEvidenceManager {
     }
 
     // IMMEDIATE
+    if (this.isAssetAbandoned(asset.id)) {
+      _diag('UPLOAD_BUSINESS_CARD_RETURN', {
+        backendSessionId: asset.sessionId,
+        localAssetId: asset.id,
+        returnPoint: 'ABANDONED',
+        reason: 'asset was discarded by the user before upload completed',
+      });
+      return;
+    }
+
     if (!navigator.onLine) {
       _diag('UPLOAD_BUSINESS_CARD_RETURN', {
         backendSessionId: asset.sessionId,
@@ -358,6 +444,18 @@ class CaptureEvidenceManager {
       storageBucket,
       storagePath,
     });
+
+    // Re-check abandoned status AFTER the await — the user may have
+    // discarded the asset while the upload was in flight.
+    if (this.isAssetAbandoned(asset.id)) {
+      _diag('UPLOAD_BUSINESS_CARD_RETURN', {
+        backendSessionId: asset.sessionId,
+        localAssetId: asset.id,
+        returnPoint: 'ABANDONED_AFTER_UPLOAD',
+        reason: 'asset was discarded during upload — skipping metadata write',
+      });
+      return;
+    }
 
     let result: BusinessCardUploadResult | null = null;
     try {
@@ -396,7 +494,6 @@ class CaptureEvidenceManager {
         reason: 'file uploaded to Storage but metadata write failed — queued for reconciliation',
       });
       this._pendingReconciliation.push(asset);
-      this._reconciliationCorrelationId = correlationId ?? null;
     }
 
     _diag('UPLOAD_BUSINESS_CARD_RETURN', {

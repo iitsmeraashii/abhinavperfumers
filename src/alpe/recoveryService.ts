@@ -24,7 +24,6 @@ import {
 } from './processingQueueRepository';
 import {
   loadCompletedLeads,
-  getCompletedLead,
   updateCompletedLeadStatus,
 } from '../capture/completedLeadsStorage';
 import { supabase } from '../supabaseClient';
@@ -111,7 +110,7 @@ async function fetchPromotedSessionIds(
 export async function reconcileCompletedLeads(
   userId: string,
 ): Promise<{ synced: number; failures: number }> {
-  const localLeads = await loadCompletedLeads();
+  const localLeads = await loadCompletedLeads(userId);
   const pendingLeads = localLeads.filter(lead => lead.status !== 'synced');
   if (pendingLeads.length === 0) return { synced: 0, failures: 0 };
 
@@ -153,7 +152,7 @@ export async function reconcileCompletedLeads(
       failedStage: null,
       failedAt: null,
       isExhausted: false,
-    });
+    }, userId);
 
     if (ok) {
       synced++;
@@ -187,7 +186,7 @@ export async function reconcileCompletedLeads(
         failedStage: null,
         failedAt: null,
         isExhausted: false,
-      });
+      }, userId);
 
       if (ok) {
         synced++;

@@ -76,7 +76,7 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
       captureProfile:        prev.captureProfile,
       createdAt:             now,
       updatedAt:              now,
-      draftData:              {},
+      draftData: method === 'MANUAL' ? { phoneCountryCode: '+91' } : {},
       hasUnsavedChanges:      false,
       sync: {
         ...INITIAL_SYNC_STATE,
@@ -96,6 +96,14 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
       // originalCaptureMethod is set on the first startCapture call and
       // must not change on subsequent startCaptureWithDraft calls.
       const originalMethod = prev.originalCaptureMethod ?? method;
+      const draftWithPhoneCountry: Partial<DraftData> = { ...draft };
+      // Backward compat: convert legacy country-name value from Version 366
+      if (draftWithPhoneCountry.phoneCountryCode === 'India') {
+        draftWithPhoneCountry.phoneCountryCode = '+91';
+      }
+      if (originalMethod === 'MANUAL' && !draftWithPhoneCountry.phoneCountryCode) {
+        draftWithPhoneCountry.phoneCountryCode = '+91';
+      }
       return {
         captureMethod:         method,
         originalCaptureMethod: originalMethod,
@@ -103,8 +111,8 @@ export function useCaptureSession(): [CaptureSession, CaptureSessionActions] {
         captureProfile:    prev.captureProfile,
         createdAt:         prev.createdAt ?? now,
         updatedAt:         now,
-        draftData:         draft,
-        hasUnsavedChanges: Object.keys(draft).length > 0,
+        draftData:         draftWithPhoneCountry,
+        hasUnsavedChanges: Object.keys(draftWithPhoneCountry).length > 0,
         sync: {
           ...prev.sync,
           // Preserve existing backend session ID — transitioning method (e.g.

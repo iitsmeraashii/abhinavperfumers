@@ -44,6 +44,10 @@ function buildExtractedFields(draftData: DraftData): Record<string, unknown> {
   if (draftData.phone)       fields.phone       = draftData.phone;
   if (draftData.email)       fields.email       = draftData.email;
   if (draftData.designation) fields.designation = draftData.designation;
+  if (draftData.address)     fields.address     = draftData.address;
+  if (draftData.website)     fields.website     = draftData.website;
+  if (draftData.country)     fields.country     = draftData.country;
+  if (draftData.phoneCountryCode) fields.phoneCountryCode = draftData.phoneCountryCode;
   return fields;
 }
 
@@ -79,6 +83,9 @@ export async function persistExtractionMetadata(
       fieldsExtracted: buildExtractedFields(metadata.draftData),
     },
   };
+
+  // [DIAG:ADDRESS_FLOW] log what persistExtractionMetadata writes
+  console.log('[DIAG:ADDRESS_FLOW] persistExtractionMetadata extracted_fields =', JSON.stringify(updatePayload.extracted_fields), 'metadata.draftData.address =', metadata.draftData.address);
 
   try {
     const { error } = await supabase

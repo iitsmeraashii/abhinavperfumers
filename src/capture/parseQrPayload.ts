@@ -45,6 +45,26 @@ const RE_NOISE = /\b(expo|exhibition|fair|summit|fest|pass|ticket|badge|entry|vi
 // Alphanumeric ID codes — e.g. CMPL-IV26-26223, QR12345, REG/2026/001
 const RE_ID_CODE = /^[A-Z]{2,}[-/][A-Z0-9]+[-/]?[A-Z0-9]*$/i;
 
+// Address detection — reuses the same token and pincode patterns as the
+// business-card parser (parseBusinessCard.ts) so detection stays consistent
+// across capture methods. The token list is broadened to accept hyphens
+// (e.g. "Sector-39") since QR payloads frequently use hyphens as separators.
+const RE_ADDRESS = /\b(\d+[,\/]?\s*\w+\s*[\s-]*(?:street|st|road|rd|avenue|ave|lane|ln|nagar|colony|park|sector|plot|flat|floor|building|bldg|society|complex|industrial|area|estate|district|pin|pincode|zip))\b/i;
+const RE_PINCODE = /\b\d{6}\b/;
+
+// Heuristic: a line that starts with a house/plot number (e.g. "E-23,", "12/3",
+// "B-45") is very likely an address in Indian trade-event contexts.
+const RE_HOUSE_NUMBER = /^\b[A-Z]?[-/]?\d+[,:;\s]/;
+
+// Additional address keywords that commonly appear on their own line in
+// QR/text payloads without a leading number (e.g. "Bodakdev, Ahmedabad - 380054").
+const RE_ADDRESS_KEYWORDS = /\b(nagar|colony|sector|plot|flat|floor|building|bldg|society|complex|industrial|area|estate|district|street|st|road|rd|avenue|ave|lane|ln)\b/i;
+
+function looksLikeAddress(line: string): boolean {
+  return RE_ADDRESS.test(line) || RE_PINCODE.test(line) || RE_HOUSE_NUMBER.test(line) ||
+    (RE_ADDRESS_KEYWORDS.test(line) && /\d/.test(line));
+}
+
 // Designation keyword list — intentionally broad to cover common Indian business titles
 const DESIGNATIONS = new Set([
   'owner', 'founder', 'co-founder', 'cofounder',
@@ -325,7 +345,27 @@ export function parseExhibitionText(text: string): HeuristicResult | null {
     }
   }
 
-  // ── Pass 2: noise / ID codes ─────────────────────────────────────────────
+  // ── Pass 2: address lines ─────────────────────────────────────────────
+  // Detected BEFORE noise/ID codes because RE_NOISE includes city names
+  // (pune, mumbai, delhi, etc.) that frequently appear in address lines.
+  // Runs before company/designation/name so address-like lines (which often
+  // contain digits and place names) are not misclassified.
+  const addressLines: string[] = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    if (consumed.has(i)) continue;
+    const line = rawLines[i];
+
+    if (looksLikeAddress(line)) {
+      addressLines.push(line);
+      consumed.add(i);
+    }
+  }
+  if (addressLines.length > 0) {
+    fields.address = addressLines.join(', ');
+    inferredFields.push('address');
+  }
+
+  // ── Pass 2b: noise / ID codes ──────────────────────────────────────────
   for (let i = 0; i < rawLines.length; i++) {
     if (consumed.has(i)) continue;
     const line = rawLines[i];

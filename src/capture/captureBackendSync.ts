@@ -98,12 +98,18 @@ export async function syncUpsertSession(
     if (draftData.phone)        extractedFields.phone        = draftData.phone;
     if (draftData.email)        extractedFields.email        = draftData.email;
     if (draftData.designation)  extractedFields.designation  = draftData.designation;
+    if (draftData.address)      extractedFields.address      = draftData.address;
+    if (draftData.website)      extractedFields.website      = draftData.website;
+    if (draftData.country)      extractedFields.country      = draftData.country;
+    if (draftData.phoneCountryCode) extractedFields.phoneCountryCode = draftData.phoneCountryCode;
 
-    const upsertPayload = {
+    // [DIAG:ADDRESS_FLOW] verify address survives into extracted_fields
+    console.log('[DIAG:ADDRESS_FLOW] syncUpsertSession extracted_fields =', JSON.stringify(extractedFields));
+
+    const upsertPayload: Record<string, unknown> = {
       id:               sessionId,
       user_id:          userId,
       sales_rep_code:   repCode,
-      event_id:         eventId ?? null,
       capture_method:   captureMethod,
       session_status:   sessionStatus.toLowerCase(),
       extracted_fields: extractedFields,
@@ -132,6 +138,15 @@ export async function syncUpsertSession(
       designation:      draftData.designation ?? null,
       synced_at:        new Date().toISOString(),
     };
+
+    // Only include event_id in the upsert when the caller explicitly provides
+    // a value (string or null). When eventId is undefined (omitted by callers
+    // that don't own the event mapping — e.g. the initial session-creation
+    // routeSessionSync), the field is excluded so a late-arriving fire-and-
+    // forget sync cannot clobber the event_id written by produceProcessingJob.
+    if (eventId !== undefined) {
+      upsertPayload.event_id = eventId;
+    }
 
     const { error, count } = await supabase
       .from('capture_sessions')
@@ -530,6 +545,13 @@ export async function syncUpdateSessionFields(
     if (draftData.phone)        extractedFields.phone        = draftData.phone;
     if (draftData.email)        extractedFields.email        = draftData.email;
     if (draftData.designation)  extractedFields.designation  = draftData.designation;
+    if (draftData.address)      extractedFields.address      = draftData.address;
+    if (draftData.website)      extractedFields.website      = draftData.website;
+    if (draftData.country)      extractedFields.country      = draftData.country;
+    if (draftData.phoneCountryCode) extractedFields.phoneCountryCode = draftData.phoneCountryCode;
+
+    // [DIAG:ADDRESS_FLOW] verify address in field update
+    console.log('[DIAG:ADDRESS_FLOW] syncUpdateSessionFields extracted_fields =', JSON.stringify(extractedFields), 'draftData.address =', draftData.address);
 
     const { error } = await supabase
       .from('capture_sessions')

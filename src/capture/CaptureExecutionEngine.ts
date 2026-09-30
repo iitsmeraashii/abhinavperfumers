@@ -134,6 +134,17 @@ export interface SyncRoutingCallbacks {
 
 class CaptureExecutionEngine {
 
+  private _ownerId: string | null = null;
+
+  /** Set the authenticated user's ID for scoping offline queue ops. */
+  setOwnerId(ownerId: string | null): void {
+    this._ownerId = ownerId;
+  }
+
+  getOwnerId(): string | null {
+    return this._ownerId;
+  }
+
   // ── Execution Plan ──────────────────────────────────────────────────────────
 
   buildPlan(
@@ -211,6 +222,7 @@ class CaptureExecutionEngine {
     payload:    UpsertSessionPayload,
     bsid:       string,
     cbs:        SyncRoutingCallbacks,
+    ownerId:    string | null,
   ): void {
     logEvent('routeSessionSync() started', {
       backendSessionId: bsid,
@@ -221,7 +233,7 @@ class CaptureExecutionEngine {
       cbs.onBeforeSync();
       syncUpsertSession(payload, this._toSyncCbs(cbs)).catch(() => {});
     } else {
-      enqueueOp('upsert_session', bsid, payload);
+      enqueueOp('upsert_session', bsid, payload, ownerId);
       cbs.onOfflineQueued();
     }
   }
@@ -231,6 +243,7 @@ class CaptureExecutionEngine {
     isOnline:   boolean,
     payload:    UpsertAssetPayload,
     cbs:        SyncRoutingCallbacks,
+    ownerId:    string | null,
   ): void {
     const ctx = {
       backendSessionId: payload.backendSessionId,
@@ -310,7 +323,7 @@ class CaptureExecutionEngine {
     logEvent('routeAssetSync() — branch: OFFLINE QUEUE', ctx, { corrId, queue });
 
     logEvent('routeAssetSync() — calling enqueueOp()', ctx, { corrId, opType: 'upsert_asset' });
-    const enqueuePromise = enqueueOp('upsert_asset', payload.backendSessionId, payload);
+    const enqueuePromise = enqueueOp('upsert_asset', payload.backendSessionId, payload, ownerId);
     logEvent('routeAssetSync() — enqueueOp() returned', ctx, { corrId, isPromise: enqueuePromise instanceof Promise });
 
     enqueuePromise
@@ -358,11 +371,12 @@ class CaptureExecutionEngine {
     bsid:       string,
     draftData:  DraftData,
     cbs:        SyncRoutingCallbacks,
+    ownerId:    string | null,
   ): void {
     if (this._shouldSync(queue, isOnline)) {
       syncUpdateSessionFields(bsid, draftData, this._toSyncCbs(cbs)).catch(() => {});
     } else {
-      enqueueOp('update_session_fields', bsid, { sessionId: bsid, draftData });
+      enqueueOp('update_session_fields', bsid, { sessionId: bsid, draftData }, ownerId);
       cbs.onOfflineQueued();
     }
   }
@@ -372,6 +386,7 @@ class CaptureExecutionEngine {
     isOnline:       boolean,
     backendSessionId: string,
     cbs:            SyncRoutingCallbacks,
+    _ownerId:        string | null,
   ): void {
     if (this._shouldSync(queue, isOnline)) {
       syncAbandonSession(backendSessionId, this._toSyncCbs(cbs)).catch(() => {});
@@ -387,12 +402,13 @@ class CaptureExecutionEngine {
     backendSessionId: string,
     payload:        UpsertVisionExtractionPayload,
     cbs:            SyncRoutingCallbacks,
+    ownerId:        string | null,
   ): void {
     if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
       syncUpsertVisionExtraction(payload, this._toSyncCbs(cbs)).catch(() => {});
     } else {
-      enqueueOp('upsert_vision_extraction', backendSessionId, payload);
+      enqueueOp('upsert_vision_extraction', backendSessionId, payload, ownerId);
       cbs.onOfflineQueued();
     }
   }
@@ -403,12 +419,13 @@ class CaptureExecutionEngine {
     backendSessionId: string,
     payload:        UpsertOcrExtractionPayload,
     cbs:            SyncRoutingCallbacks,
+    ownerId:        string | null,
   ): void {
     if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
       syncUpsertOcrExtraction(payload, this._toSyncCbs(cbs)).catch(() => {});
     } else {
-      enqueueOp('upsert_ocr_extraction', backendSessionId, payload);
+      enqueueOp('upsert_ocr_extraction', backendSessionId, payload, ownerId);
       cbs.onOfflineQueued();
     }
   }
@@ -419,12 +436,13 @@ class CaptureExecutionEngine {
     backendSessionId: string,
     payload:        UpsertQrExtractionPayload,
     cbs:            SyncRoutingCallbacks,
+    ownerId:        string | null,
   ): void {
     if (this._shouldSync(queue, isOnline)) {
       cbs.onBeforeSync();
       syncUpsertQrExtraction(payload, this._toSyncCbs(cbs)).catch(() => {});
     } else {
-      enqueueOp('upsert_qr_extraction', backendSessionId, payload);
+      enqueueOp('upsert_qr_extraction', backendSessionId, payload, ownerId);
       cbs.onOfflineQueued();
     }
   }
@@ -448,9 +466,10 @@ class CaptureExecutionEngine {
     isOnline:       boolean,
     backendSessionId: string,
     options:          PromoteSessionOptions,
+    ownerId:          string | null,
   ): Promise<{ queued: true } | { queued: false; result: PromoteSessionResult }> {
     if (!this._shouldSync(queue, isOnline)) {
-      await enqueueOp('promote_session', backendSessionId, options);
+      await enqueueOp('promote_session', backendSessionId, options, ownerId);
       return { queued: true };
     }
     const result = await executePromotion(options);

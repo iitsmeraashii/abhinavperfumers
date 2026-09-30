@@ -3,6 +3,30 @@
 @tailwind utilities;
 
 /*
+ * Global viewport baseline — mobile foundation.
+ * Establishes height chain, horizontal-overflow guard, and scroll behavior
+ * so individual pages don't need to re-derive these rules.
+ */
+html {
+  height: 100%;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+body {
+  min-height: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+}
+#root {
+  min-height: 100dvh;
+}
+img, svg, video, canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+/*
  * Strip all html5-qrcode default chrome when mounted inside .qr-clean-mount.
  * We render our own scan guides, so every library-injected UI element is hidden.
  */
@@ -24,7 +48,7 @@
 .qr-clean-mount #html5-qrcode-header-message,
 .qr-clean-mount #html5-qrcode-status { display: none !important; }
 
-/* Safe-area aware bottom nav spacing */
+/* Safe-area aware bottom nav spacing — value matches tailwind.config.js spacing.mobile-nav (3.75rem) */
 .pb-mobile-nav {
   padding-bottom: calc(3.75rem + env(safe-area-inset-bottom));
 }

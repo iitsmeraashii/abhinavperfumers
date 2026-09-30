@@ -28,6 +28,7 @@ import type {
   SyncCallbacks,
 } from './captureBackendSync';
 import { executeVoiceNoteUploadOp } from './voiceEvidenceManager';
+import { uploadNotesImage as uploadNotesImageFn, uploadBusinessCardAsset as uploadBusinessCardAssetFn } from './assetStorageUpload';
 import type { DraftData } from './types';
 
 // ─── Op types ─────────────────────────────────────────────────────────────────
@@ -41,10 +42,13 @@ export type PendingOpType =
   | 'update_session_fields'
   | 'promote_session'
   | 'upload_voice_note'
+  | 'upload_notes_image'
+  | 'upload_business_card'
   | 'enqueue_processing_job';
 
 export interface PendingOp {
   id:           string;        // stable op ID (frontend-generated)
+  ownerId:      string | null; // auth UID of the rep who queued this op
   type:         PendingOpType;
   sessionId:    string;        // for grouping/filtering
   createdAt:    string;        // ISO — ops flush in creation order
@@ -60,10 +64,12 @@ export async function enqueueOp(
   type: PendingOpType,
   sessionId: string,
   payload: unknown,
+  ownerId?: string | null,
 ): Promise<string> {
   const id = `op_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const op: PendingOp = {
     id,
+    ownerId: ownerId ?? null,
     type,
     sessionId,
     createdAt: new Date().toISOString(),
@@ -79,19 +85,29 @@ export async function enqueueOp(
 // for a given op (auth errors), but continues on network errors after
 // incrementing the retry counter.
 
-let flushInProgress = false;
+// Per-owner flush locks: same owner's flushes are serialized, different
+// owners can flush concurrently. Keyed by ownerId (or '__unscoped__' when
+// no ownerId is given — the flush-all path).
+const flushLocks = new Map<string, boolean>();
+const UNSCOPED_KEY = '__unscoped__';
 
 export async function flushQueue(
+  ownerId?: string,
   onProgress?: (flushed: number, total: number) => void,
 ): Promise<{ flushed: number; remaining: number }> {
-  if (flushInProgress) return { flushed: 0, remaining: 0 };
+  const lockKey = ownerId ?? UNSCOPED_KEY;
+
+  if (flushLocks.get(lockKey)) return { flushed: 0, remaining: 0 };
   if (!navigator.onLine) return { flushed: 0, remaining: 0 };
 
-  flushInProgress = true;
+  flushLocks.set(lockKey, true);
 
   try {
-    const ops: PendingOp[] = await dbGetAllInStore<PendingOp>(STORE);
-    if (ops.length === 0) return { flushed: 0, remaining: 0 };
+    const allOps: PendingOp[] = await dbGetAllInStore<PendingOp>(STORE);
+    if (allOps.length === 0) return { flushed: 0, remaining: 0 };
+
+    const ops = ownerId ? allOps.filter(op => op.ownerId === ownerId) : allOps;
+    if (ops.length === 0) return { flushed: 0, remaining: allOps.length };
 
     // Sort by creation order
     ops.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -124,7 +140,7 @@ export async function flushQueue(
     return { flushed, remaining };
 
   } finally {
-    flushInProgress = false;
+    flushLocks.delete(lockKey);
   }
 }
 
@@ -178,8 +194,72 @@ async function executeOp(op: PendingOp): Promise<void> {
         audioBlob:  Blob;
         mimeType:   string;
         durationMs: number;
+        ownerId?:   string | null;
       });
       break;
+    case 'upload_notes_image': {
+      const p = op.payload as {
+        sessionId: string;
+        dataUrl:   string;
+        ownerId?:  string | null;
+      };
+      await uploadNotesImageFn(p.sessionId, p.dataUrl, undefined, p.ownerId ?? null);
+      break;
+    }
+    case 'upload_business_card': {
+      const p = op.payload as {
+        assetId:        string;
+        sessionId:      string;
+        side:           string;
+        dataUrl:        string;
+        mimeType:       string;
+        sizeBytes:      number;
+        originalWidth:  number;
+        originalHeight: number;
+        storedWidth:    number;
+        storedHeight:   number;
+        ownerId?:       string | null;
+      };
+      const asset = {
+        id:             p.assetId,
+        sessionId:      p.sessionId,
+        side:           p.side as import('./types').CardSide,
+        dataUrl:        p.dataUrl,
+        mimeType:       p.mimeType,
+        originalWidth:  p.originalWidth,
+        originalHeight: p.originalHeight,
+        storedWidth:    p.storedWidth,
+        storedHeight:   p.storedHeight,
+        sizeBytes:      p.sizeBytes,
+        createdAt:      new Date().toISOString(),
+        ownerId:        p.ownerId ?? null,
+      } as import('./types').BusinessCardAsset;
+      const result = await uploadBusinessCardAssetFn(asset);
+      if (!result?.uploaded) {
+        // Distinguish auth failure (drop) from recoverable failure (retry).
+        // uploadBusinessCardAsset returns UPLOAD_FAIL for both offline and
+        // not-authenticated, but also for storage upload errors. The existing
+        // queue-wide convention is: auth errors contain "Not authenticated"
+        // or "JWT" and are dropped; everything else is retried.
+        //
+        // uploadBusinessCardAsset returns {uploaded:false} without throwing,
+        // so we must throw here to signal failure to flushQueue's retry loop.
+        // A dedicated error message lets us distinguish recoverable upload
+        // failures (network/server) from intentional non-upload conditions.
+        //
+        // If the asset was intentionally abandoned (abandonAsset was called),
+        // the upload is skipped entirely — we must NOT throw, otherwise the
+        // op would retry forever. The abandonment check is handled in
+        // _uploadBusinessCard in the evidence manager, but the offline queue
+        // executor calls uploadBusinessCardAsset directly. We rely on the fact
+        // that abandoned assets are removed from _pendingCardUploads before
+        // onSessionReset enqueues them, so no abandoned asset should ever
+        // reach this executor. If one does (defensive), treat it as success
+        // (delete the op) rather than retrying forever.
+        throw new Error('upload_business_card failed: storage upload or metadata write did not succeed');
+      }
+      break;
+    }
     case 'enqueue_processing_job': {
       // ALPE offline fallback: replay a deferred processing-job enqueue.
       const { produceProcessingJob } = await import('../alpe/jobProducer');
@@ -198,6 +278,7 @@ async function executeOp(op: PendingOp): Promise<void> {
         eventId:          p.eventId,
         eventName:        p.eventName,
         correlationId:    p.correlationId ?? null,
+        ownerId:          op.ownerId,
       });
       break;
     }
@@ -209,7 +290,7 @@ async function executeOp(op: PendingOp): Promise<void> {
 
 // ─── Queue size ───────────────────────────────────────────────────────────────
 
-export async function getPendingCount(): Promise<number> {
+export async function getPendingCount(ownerId?: string): Promise<number> {
   const ops = await dbGetAllInStore<PendingOp>(STORE);
-  return ops.length;
+  return ownerId ? ops.filter(op => op.ownerId === ownerId).length : ops.length;
 }

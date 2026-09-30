@@ -7,7 +7,7 @@ import {
   User, Users, Thermometer, Hash, FileText, Image, MessageCircle,
   AlertCircle, Clock, RefreshCw, Pencil, Check, X as XIcon,
   StickyNote, Plus, Send, ChevronDown, Bell, CheckCircle2, Link2,
-  ShieldAlert, Flame, Snowflake, Eye,
+  ShieldAlert, Flame, Snowflake, Eye, Globe,
 } from 'lucide-react';
 import {
   REVIEW_REASON_LABELS, fieldLabel, formatConfidencePercent,
@@ -21,6 +21,13 @@ import { TagInput } from './components/TagInput';
 import { TagList, parseTagString, serializeTagArray } from './components/TagList';
 import { ActivityLog } from './components/ActivityLog';
 import { updateLeadWithAudit } from './leadActivityService';
+import { CountrySelector } from './capture/CountrySelector';
+import { PhoneInputWithCountry } from './capture/PhoneInputWithCountry';
+import { UNSURE_COUNTRY, canonicalizeCountry } from './capture/countryData';
+import { normalizePhone, phoneDedupKey } from './capture/normalizePhone';
+import { resolvePhoneCountry } from './capture/phoneCountryResolver';
+import { splitInternationalPhone } from './capture/splitInternationalPhone';
+import { resolveWhatsAppPhone } from './capture/whatsappPhoneResolver';
 
 interface LeadDetail {
   id: string;
@@ -31,6 +38,7 @@ interface LeadDetail {
   emails: string[];
   address: string;
   state: string;
+  country: string | null;
   notes: string;
   lead_type: string;
   previous_associated_rep: string;
@@ -82,10 +90,13 @@ interface EditDraft {
   company: string;
   phone0: string;
   phone1: string;
+  phoneCountryCode: string;
+  phone1CountryCode: string;
   email0: string;
   email1: string;
   address: string;
   state: string;
+  country: string;
   application: string;
   price_range: string;
   lead_temperature: string;
@@ -186,19 +197,8 @@ function val(v: string | null | undefined): string | null {
   return v && v.trim() ? v : null;
 }
 
-function formatWhatsAppNumber(raw: string): string | null {
-  if (!raw || !raw.trim()) return null;
-  const cleaned = raw.replace(/[\s\-()]/g, '');
-  if (cleaned.startsWith('+')) {
-    const digits = cleaned.replace(/\D/g, '');
-    return digits.length >= 7 ? digits : null;
-  }
-  let digits = cleaned.replace(/\D/g, '');
-  if (digits.startsWith('0')) digits = digits.slice(1);
-  if (digits.length === 10) return '91' + digits;
-  if (digits.length === 12 && digits.startsWith('91')) return digits;
-  return digits.length >= 7 ? digits : null;
-}
+// WhatsApp phone resolution now uses the shared resolver/normalizer pipeline.
+// See src/capture/whatsappPhoneResolver.ts.
 
 
 function Card({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
@@ -317,16 +317,25 @@ function SelectRow({ icon, label, value, onChange, options }: SelectRowProps) {
 }
 
 function makeDraft(lead: LeadDetail): EditDraft {
+  const rawPhone0 = lead.phones?.[0] ?? '';
+  const rawPhone1 = lead.phones?.[1] ?? '';
+  // Split stored phone into dial code + local number for UI display.
+  // If the number cannot be confidently split, preserve the original.
+  const phone0Split = splitInternationalPhone(rawPhone0);
+  const phone1Split = splitInternationalPhone(rawPhone1);
   return {
     client_name: lead.client_name ?? '',
     designation: lead.designation ?? '',
     company: lead.company ?? '',
-    phone0: lead.phones?.[0] ?? '',
-    phone1: lead.phones?.[1] ?? '',
+    phone0: phone0Split.localNumber,
+    phone1: phone1Split.localNumber,
+    phoneCountryCode: phone0Split.dialCode ?? '',
+    phone1CountryCode: phone1Split.dialCode ?? '',
     email0: lead.emails?.[0] ?? '',
     email1: lead.emails?.[1] ?? '',
     address: lead.address ?? '',
     state: lead.state ?? '',
+    country: lead.country ?? '',
     application: lead.application ?? '',
     price_range: lead.price_range ?? '',
     lead_temperature: lead.lead_temperature ?? '',
@@ -763,7 +772,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
 
       // 2. FALLBACK — phone number (display only, does NOT create a bridge row)
       if (!conversationId) {
-        const normalizedPhone = formatWhatsAppNumber(lead.phones?.[0] ?? '');
+        const normalizedPhone = resolveWhatsAppPhone(lead.phones?.[0] ?? '');
         if (normalizedPhone) {
           const { data: convByPhone } = await supabase
             .from('whatsapp_conversations')
@@ -987,7 +996,30 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
     setSaveError('');
     setSuccessMsg('');
 
-    const phones = [draft.phone0, draft.phone1].map(p => p.trim()).filter(Boolean);
+    // Normalize each phone using its own country context.
+    // Phones that are already international normalize without dial code.
+    // Phones with no country context are preserved as-is (no guessing).
+    const rawPhones = [draft.phone0, draft.phone1].map(p => p.trim()).filter(Boolean);
+    const dialCodes = [draft.phoneCountryCode, draft.phone1CountryCode];
+    const phones: string[] = [];
+    const seenDedupKeys = new Set<string>();
+    for (let i = 0; i < rawPhones.length; i++) {
+      const raw = rawPhones[i];
+      const dc = dialCodes[i] || undefined;
+      const result = normalizePhone(raw, { dialCode: dc });
+      const dedup = phoneDedupKey(raw, { dialCode: dc });
+      if (dedup && seenDedupKeys.has(dedup)) continue;
+      if (dedup) seenDedupKeys.add(dedup);
+      // Store with leading "+" so the persisted form matches the capture
+      // promotion path (which stores raw international phones with "+").
+      // normalizePhone() intentionally returns bare E.164 digits for
+      // WhatsApp/Meta — that contract is unchanged; resolveWhatsAppPhone()
+      // re-normalizes and strips "+" at use time.
+      // Only prepend "+" on successful normalization; on failure, preserve
+      // the raw value as-is (no spurious "+" on non-phone strings).
+      phones.push(result.ok ? '+' + result.value : raw);
+    }
+
     const emails = [draft.email0, draft.email1].map(e => e.trim()).filter(Boolean);
 
     const updates = {
@@ -998,6 +1030,11 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
       company: draft.company.trim() || null,
       address: draft.address.trim() || null,
       state: draft.state.trim() || null,
+      country: (() => {
+        const raw = draft.country.trim();
+        if (!raw || raw === UNSURE_COUNTRY) return null;
+        return canonicalizeCountry(raw) ?? null;
+      })(),
       application: draft.application.trim() || null,
       price_range: draft.price_range.trim() || null,
       lead_temperature: draft.lead_temperature || null,
@@ -1331,10 +1368,36 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                   onChange={v => patchDraft('designation', v)} placeholder="e.g. Sales Manager" />
                 <EditRow icon={<Building2 className="w-3.5 h-3.5" />} label="Company" value={draft.company}
                   onChange={v => patchDraft('company', v)} placeholder="Company name" />
-                <EditRow icon={<Phone className="w-3.5 h-3.5" />} label="Phone 1" value={draft.phone0}
-                  onChange={v => patchDraft('phone0', v)} required error={errors.phone0} />
-                <EditRow icon={<Phone className="w-3.5 h-3.5" />} label="Phone 2" value={draft.phone1}
-                  onChange={v => patchDraft('phone1', v)} />
+                <div className="flex items-start gap-3 py-2.5 border-b border-stone-100 last:border-0">
+                  <span className="mt-3 text-stone-400 flex-shrink-0"><Phone className="w-3.5 h-3.5" /></span>
+                  <div className="min-w-0 flex-1">
+                    <label className="text-xs text-stone-400 mb-1 block">Phone 1</label>
+                    <PhoneInputWithCountry
+                      phoneCountryCode={draft.phoneCountryCode || null}
+                      onPhoneCountryChange={c => patchDraft('phoneCountryCode', c ?? '')}
+                      phoneValue={draft.phone0}
+                      onPhoneChange={v => patchDraft('phone0', v)}
+                      required={!!errors.phone0}
+                      error={errors.phone0}
+                      phonePlaceholder="Phone number"
+                      derivedDialCode={resolvePhoneCountry({ phone: draft.phone0, isManualCapture: false, address: null })}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-start gap-3 py-2.5 border-b border-stone-100 last:border-0">
+                  <span className="mt-3 text-stone-400 flex-shrink-0"><Phone className="w-3.5 h-3.5" /></span>
+                  <div className="min-w-0 flex-1">
+                    <label className="text-xs text-stone-400 mb-1 block">Phone 2</label>
+                    <PhoneInputWithCountry
+                      phoneCountryCode={draft.phone1CountryCode || null}
+                      onPhoneCountryChange={c => patchDraft('phone1CountryCode', c ?? '')}
+                      phoneValue={draft.phone1}
+                      onPhoneChange={v => patchDraft('phone1', v)}
+                      phonePlaceholder="Phone number"
+                      derivedDialCode={resolvePhoneCountry({ phone: draft.phone1, isManualCapture: false, address: null })}
+                    />
+                  </div>
+                </div>
                 <EditRow icon={<Mail className="w-3.5 h-3.5" />} label="Email 1" value={draft.email0}
                   onChange={v => patchDraft('email0', v)} type="email" />
                 <EditRow icon={<Mail className="w-3.5 h-3.5" />} label="Email 2" value={draft.email1}
@@ -1343,12 +1406,23 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                   onChange={v => patchDraft('address', v)} />
                 <EditRow icon={<MapPin className="w-3.5 h-3.5" />} label="State" value={draft.state}
                   onChange={v => patchDraft('state', v)} />
+                <div className="flex items-start gap-3 py-2.5 border-b border-stone-100 last:border-0">
+                  <span className="mt-3 text-stone-400 flex-shrink-0"><Globe className="w-3.5 h-3.5" /></span>
+                  <div className="min-w-0 flex-1">
+                    <label className="text-xs text-stone-400 mb-1 block">Country</label>
+                    <CountrySelector
+                      value={draft.country && draft.country !== UNSURE_COUNTRY ? draft.country : null}
+                      onChange={c => patchDraft('country', c ?? '')}
+                      placeholder="Select country (auto-derived from address if left blank)…"
+                    />
+                  </div>
+                </div>
               </>
             ) : (
               <>
                 {(lead.phones ?? []).filter(Boolean).length > 0
                   ? lead.phones.filter(Boolean).map((p, i) => {
-                    const waNumber = formatWhatsAppNumber(p);
+                    const waNumber = resolveWhatsAppPhone(p);
                     return (
                       <div key={i} className="flex items-start gap-3 py-2.5 border-b border-stone-100 last:border-0">
                         <span className="mt-0.5 text-stone-400 flex-shrink-0"><Phone className="w-3.5 h-3.5" /></span>
@@ -1399,6 +1473,8 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                 }
                 <Row icon={<MapPin className="w-3.5 h-3.5" />} label="Address" value={val(lead.address)} />
                 <Row icon={<MapPin className="w-3.5 h-3.5" />} label="State" value={val(lead.state)} />
+                <Row icon={<Globe className="w-3.5 h-3.5" />} label="Country"
+                  value={lead.country === 'UNSURE' ? null : val(lead.country)} />
               </>
             )}
           </Card>
@@ -1427,15 +1503,16 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                     Not connected
                   </span>
                 </div>
-                <p className="text-sm text-stone-500 mb-3">No WhatsApp conversation exists for this number.</p>
+                <p className="text-sm text-stone-500 mb-1">No LeadsInn WhatsApp conversation exists for this number.</p>
+                <p className="text-xs text-stone-400 mb-3">Open WhatsApp to contact this lead directly.</p>
                 <a
-                  href={`https://wa.me/${formatWhatsAppNumber(lead.phones?.[0] ?? '') ?? ''}`}
+                  href={`https://wa.me/${resolveWhatsAppPhone(lead.phones?.[0] ?? '') ?? ''}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  Send WhatsApp
+                  Open WhatsApp
                 </a>
               </div>
             ) : (() => {

@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import { supabase } from './supabaseClient';
 import { getAuthIdentity } from './capture/captureAuth';
+import { PhoneInputWithCountry } from './capture/PhoneInputWithCountry';
+import { normalizePhone } from './capture/normalizePhone';
+import { resolvePhoneCountry } from './capture/phoneCountryResolver';
 import {
   X, Loader2, AlertCircle, User, Building2,
   Phone, MapPin, Check,
@@ -19,6 +22,7 @@ interface FormState {
   company: string;
   designation: string;
   phone: string;
+  phoneCountryCode: string;
   email: string;
   address: string;
   state: string;
@@ -32,6 +36,7 @@ export default function CreateLeadModal({ conversationId, waPhoneNumber, custome
     company: '',
     designation: '',
     phone: waPhoneNumber,
+    phoneCountryCode: '',
     email: '',
     address: '',
     state: '',
@@ -76,7 +81,12 @@ export default function CreateLeadModal({ conversationId, waPhoneNumber, custome
       const now = new Date().toISOString();
 
       const phones: string[] = [];
-      if (form.phone.trim()) phones.push(form.phone.trim());
+      if (form.phone.trim()) {
+        const result = normalizePhone(form.phone.trim(), {
+          dialCode: form.phoneCountryCode || undefined,
+        });
+        phones.push(result.ok ? result.value : form.phone.trim());
+      }
 
       const emails: string[] = [];
       if (form.email.trim()) emails.push(form.email.trim());
@@ -205,17 +215,19 @@ export default function CreateLeadModal({ conversationId, waPhoneNumber, custome
                 />
               </div>
 
-              {/* Phone (pre-filled) */}
+              {/* Phone (combined country + number) */}
               <div>
                 <label className="text-xs text-stone-400 mb-1 block flex items-center gap-1">
                   <Phone className="w-3 h-3" /> Phone
                 </label>
-                <input
-                  type="text"
-                  value={form.phone}
-                  onChange={e => update('phone', e.target.value)}
-                  placeholder="Phone number"
-                  className={`${inputCls} bg-amber-50/30`}
+                <PhoneInputWithCountry
+                  phoneCountryCode={form.phoneCountryCode || null}
+                  onPhoneCountryChange={c => update('phoneCountryCode', c ?? '')}
+                  phoneValue={form.phone}
+                  onPhoneChange={v => update('phone', v)}
+                  phonePlaceholder="Phone number"
+                  className="bg-amber-50/30"
+                  derivedDialCode={resolvePhoneCountry({ phone: form.phone, isManualCapture: false, address: null })}
                 />
                 <p className="text-[10px] text-stone-400 mt-0.5">Pre-filled from WhatsApp number</p>
               </div>

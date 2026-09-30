@@ -5,7 +5,7 @@ import {
   Users, TrendingUp, Calendar, Clock,
   MessageCircle, AlertCircle, XCircle,
   PhoneCall, Star, CheckCircle2, HeartCrack,
-  Loader2, RefreshCw, ArrowRight,
+  Loader2, RefreshCw, ArrowRight, Flame, Sun, Snowflake, HelpCircle,
 } from 'lucide-react';
 
 interface DashboardData {
@@ -21,12 +21,17 @@ interface DashboardData {
   qualified_leads: number;
   converted_leads: number;
   lost_leads: number;
+  hot_leads: number;
+  warm_leads: number;
+  cold_leads: number;
+  unassigned_temperature_leads: number;
 }
 
 const EMPTY: DashboardData = {
   total_leads: 0, leads_today: 0, leads_last_7_days: 0, leads_last_30_days: 0,
   whatsapp_sent: 0, whatsapp_failed: 0, invalid_leads: 0,
   new_leads: 0, contacted_leads: 0, qualified_leads: 0, converted_leads: 0, lost_leads: 0,
+  hot_leads: 0, warm_leads: 0, cold_leads: 0, unassigned_temperature_leads: 0,
 };
 
 function num(n: number) {
@@ -42,6 +47,7 @@ export interface DashboardFilter {
   dateFilter?: 'today' | '7days' | '30days';
   systemStatus?: string;
   leadStatus?: string;
+  temperature?: string;
 }
 
 interface KpiCardProps {
@@ -153,7 +159,7 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
     const d30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
     let q = supabase.from('lead_entries').select(
-      'created_at, system_status, lead_status'
+      'created_at, system_status, lead_status, lead_temperature'
     );
     if (!isAdmin && user?.rep_code) {
       q = q.eq('sales_rep_code', user.rep_code);
@@ -187,6 +193,12 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
       if (ls === 'QUALIFIED') totals.qualified_leads++;
       if (ls === 'CONVERTED') totals.converted_leads++;
       if (ls === 'LOST') totals.lost_leads++;
+
+      const lt = (row.lead_temperature ?? '').trim();
+      if (lt === 'Hot') totals.hot_leads++;
+      else if (lt === 'Warm') totals.warm_leads++;
+      else if (lt === 'Cold') totals.cold_leads++;
+      else totals.unassigned_temperature_leads++;
     }
 
     setData(totals);
@@ -278,6 +290,25 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
               <KpiCard icon={<HeartCrack className="w-5 h-5" />}   label="Lost"      value={data.lost_leads}      color="red"
                 sub={`${pct(data.lost_leads, data.total_leads)}% of total`}
                 onClick={() => nav({ leadStatus: 'LOST' })} />
+            </div>
+          </section>
+
+          {/* ── Lead Temperature ── */}
+          <section>
+            <SectionLabel>Lead Temperature</SectionLabel>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <KpiCard icon={<Flame className="w-5 h-5" />}      label="Hot"        value={data.hot_leads} color="red"
+                sub={`${pct(data.hot_leads, data.total_leads)}% of total`}
+                onClick={() => nav({ temperature: 'Hot' })} />
+              <KpiCard icon={<Sun className="w-5 h-5" />}        label="Warm"       value={data.warm_leads} color="yellow"
+                sub={`${pct(data.warm_leads, data.total_leads)}% of total`}
+                onClick={() => nav({ temperature: 'Warm' })} />
+              <KpiCard icon={<Snowflake className="w-5 h-5" />}  label="Cold"       value={data.cold_leads} color="blue"
+                sub={`${pct(data.cold_leads, data.total_leads)}% of total`}
+                onClick={() => nav({ temperature: 'Cold' })} />
+              <KpiCard icon={<HelpCircle className="w-5 h-5" />} label="Unassigned" value={data.unassigned_temperature_leads} color="stone"
+                sub={`${pct(data.unassigned_temperature_leads, data.total_leads)}% of total`}
+                onClick={() => nav({ temperature: '__unassigned__' })} />
             </div>
           </section>
 
