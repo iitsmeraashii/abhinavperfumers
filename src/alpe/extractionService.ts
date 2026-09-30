@@ -9,6 +9,7 @@
 import { supabase } from '../supabaseClient';
 import type { VisionExtractedFields, VisionResult, FieldConfidenceReport, FieldStatusReport } from '../capture/types';
 import type { ResolvedEvidence } from './evidenceResolver';
+import { isConsoleEnabled } from '../runtime/runtimeDiagnostics';
 
 // ─── Config (mirrors useVisionExtraction.ts) ─────────────────────────────────
 
@@ -203,7 +204,7 @@ export interface ExtractionOutcome {
 export async function extractBusinessCard(
   resolved: ResolvedEvidence,
 ): Promise<ExtractionOutcome> {
-  console.log('[ALPE TRACE] EXTRACTION_CALL', {
+  if (isConsoleEnabled()) console.log('[ALPE TRACE] EXTRACTION_CALL', {
     source: 'extractBusinessCard',
     status: resolved.status,
     hasUrl: !!resolved.url,
@@ -227,16 +228,16 @@ export async function extractBusinessCard(
     try {
       const edgeResponse = await withTimeout(callEdgeFunction(processedBlob), REQUEST_TIMEOUT);
       // DIAGNOSTIC — temporary, unconditional. Shows the raw parsed edge-function response.
-      console.log('[EXTRACTION_RESPONSE_RAW_OBJECT]', edgeResponse.data);
-      console.log('[EXTRACTION_RESPONSE_RAW_JSON]', JSON.stringify(edgeResponse.data, null, 2));
-      console.log('[EXTRACTION_FIELD_CONFIDENCE]', {
+      if (isConsoleEnabled()) console.log('[EXTRACTION_RESPONSE_RAW_OBJECT]', edgeResponse.data);
+      if (isConsoleEnabled()) console.log('[EXTRACTION_RESPONSE_RAW_JSON]', JSON.stringify(edgeResponse.data, null, 2));
+      if (isConsoleEnabled()) console.log('[EXTRACTION_FIELD_CONFIDENCE]', {
         overallConfidence: edgeResponse.data?.confidence,
         fieldConfidence: edgeResponse.data?.fieldConfidence,
         fieldStatus: edgeResponse.data?.fieldStatus,
         phoneNumbers: edgeResponse.data?.phoneNumbers,
         emails: edgeResponse.data?.emails,
       });
-      console.log('[ALPE TRACE] EXTRACTION_VISION_RESPONSE', {
+      if (isConsoleEnabled()) console.log('[ALPE TRACE] EXTRACTION_VISION_RESPONSE', {
         success: edgeResponse.success,
         confidence: edgeResponse.data?.confidence ?? null,
         fullName: edgeResponse.data?.fullName ?? null,
@@ -256,7 +257,7 @@ export async function extractBusinessCard(
         error:           null as string | null,
       };
       // DIAGNOSTIC — temporary. Shows the normalized outcome before it leaves extractBusinessCard().
-      console.log('[EXTRACTION_SERVICE_RESULT]', {
+      if (isConsoleEnabled()) console.log('[EXTRACTION_SERVICE_RESULT]', {
         confidence: outcome.confidence,
         fieldConfidence: outcome.fieldConfidence,
         fieldStatus: outcome.fieldStatus,
@@ -265,9 +266,9 @@ export async function extractBusinessCard(
       });
       return outcome;
     } catch (visionErr) {
-      console.warn('[ALPE TRACE] EXTRACTION_VISION_FAILED', { error: visionErr instanceof Error ? visionErr.message : String(visionErr) });
+      if (isConsoleEnabled()) console.warn('[ALPE TRACE] EXTRACTION_VISION_FAILED', { error: visionErr instanceof Error ? visionErr.message : String(visionErr) });
       const fallbackFields = await runTesseractFallback(dataUrl);
-      console.log('[ALPE TRACE] EXTRACTION_TESSERACT_RESULT', {
+      if (isConsoleEnabled()) console.log('[ALPE TRACE] EXTRACTION_TESSERACT_RESULT', {
         fullName: fallbackFields.fullName,
         company: fallbackFields.company,
         phoneNumbers: fallbackFields.phoneNumbers,

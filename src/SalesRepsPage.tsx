@@ -3,7 +3,7 @@ import {
   Users, Search, Loader2, AlertCircle, CheckCircle2, X, ChevronDown,
   CalendarDays, TrendingUp, TrendingDown, Filter, ArrowLeft,
   UserCheck, UserX, Phone, Mail, Award, Target, Activity, Clock,
-  ChevronRight, Layers, BarChart3,
+  ChevronRight, Layers, BarChart3, Save,
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import { useAuth } from './AuthContext';
@@ -756,10 +756,98 @@ function RepDetailView({
   customStart: string;
   customEnd: string;
 }) {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+
   const [rep, setRep] = useState<SalesRepRow | null>(null);
   const [metrics, setMetrics] = useState<RepMetrics | null>(null);
   const [eventMetrics, setEventMetrics] = useState<EventMetrics[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Edit state
+  const [editEmail, setEditEmail] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editIsActive, setEditIsActive] = useState(true);
+  const [editEventId, setEditEventId] = useState<string>('');
+  const [editEvents, setEditEvents] = useState<ActiveEvent[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editToast, setEditToast] = useState<string | null>(null);
+  const editToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showEditToast(msg: string) {
+    setEditToast(msg);
+    if (editToastTimer.current) clearTimeout(editToastTimer.current);
+    editToastTimer.current = setTimeout(() => setEditToast(null), 3000);
+  }
+
+  const isDirty = useMemo(() => {
+    if (!rep) return false;
+    return (
+      (rep.email ?? '') !== editEmail.trim() ||
+      (rep.phone ?? '') !== editPhone.trim() ||
+      rep.is_active !== editIsActive ||
+      (rep.default_event_id ?? '') !== editEventId
+    );
+  }, [rep, editEmail, editPhone, editIsActive, editEventId]);
+
+  async function handleSaveProfile() {
+    if (!rep || !isDirty) return;
+    setSaving(true);
+    setEditError(null);
+    try {
+      const payload: Record<string, unknown> = {
+        email: editEmail.trim() || null,
+        phone: editPhone.trim() || null,
+        is_active: editIsActive,
+        ...(editEventId ? { default_event_id: editEventId } : {}),
+      };
+      const { error: updateErr } = await supabase
+        .from('sales_representatives')
+        .update(payload)
+        .eq('id', rep.id);
+      if (updateErr) throw updateErr;
+
+      // Refresh rep data
+      const { data: refreshed } = await supabase
+        .from('sales_representatives')
+        .select('id, rep_code, name, email, phone, is_active, role, default_event_id')
+        .eq('id', rep.id)
+        .maybeSingle();
+      if (refreshed) {
+        let eventName: string | null = null;
+        let eventCode: string | null = null;
+        if (refreshed.default_event_id) {
+          const { data: evt } = await supabase
+            .from('events')
+            .select('event_code, name')
+            .eq('id', refreshed.default_event_id)
+            .maybeSingle();
+          if (evt) { eventName = evt.name; eventCode = evt.event_code; }
+        }
+        setRep({
+          ...refreshed,
+          is_active: refreshed.is_active ?? true,
+          default_event_name: eventName,
+          default_event_code: eventCode,
+        });
+      }
+      showEditToast('Profile updated successfully.');
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : 'Failed to save profile.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function resetEdit() {
+    if (!rep) return;
+    setEditEmail(rep.email ?? '');
+    setEditPhone(rep.phone ?? '');
+    setEditIsActive(rep.is_active);
+    setEditEventId(rep.default_event_id ?? '');
+    setEditError(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -806,7 +894,8 @@ function RepDetailView({
         // Fetch leads for this rep
         let query = supabase
           .from('lead_entries')
-          .select('id, lead_status, created_at, updated_at, event_code');
+          .select('id, lead_status, created_at, updated_at, event_code')
+          .eq('sales_rep_code', repCode);
 
         if (dateStart) query = query.gte('created_at', dateStart);
         if (dateEnd) query = query.lte('created_at', dateEnd);
@@ -896,6 +985,22 @@ function RepDetailView({
     return () => { cancelled = true; };
   }, [repCode, dateFilter, customStart, customEnd]);
 
+  // Fetch active events for edit dropdown when rep loads
+  useEffect(() => {
+    if (!rep || !isAdmin) return;
+    resetEdit();
+    async function loadEditEvents() {
+      try {
+        const { data } = await supabase
+          .from('events')
+          .select('id, event_code, name, status')
+          .order('name', { ascending: true });
+        if (data) setEditEvents(data.filter(e => e.status === 'ACTIVE'));
+      } catch { /* non-critical */ }
+    }
+    loadEditEvents();
+  }, [rep, isAdmin]);
+
   if (loading) {
     return (
       <div className="p-6 max-w-6xl mx-auto flex items-center justify-center py-20">
@@ -968,6 +1073,137 @@ function RepDetailView({
           </div>
         </div>
       </div>
+
+      {/* Edit Profile section — admin only */}
+      {isAdmin && (
+        <div className="bg-white border border-stone-200 rounded-xl px-6 py-5 mb-6">
+          <h3 className="text-sm font-semibold text-stone-700 mb-4 flex items-center gap-2">
+            <UserCheck className="w-4 h-4 text-amber-700" />
+            Edit Profile
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Email */}
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1.5">Email</label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+                <input
+                  type="email"
+                  value={editEmail}
+                  onChange={e => setEditEmail(e.target.value)}
+                  placeholder="Enter email…"
+                  className="w-full pl-9 pr-3 py-2 text-sm border border-stone-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-700/20 focus:border-amber-700"
+                />
+              </div>
+            </div>
+
+            {/* Phone */}
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1.5">Phone Number</label>
+              <div className="relative">
+                <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+                <input
+                  type="tel"
+                  value={editPhone}
+                  onChange={e => setEditPhone(e.target.value)}
+                  placeholder="Enter phone number…"
+                  className="w-full pl-9 pr-3 py-2 text-sm border border-stone-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-700/20 focus:border-amber-700"
+                />
+              </div>
+            </div>
+
+            {/* Default Event */}
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1.5">Default Event</label>
+              <div className="relative">
+                <CalendarDays className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
+                <select
+                  value={editEventId}
+                  onChange={e => setEditEventId(e.target.value)}
+                  disabled={saving || editEvents.length === 0}
+                  className="w-full pl-9 pr-8 py-2 text-sm border border-stone-200 rounded-lg appearance-none bg-white focus:outline-none focus:ring-2 focus:ring-amber-700/20 focus:border-amber-700 disabled:opacity-50"
+                >
+                  {editEvents.length === 0 ? (
+                    <option value="">No active events available</option>
+                  ) : (
+                    editEvents.map(e => (
+                      <option key={e.id} value={e.id}>{e.name ?? e.event_code}</option>
+                    ))
+                  )}
+                </select>
+                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
+              </div>
+            </div>
+
+            {/* Active / Inactive toggle */}
+            <div>
+              <label className="block text-xs font-medium text-stone-500 mb-1.5">Status</label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditIsActive(true)}
+                  disabled={saving}
+                  className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border transition disabled:opacity-50 ${
+                    editIsActive
+                      ? 'bg-green-50 text-green-700 border-green-300'
+                      : 'bg-white text-stone-500 border-stone-200 hover:bg-stone-50'
+                  }`}
+                >
+                  <UserCheck className="w-4 h-4" /> Active
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditIsActive(false)}
+                  disabled={saving}
+                  className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border transition disabled:opacity-50 ${
+                    !editIsActive
+                      ? 'bg-red-50 text-red-700 border-red-300 ring-1 ring-red-200'
+                      : 'bg-white text-stone-500 border-stone-200 hover:bg-stone-50'
+                  }`}
+                >
+                  <UserX className="w-4 h-4" /> Inactive
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Error */}
+          {editError && (
+            <div className="flex items-center gap-2 mt-4 px-4 py-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              {editError}
+            </div>
+          )}
+
+          {/* Actions */}
+          <div className="flex items-center gap-2 mt-4 pt-4 border-t border-stone-100">
+            <button
+              onClick={handleSaveProfile}
+              disabled={saving || !isDirty}
+              className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-lg bg-amber-700 text-white hover:bg-amber-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              {saving ? 'Saving…' : 'Save Changes'}
+            </button>
+            {isDirty && (
+              <button
+                onClick={resetEdit}
+                disabled={saving}
+                className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-stone-600 border border-stone-200 hover:bg-stone-50 rounded-lg transition disabled:opacity-50"
+              >
+                <X className="w-3.5 h-3.5" /> Cancel
+              </button>
+            )}
+          </div>
+
+          {/* Toast */}
+          {editToast && (
+            <div className="flex items-center gap-2 mt-3 px-4 py-2 bg-green-50 border border-green-200 text-green-700 text-sm font-medium rounded-lg">
+              <CheckCircle2 className="w-4 h-4" /> {editToast}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Performance overview cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">

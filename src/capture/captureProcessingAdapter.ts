@@ -37,6 +37,7 @@ export interface SubmitParams {
   plan:              unknown | null;
   isOnline:          boolean;
   correlationId?:   string | null;
+  ownerId?:         string | null;
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
@@ -46,7 +47,7 @@ export interface SubmitParams {
  * are surfaced as outcome 'failed' with an error message.
  */
 export async function submitCaptureSession(params: SubmitParams): Promise<AdapterResult> {
-  const { session, backendSessionId, eventId, eventName, isOnline, correlationId } = params;
+  const { session, backendSessionId, eventId, eventName, isOnline, correlationId, ownerId } = params;
 
   if (!isOnline) {
     await enqueueOp('enqueue_processing_job', backendSessionId, {
@@ -56,7 +57,7 @@ export async function submitCaptureSession(params: SubmitParams): Promise<Adapte
       eventId,
       eventName,
       correlationId,
-    });
+    }, ownerId ?? null);
     return { outcome: 'queued', leadId: null, error: null, jobId: null };
   }
 
@@ -67,6 +68,7 @@ export async function submitCaptureSession(params: SubmitParams): Promise<Adapte
     eventId,
     eventName,
     correlationId,
+    ownerId:       ownerId ?? null,
   });
 
   if (result.outcome === 'failed') {

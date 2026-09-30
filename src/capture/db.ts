@@ -3,13 +3,10 @@
 // Replace this module (e.g. with Capacitor SQLite) without touching callers.
 
 const DB_NAME = 'capture_app';
-// Keep DB_VERSION in sync with completedLeadsStorage.ts to avoid version-change
-// aborts. When the two modules request different versions, the higher one
-// triggers an upgrade that fires versionchange on all other connections,
-// which can abort in-flight readwrite transactions before they commit.
-const DB_VERSION = 5;
+// Keep DB_VERSION centralized here so every store uses the same database version.
+const DB_VERSION = 8;
 
-function openDB(): Promise<IDBDatabase> {
+export function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
 
@@ -21,11 +18,19 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('assets')) {
         const store = db.createObjectStore('assets', { keyPath: 'id' });
         store.createIndex('by_session', 'sessionId', { unique: false });
+        store.createIndex('by_owner', 'ownerId', { unique: false });
+      } else if (event.oldVersion < 7) {
+        // Add by_owner index to existing assets store (non-destructive)
+        const store = (event.target as IDBOpenDBRequest).transaction!.objectStore('assets');
+        if (!store.indexNames.contains('by_owner')) {
+          store.createIndex('by_owner', 'ownerId', { unique: false });
+        }
       }
       if (!db.objectStoreNames.contains('pending_ops')) {
         const opStore = db.createObjectStore('pending_ops', { keyPath: 'id' });
         opStore.createIndex('by_session', 'sessionId', { unique: false });
         opStore.createIndex('by_created', 'createdAt', { unique: false });
+        opStore.createIndex('by_owner', 'ownerId', { unique: false });
       }
       if (!db.objectStoreNames.contains('lead_queue')) {
         const qStore = db.createObjectStore('lead_queue', { keyPath: 'id' });
@@ -36,6 +41,12 @@ function openDB(): Promise<IDBDatabase> {
         const clStore = db.createObjectStore('completed_leads', { keyPath: 'id' });
         clStore.createIndex('by_status', 'status', { unique: false });
         clStore.createIndex('by_created', 'createdAt', { unique: false });
+        clStore.createIndex('by_owner', 'ownerId', { unique: false });
+      } else {
+        const clStore = (event.target as IDBOpenDBRequest).transaction!.objectStore('completed_leads');
+        if (!clStore.indexNames.contains('by_owner')) {
+          clStore.createIndex('by_owner', 'ownerId', { unique: false });
+        }
       }
     };
 

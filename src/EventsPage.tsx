@@ -83,6 +83,7 @@ interface Metrics {
   hot: number;
   warm: number;
   cold: number;
+  unassigned: number;
 }
 
 interface RepRow {
@@ -405,12 +406,17 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
     setStateRows([]);
     setDayRows([]);
 
-    const [metricsRes, repRes, stateRes, dayRes] = await Promise.all([
+    const [metricsRes, unassignedRes, repRes, stateRes, dayRes] = await Promise.all([
       supabase
         .from('event_metrics_view')
         .select('total_leads, contacted_leads, converted_leads, lost_leads, invalid_leads, hot_leads, warm_leads, cold_leads')
         .eq('event_code', eventCode)
         .maybeSingle(),
+      supabase
+        .from('lead_entries')
+        .select('id', { count: 'exact', head: true })
+        .eq('event_code', eventCode)
+        .or('lead_temperature.is.null,lead_temperature.eq.'),
       supabase
         .from('event_sales_performance_view')
         .select('sales_rep_code, sales_rep_name, total_leads, contacted, converted, lost')
@@ -439,6 +445,7 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
         hot: Number(r.hot_leads),
         warm: Number(r.warm_leads),
         cold: Number(r.cold_leads),
+        unassigned: unassignedRes.count ?? 0,
       });
     }
 
@@ -453,9 +460,16 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
       }))
     );
 
-    setStateRows(
-      (stateRes.data ?? []).map(r => ({ state: r.state, count: Number(r.lead_count) }))
-    );
+    setStateRows(() => {
+      const map = new Map<string, number>();
+      for (const r of (stateRes.data ?? [])) {
+        const key = (r.state ?? '').trim() || 'UNASSIGNED';
+        map.set(key, (map.get(key) ?? 0) + Number(r.lead_count));
+      }
+      return [...map.entries()]
+        .map(([state, count]) => ({ state, count }))
+        .sort((a, b) => b.count - a.count);
+    });
 
     setDayRows(
       (dayRes.data ?? []).map(r => ({ day: r.lead_date as string, count: Number(r.lead_count) }))
@@ -1090,11 +1104,12 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
                             <ThermometerSun className="w-3.5 h-3.5 text-stone-400" />
                             <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Lead Temperature</p>
                           </div>
-                          <div className="grid grid-cols-3 gap-3">
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                             {[
                               { label: 'Hot', value: metrics.hot, bar: 'bg-red-400', text: 'text-red-700', bg: 'bg-red-50 border-red-200' },
                               { label: 'Warm', value: metrics.warm, bar: 'bg-orange-400', text: 'text-orange-700', bg: 'bg-orange-50 border-orange-200' },
                               { label: 'Cold', value: metrics.cold, bar: 'bg-sky-400', text: 'text-sky-700', bg: 'bg-sky-50 border-sky-200' },
+                              { label: 'UNASSIGNED', value: metrics.unassigned, bar: 'bg-stone-400', text: 'text-stone-700', bg: 'bg-stone-50 border-stone-200' },
                             ].map(t => (
                               <div key={t.label} className={`rounded-xl border px-4 py-3 ${t.bg}`}>
                                 <p className={`text-[11px] font-medium mb-0.5 ${t.text} opacity-80`}>{t.label}</p>

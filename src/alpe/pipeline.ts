@@ -25,12 +25,14 @@ import type { ExecutionPlan } from '../capture/CaptureExecutionEngine';
 import { buildCompletedLead, saveCompletedLead } from '../capture/completedLeadsStorage';
 import type { CaptureSession, FieldConfidenceReport, FieldStatusReport } from '../capture/types';
 import { alpeLog, updateAlpeRuntime } from './diagnostics';
+import { isConsoleEnabled, isRuntimeDumpsEnabled } from '../runtime/runtimeDiagnostics';
 import { supabase } from '../supabaseClient';
 
 function traceStage(backendSessionId: string, stage: string, payload: Record<string, unknown>): void {
   const ts = new Date().toISOString();
   const entry = { stage, ts, ...payload };
-  console.log(`[ALPE TRACE] ${stage}`, entry);
+  if (isConsoleEnabled()) console.log(`[ALPE TRACE] ${stage}`, entry);
+  if (!isRuntimeDumpsEnabled()) return;
   try {
     supabase.from('alpe_runtime_dumps').insert({
       id: `trace_${backendSessionId}_${stage}_${ts}`,
@@ -66,6 +68,9 @@ export interface ProcessingContext {
   eventName:        string | null;
   completedLeadId:  string;
   plan:             ExecutionPlan;
+  /** Auth UID of the rep who owns this capture session — used to scope
+   *  local IndexedDB records (completed_leads, pending_ops). */
+  ownerId:          string | null;
   /** Immutable correlation ID threaded from the capture session through
    *  to the pipeline so diagnostics don't read a mutable global. */
   correlationId?:  string | null;
@@ -111,9 +116,10 @@ function executeEvidenceStage(ctx: ProcessingContext): void {
       sessionId:   backendSessionId,
       dataUrl:     session.draftData.notesImageDataUrl,
       uploadTiming: plan.upload.notesImage,
+      ownerId:      ctx.ownerId,
     });
   }
-  evidenceManager.onSaveAndNext(backendSessionId, ctx.correlationId);
+  evidenceManager.onSaveAndNext(backendSessionId, ctx.correlationId, ctx.ownerId);
 }
 
 async function executeEvidenceResolutionStage(ctx: ProcessingContext): Promise<void> {
@@ -156,8 +162,9 @@ async function executeEvidenceResolutionStage(ctx: ProcessingContext): Promise<v
       mimeType:       r.mimeType,
     })),
   };
-  console.log('[ALPE DIAG] Evidence Resolution:', logEntry);
+  if (isConsoleEnabled()) console.log('[ALPE DIAG] Evidence Resolution:', logEntry);
   traceStage(ctx.backendSessionId, 'EVIDENCE_RESOLUTION_COMPLETE', logEntry);
+  if (!isRuntimeDumpsEnabled()) return;
   try {
     supabase.from('alpe_runtime_dumps').insert({
       id: `evidence_resolved_${ctx.backendSessionId}`,
@@ -332,8 +339,9 @@ function logExtractionDiagnostics(
     ctxExtractionSource:    ctx.extractionSource ?? null,
     ctxExtractionConfidence: ctx.extractionConfidence ?? null,
   };
-  console.log('[ALPE DIAG] AI Extraction:', logEntry);
+  if (isConsoleEnabled()) console.log('[ALPE DIAG] AI Extraction:', logEntry);
   traceStage(ctx.backendSessionId, 'AI_EXTRACTION_COMPLETE', logEntry);
+  if (!isRuntimeDumpsEnabled()) return;
   try {
     supabase.from('alpe_runtime_dumps').insert({
       id: `extraction_${ctx.backendSessionId}`,
@@ -414,7 +422,7 @@ function executeReviewStage(ctx: ProcessingContext): void {
   } satisfies ExtractionContext;
 
   // DIAGNOSTIC — temporary, unconditional. Shows fieldConfidence and fieldStatus reaching review.
-  console.log('[REVIEW_FIELD_CONFIDENCE]', {
+  if (isConsoleEnabled()) console.log('[REVIEW_FIELD_CONFIDENCE]', {
     backendSessionId:  ctx.backendSessionId,
     overallConfidence: confidencePercent,
     minimumConfidence: getReviewMinimumConfidence(),
@@ -430,7 +438,7 @@ function executeReviewStage(ctx: ProcessingContext): void {
   );
 
   // Unconditional review decision diagnostic
-  console.log('[REVIEW_DECISION]', {
+  if (isConsoleEnabled()) console.log('[REVIEW_DECISION]', {
     backendSessionId:        ctx.backendSessionId,
     overallConfidence:       confidencePercent,
     minimumConfidence:       getReviewMinimumConfidence(),
@@ -472,18 +480,22 @@ async function executePromotionStage(ctx: ProcessingContext): Promise<void> {
     requiresReview: ctx.review?.required ?? false,
   });
 
+  // [DIAG:ADDRESS_FLOW] log address at promotion stage
+  console.log('[DIAG:ADDRESS_FLOW] executePromotionStage draftData.address =', session.draftData.address, 'country =', session.draftData.country);
+
   const _queuePromotion = async (): Promise<void> => {
     const lead = buildCompletedLead(
       completedLeadId, session.captureMethod, session.draftData,
       backendSessionId, eventId, eventName,
+      ctx.ownerId,
     );
     lead.status = 'pending_sync';
     await saveCompletedLead(lead);
-    await executionEngine.routePromotion(plan.queue, false, backendSessionId, promotionOptions);
+    await executionEngine.routePromotion(plan.queue, false, backendSessionId, promotionOptions, ctx.ownerId);
     ctx.result = { outcome: 'queued', leadId: null, error: null, failedStage: null };
   };
 
-  const routeResult = await executionEngine.routePromotion(plan.queue, isOnline, backendSessionId, promotionOptions);
+  const routeResult = await executionEngine.routePromotion(plan.queue, isOnline, backendSessionId, promotionOptions, ctx.ownerId);
   if (routeResult.queued) {
     await _queuePromotion();
     return;

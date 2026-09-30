@@ -12,6 +12,7 @@ import { deleteAllSyncedCompletedLeads } from './capture/completedLeadsStorage';
 import { MAX_RETRY_COUNT } from './alpe/types';
 import { getPendingCount, flushQueue } from './capture/captureOfflineQueue';
 import { useOnlineStatus } from './capture/useOnlineStatus';
+import { useAuth } from './AuthContext';
 import { getAlpeRuntimeState, subscribeAlpeRuntime } from './alpe/diagnostics';
 import { subscribeCompletedLeads, getCompletedLeadsVersion } from './capture/completedLeadsStorage';
 import { subscribeSavedDrafts, getSavedDraftsVersion } from './capture/captureDraftStorage';
@@ -814,6 +815,8 @@ interface Props {
 let persistedFilter: FilterTab = 'all';
 
 export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }: Props) {
+  const { user } = useAuth();
+  const ownerId = user?.authUserId ?? undefined;
   const [items,       setItems]       = useState<QueueItem[]>([]);
   const [loading,     setLoading]     = useState(true);
   const [filter,      setFilterState]   = useState<FilterTab>(persistedFilter);
@@ -834,11 +837,11 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
 
   const handleReconnect = useCallback(async () => {
     setIsFlushing(true);
-    try { await flushQueue(); }
+    try { await flushQueue(ownerId); }
     finally {
       setIsFlushing(false);
-      getPendingCount().then(setPendingOps);
-      loadQueueItems().then(setItems);
+      getPendingCount(ownerId).then(setPendingOps);
+      loadQueueItems(ownerId).then(setItems);
     }
   }, []);
 
@@ -846,13 +849,13 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
 
   const reload = useCallback(async () => {
     const [loadedItems, pendingCount] = await Promise.all([
-      loadQueueItems(),
-      getPendingCount(),
+      loadQueueItems(ownerId),
+      getPendingCount(ownerId),
     ]);
     setItems(loadedItems);
     setPendingOps(pendingCount);
     setLoading(false);
-  }, []);
+  }, [ownerId]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -919,7 +922,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
   }, [items]);
 
   const handleDelete = useCallback(async (item: QueueItem) => {
-    await deleteQueueItem(item.id);
+    await deleteQueueItem(item.id, ownerId);
     setItems(prev => prev.filter(i => i.id !== item.id));
     setDeleteTarget(null);
   }, []);
@@ -928,7 +931,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
     setBulkDeleting(true);
     setBulkDeleteMsg('');
     try {
-      const deleted = await deleteAllSyncedCompletedLeads();
+      const deleted = await deleteAllSyncedCompletedLeads(ownerId);
       if (deleted === 0) {
         setBulkDeleteMsg('No synced entries found to remove.');
       } else {
@@ -947,7 +950,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
   const handleRetry = useCallback(async (item: QueueItem) => {
     if (!isOnline) return;
     setIsFlushing(true);
-    try { await flushQueue(); }
+    try { await flushQueue(ownerId); }
     finally { setIsFlushing(false); reload(); }
   }, [isOnline, reload]);
 
@@ -1044,7 +1047,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
               <button
                 onClick={() => {
                   setIsFlushing(true);
-                  flushQueue().finally(() => { setIsFlushing(false); reload(); });
+                  flushQueue(ownerId).finally(() => { setIsFlushing(false); reload(); });
                 }}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-100
                   hover:bg-red-200 text-red-800 text-xs font-semibold transition-colors shrink-0"
@@ -1183,6 +1186,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
       {detailTarget && (
         <QueueItemDetailSheet
           item={detailTarget}
+          ownerId={ownerId}
           onClose={() => setDetailTarget(null)}
         />
       )}

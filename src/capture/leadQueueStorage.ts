@@ -7,9 +7,12 @@
 // loadQueueItems() always reflects current local state accurately.
 
 import { dbGet, dbDelete } from './db';
-import { loadCompletedLeads, deleteCompletedLead, type CompletedLeadStatus } from './completedLeadsStorage';
+import { loadCompletedLeads, deleteCompletedLead, getCompletedLead, type CompletedLeadStatus } from './completedLeadsStorage';
 import { loadAllSavedDrafts, deleteSavedDraft, type PersistedDraft } from './captureDraftStorage';
 import type { CaptureMethod, DraftData, LeadTemperature } from './types';
+
+// Owner ID type — the authenticated user's stable auth UID
+export type OwnerId = string;
 
 // ─── Unified queue item type ───────────────────────────────────────────────────
 // Superset of CompletedLeadStatus + draft-specific statuses
@@ -54,11 +57,11 @@ function mapStatus(s: CompletedLeadStatus): QueueItemStatus {
 
 // ─── Load — aggregates from both stores ──────────────────────────────────────
 
-export async function loadQueueItems(): Promise<QueueItem[]> {
+export async function loadQueueItems(ownerId?: string): Promise<QueueItem[]> {
   const [draftRaw, completedLeads, savedDrafts] = await Promise.all([
     dbGet<PersistedDraft>('drafts', 'active_capture_draft'),
-    loadCompletedLeads(),
-    loadAllSavedDrafts(),
+    loadCompletedLeads(ownerId),
+    loadAllSavedDrafts(ownerId),
   ]);
 
   const items: QueueItem[] = [];
@@ -93,7 +96,8 @@ export async function loadQueueItems(): Promise<QueueItem[]> {
     draftRaw &&
     typeof draftRaw === 'object' &&
     'draftData' in draftRaw &&
-    (draftRaw as PersistedDraft).sessionStatus !== 'IDLE'
+    (draftRaw as PersistedDraft).sessionStatus !== 'IDLE' &&
+    (!ownerId || (draftRaw as PersistedDraft).ownerId === ownerId)
   ) {
     const draft = draftRaw as PersistedDraft;
     const draftData = (draft.draftData ?? {}) as DraftData;
@@ -166,24 +170,32 @@ export async function loadQueueItems(): Promise<QueueItem[]> {
 
 // ─── Delete ───────────────────────────────────────────────────────────────────
 
-export async function deleteQueueItem(id: string): Promise<void> {
+export async function deleteQueueItem(id: string, ownerId?: string): Promise<boolean> {
   // Saved draft?
   if (id.startsWith('saved_draft:')) {
-    await deleteSavedDraft(id);
-    return;
+    return deleteSavedDraft(id, ownerId);
   }
 
+  // Check ownership of the completed lead before deleting
+  const lead = await getCompletedLead(id);
+  if (lead && ownerId && lead.ownerId !== ownerId) return false;
+
   // Remove from completed_leads
-  await deleteCompletedLead(id);
+  await deleteCompletedLead(id, ownerId);
 
   // Also clear the active recovery draft if this is it
   const draft = await dbGet<PersistedDraft>('drafts', 'active_capture_draft');
   if (draft) {
     const draftBsid = (draft as PersistedDraft).backendSessionId;
     if (id === 'active_draft' || id === draftBsid) {
-      await dbDelete('drafts', 'active_capture_draft');
+      if (ownerId && draft.ownerId !== ownerId) {
+        // Don't delete another user's active draft
+      } else {
+        await dbDelete('drafts', 'active_capture_draft');
+      }
     }
   }
+  return true;
 }
 
 // ─── Display helpers ──────────────────────────────────────────────────────────
@@ -211,8 +223,8 @@ export async function saveQueueItem(_item: QueueItem): Promise<void> {
   // Queue is populated by saveCompletedLead, not this function.
 }
 
-export async function getQueueCounts(): Promise<Record<QueueItemStatus, number>> {
-  const items = await loadQueueItems();
+export async function getQueueCounts(ownerId?: string): Promise<Record<QueueItemStatus, number>> {
+  const items = await loadQueueItems(ownerId);
   const counts: Record<QueueItemStatus, number> = {
     draft: 0, local_only: 0, pending_sync: 0, syncing: 0,
     synced: 0, failed: 0, needs_review: 0,

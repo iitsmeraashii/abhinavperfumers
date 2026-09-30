@@ -23,6 +23,8 @@ import { waitForAssetStorageReady } from '../capture/assetStorageUpload';
 import type { CaptureMethod, DraftData } from '../capture/types';
 import { enqueueJob } from './processingQueueRepository';
 import type { EnqueueResult } from './types';
+import { isConsoleEnabled } from '../runtime/runtimeDiagnostics';
+import { alpeLog, alpeError } from './diagnostics';
 
 export interface ProduceJobParams {
   backendSessionId: string;
@@ -31,6 +33,7 @@ export interface ProduceJobParams {
   eventId:          string | null;
   eventName:        string | null;
   correlationId?:  string | null;
+  ownerId?:        string | null;
 }
 
 export interface ProduceJobResult {
@@ -42,7 +45,10 @@ export interface ProduceJobResult {
 export async function produceProcessingJob(
   params: ProduceJobParams,
 ): Promise<ProduceJobResult> {
-  const { backendSessionId, draftData, captureMethod, eventId, eventName, correlationId } = params;
+  const { backendSessionId, draftData, captureMethod, eventId, eventName, correlationId, ownerId } = params;
+
+  // [DIAG:ADDRESS_FLOW] log address arriving at produceProcessingJob
+  console.log('[DIAG:ADDRESS_FLOW] produceProcessingJob draftData.address =', draftData.address);
 
   const op = logOperationStart('produceProcessingJob()', {
     backendSessionId,
@@ -50,27 +56,36 @@ export async function produceProcessingJob(
     correlationId: correlationId ?? null,
   });
 
-  const identity = await getAuthIdentity();
+  const stageCtx = { backendSessionId, ownerId: ownerId ?? null, correlationId: correlationId ?? null };
+  const ts = () => new Date().toISOString();
+
+  const identity = ownerId
+    ? { userId: ownerId, repCode: null as string | null }
+    : await getAuthIdentity();
   if (!identity?.userId) {
+    alpeError('produceProcessingJob stage=auth failed', { ...stageCtx, ts: ts() });
     logOperationEnd(op, { error: new Error('Not authenticated') });
     return { outcome: 'failed', jobId: null, error: 'Not authenticated' };
   }
+  alpeLog('produceProcessingJob stage=auth ok', { ...stageCtx, userId: identity.userId, ts: ts() });
 
   // Guarantee the capture_sessions row exists before inserting into
   // processing_queue. routeSessionSync is fire-and-forget, so by the time
   // Save & Next fires the row may not yet be in the database. The FK
   // processing_queue_capture_session_id_fkey will reject the insert if the
   // parent row is missing, so we do an explicit awaited upsert here.
+  let syncSessionError: string | null = null;
   const silentCbs = {
     onSyncing:   () => {},
     onSynced:    () => {},
-    onSyncError: () => {},
+    onSyncError: (err: string) => { syncSessionError = err; },
     onOffline:   () => {},
   };
   logEvent('produceProcessingJob() — pre-enqueue syncUpsertSession', {
     backendSessionId,
     captureMethod: captureMethod ?? 'MANUAL',
   });
+  alpeLog('produceProcessingJob stage=syncUpsertSession start', { ...stageCtx, eventId, ts: ts() });
   await syncUpsertSession(
     {
       sessionId:     backendSessionId,
@@ -81,6 +96,11 @@ export async function produceProcessingJob(
     },
     { ...silentCbs, correlationId: correlationId ?? null },
   );
+  if (syncSessionError) {
+    alpeError('produceProcessingJob stage=syncUpsertSession failed', { ...stageCtx, eventId, error: syncSessionError, ts: ts() });
+  } else {
+    alpeLog('produceProcessingJob stage=syncUpsertSession done', { ...stageCtx, eventId, ts: ts() });
+  }
 
   // ── Evidence Readiness Gate ──────────────────────────────────────────────
   // For BUSINESS_CARD and QR captures, the processing job must not be
@@ -99,7 +119,7 @@ export async function produceProcessingJob(
     backendSessionId,
     captureMethod,
   });
-  console.log('[EVIDENCE_DIAG] PRODUCER_PRECHECK', {
+  if (isConsoleEnabled()) console.log('[EVIDENCE_DIAG] PRODUCER_PRECHECK', {
     ts: new Date().toISOString(),
     stage: 'before_flush',
     backendSessionId,
@@ -110,7 +130,9 @@ export async function produceProcessingJob(
     backendSessionId,
     captureMethod,
   });
+  alpeLog('produceProcessingJob stage=waitForUploads start', { ...stageCtx, captureMethod, ts: ts() });
   await evidenceManager.waitForUploads(backendSessionId);
+  alpeLog('produceProcessingJob stage=waitForUploads done', { ...stageCtx, captureMethod, ts: ts() });
   logEvent('produceProcessingJob() — evidence uploads complete', {
     backendSessionId,
     captureMethod,
@@ -120,9 +142,12 @@ export async function produceProcessingJob(
     ? [draftData.cardFrontAssetId, draftData.cardBackAssetId].filter((id): id is string => Boolean(id))
     : [];
   if (requiredAssetIds.length > 0) {
+    alpeLog('produceProcessingJob stage=waitForAssetStorageReady start', { ...stageCtx, requiredAssetIds, ts: ts() });
     const assetsReady = await waitForAssetStorageReady(backendSessionId, requiredAssetIds);
+    alpeLog('produceProcessingJob stage=waitForAssetStorageReady done', { ...stageCtx, assetsReady, ts: ts() });
     if (!assetsReady) {
       const error = 'Evidence upload did not complete; processing was not queued';
+      alpeError('produceProcessingJob stage=waitForAssetStorageReady failed', { ...stageCtx, ts: ts() });
       logOperationEnd(op, { error: new Error(error) });
       return { outcome: 'failed', jobId: null, error };
     }
@@ -134,13 +159,14 @@ export async function produceProcessingJob(
     backendSessionId,
     captureMethod,
   }, { jobId });
-  console.log('[EVIDENCE_DIAG] JOB_ENQUEUE', {
+  if (isConsoleEnabled()) console.log('[EVIDENCE_DIAG] JOB_ENQUEUE', {
     ts: new Date().toISOString(),
     backendSessionId,
     jobId,
     captureMethod,
     requiredAssetIds,
   });
+  alpeLog('produceProcessingJob stage=enqueueJob start', { ...stageCtx, jobId, ts: ts() });
   const result: EnqueueResult = await enqueueJob({
     jobId,
     captureSessionId: backendSessionId,
@@ -155,8 +181,10 @@ export async function produceProcessingJob(
       correlationId: correlationId ?? null,
     },
   });
+  alpeLog('produceProcessingJob stage=enqueueJob done', { ...stageCtx, jobId, success: result.success, ts: ts() });
 
   if (!result.success) {
+    alpeError('produceProcessingJob stage=enqueueJob failed', { ...stageCtx, jobId, error: result.error, ts: ts() });
     logOperationEnd(op, { error: new Error(result.error ?? 'enqueue failed') });
     return { outcome: 'failed', jobId: null, error: result.error };
   }
@@ -167,9 +195,12 @@ export async function produceProcessingJob(
   const lead = buildCompletedLead(
     backendSessionId, captureMethod, draftData,
     backendSessionId, eventId, eventName,
+    identity.userId,
   );
   lead.status = 'pending_sync';
+  alpeLog('produceProcessingJob stage=saveCompletedLead start', { ...stageCtx, jobId, ts: ts() });
   await saveCompletedLead(lead);
+  alpeLog('produceProcessingJob stage=saveCompletedLead done', { ...stageCtx, jobId, ts: ts() });
 
   logOperationEnd(op, { extra: { jobId: result.jobId, outcome: 'queued' } });
   return { outcome: 'queued', jobId: result.jobId, error: null };

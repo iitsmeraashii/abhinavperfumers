@@ -160,6 +160,15 @@ function deriveFieldConfidence(
     return 'low';
   }
 
+  // Phone numbers are the most error-prone extraction field (digit hallucination,
+  // partial reads). When the model doesn't provide per-field confidence, cap
+  // derived phone confidence at 'medium' so a high overall score doesn't mask
+  // phone extraction uncertainty.
+  function gradePhone(value: string[]): FieldConfidence {
+    if (value.length === 0) return 'unknown';
+    return overall >= 0.45 ? 'medium' : 'low';
+  }
+
   return {
     fullName:     grade(fields.fullName, 1.1),
     firstName:    grade(fields.firstName),
@@ -167,7 +176,7 @@ function deriveFieldConfidence(
     company:      grade(fields.company, 1.05),
     designation:  grade(fields.designation),
     emails:       grade(fields.emails),
-    phoneNumbers: grade(fields.phoneNumbers, 1.05),
+    phoneNumbers: gradePhone(fields.phoneNumbers),
     website:      grade(fields.website, 0.9),
     address:      grade(fields.address, 0.85),
     confidence:   overall >= 0.75 ? 'high' : overall >= 0.45 ? 'medium' : 'low',

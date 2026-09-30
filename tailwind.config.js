@@ -13,6 +13,9 @@ export default {
       animation: {
         'scan-line': 'scan-line 1.8s ease-in-out infinite alternate',
       },
+      spacing: {
+        'mobile-nav': '3.75rem',
+      },
       padding: {
         'safe-bottom': 'env(safe-area-inset-bottom)',
         'safe-top': 'env(safe-area-inset-top)',

@@ -311,7 +311,7 @@ function DownloadButton({ url, filename, className = '' }: { url: string; filena
 
 // ─── Evidence resolution logic ─────────────────────────────────────────────────
 
-async function resolveEvidence(item: QueueItem): Promise<ResolvedEvidence> {
+async function resolveEvidence(item: QueueItem, ownerId?: string | null): Promise<ResolvedEvidence> {
   const dd = item.draftData;
   const result: ResolvedEvidence = { ...EMPTY_EVIDENCE };
 
@@ -319,7 +319,7 @@ async function resolveEvidence(item: QueueItem): Promise<ResolvedEvidence> {
   const cardSessionId = dd.cardSessionId as string | undefined;
   if (cardSessionId) {
     try {
-      const localAssets = await getSessionAssets(cardSessionId);
+      const localAssets = await getSessionAssets(cardSessionId, ownerId ?? undefined);
       const front = localAssets.find(a => a.side === 'front');
       const back = localAssets.find(a => a.side === 'back');
       if (front || back) {
@@ -429,10 +429,11 @@ async function resolveEvidence(item: QueueItem): Promise<ResolvedEvidence> {
 
 interface Props {
   item: QueueItem;
+  ownerId?: string | null;
   onClose: () => void;
 }
 
-export function QueueItemDetailSheet({ item, onClose }: Props) {
+export function QueueItemDetailSheet({ item, ownerId, onClose }: Props) {
   const [evidence, setEvidence] = useState<ResolvedEvidence | null>(null);
   const [evidenceLoading, setEvidenceLoading] = useState(true);
   const [lightboxImages, setLightboxImages] = useState<{ url: string; label: string }[]>([]);
@@ -443,7 +444,7 @@ export function QueueItemDetailSheet({ item, onClose }: Props) {
   useEffect(() => {
     let mounted = true;
     setEvidenceLoading(true);
-    resolveEvidence(item).then(ev => {
+    resolveEvidence(item, ownerId).then(ev => {
       if (!mounted) return;
       setEvidence(ev);
       setEvidenceLoading(false);

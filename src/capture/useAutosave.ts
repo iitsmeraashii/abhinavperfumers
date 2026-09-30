@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import type { CaptureSession } from './types';
 import { saveDraft } from './captureDraftStorage';
+import { isDraftEmpty } from './captureDraftEligibility';
 
 export type SaveState = 'idle' | 'saving' | 'saved' | 'offline_saved' | 'unsaved';
 
@@ -9,11 +10,12 @@ const DEBOUNCE_MS = 600;
 interface UseAutosaveOptions {
   isOnline: boolean;
   onSaveStateChange?: (state: SaveState) => void;
+  ownerId?: string | null;
 }
 
 export function useAutosave(
   session: CaptureSession,
-  { isOnline, onSaveStateChange }: UseAutosaveOptions,
+  { isOnline, onSaveStateChange, ownerId }: UseAutosaveOptions,
 ): void {
   const timer       = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Stable key of last successfully persisted draft — avoids redundant writes.
@@ -31,16 +33,17 @@ export function useAutosave(
   const doSave = useCallback(async () => {
     const s = sessionRef.current;
     if (s.sessionStatus === 'IDLE') return;
+    if (isDraftEmpty(s.draftData)) return;
 
     notify('saving');
     try {
-      await saveDraft(s);
+      await saveDraft(s, ownerId ?? null);
       savedKeyRef.current = draftKey(s);
       notify(isOnlineRef.current ? 'saved' : 'offline_saved');
     } catch {
       notify('unsaved');
     }
-  }, [notify]);
+  }, [notify, ownerId]);
 
   // Debounced save — scheduled after every meaningful draftData change.
   const scheduleDebounced = useCallback(() => {

@@ -10,7 +10,10 @@
 import { supabase } from '../supabaseClient';
 import { getAuthIdentity } from './captureAuth';
 import { deriveState } from './deriveState';
+import { resolveLeadCountry } from './resolveLeadCountry';
 import { saveCompletedLead, buildCompletedLead } from './completedLeadsStorage';
+import { phoneDedupKey } from './normalizePhone';
+import { resolvePhoneCountry } from './phoneCountryResolver';
 import type { CaptureMethod, DraftData } from './types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -63,19 +66,42 @@ export async function executePromotion(
       // Already promoted — ensure local record reflects this
       await _updateCompletedLead(
         completedLeadId, captureMethod, draftData, backendSessionId,
-        eventId, eventName, session.promoted_lead_id,
+        eventId, eventName, session.promoted_lead_id, identity.userId,
       );
       return { leadId: session.promoted_lead_id, error: null, alreadyPromoted: true };
     }
 
     // ── Build phones / emails ──────────────────────────────────────────────
-    const phones: string[] = [];
-    if (draftData.phone?.trim()) phones.push(draftData.phone.trim());
+    // 1. Gather raw phones in established order (draftData.phone first, then phoneNumbers[])
+    const rawPhones: string[] = [];
+    if (draftData.phone?.trim()) rawPhones.push(draftData.phone.trim());
     if (Array.isArray(draftData.phoneNumbers)) {
       for (const p of draftData.phoneNumbers as string[]) {
         const t = String(p ?? '').trim();
-        if (t && !phones.includes(t)) phones.push(t);
+        if (t && !rawPhones.includes(t)) rawPhones.push(t);
       }
+    }
+
+    // 2. Resolve phone-country context for normalization
+    const resolvedDialCode = resolvePhoneCountry({
+      phone:           rawPhones[0] ?? null,
+      selectedDialCode: draftData.phoneCountryCode ?? null,
+      isManualCapture: captureMethod === 'MANUAL',
+      address:         draftData.address ?? null,
+    });
+
+    // 3. Build phones array — preserve RAW phone values, not normalized.
+    //    Normalization happens downstream via resolveWhatsAppPhone() when
+    //    WhatsApp or other services need the canonical form.
+    //    Deduplicate by canonical key so the same number in different formats
+    //    doesn't appear twice, but store the raw value.
+    const phones: string[] = [];
+    const seenDedupKeys = new Set<string>();
+    for (const raw of rawPhones) {
+      const dedup = phoneDedupKey(raw, { dialCode: resolvedDialCode ?? undefined });
+      if (dedup && seenDedupKeys.has(dedup)) continue;
+      if (dedup) seenDedupKeys.add(dedup);
+      phones.push(raw);
     }
 
     const emails: string[] = [];
@@ -91,6 +117,12 @@ export async function executePromotion(
     const leadId = crypto.randomUUID();
     const now    = new Date().toISOString();
 
+    // [DIAG:ADDRESS_FLOW] log address at the exact insert point
+    const _diagAddress = draftData.address?.trim() || null;
+    const _diagCountry = resolveLeadCountry({ selectedCountry: draftData.country, address: draftData.address });
+    const _diagState   = deriveState(draftData.address?.trim() ?? '');
+    console.log('[DIAG:ADDRESS_FLOW] executePromotion INSERT address =', _diagAddress, 'country =', _diagCountry, 'state =', _diagState);
+
     const { error: insertError } = await supabase.from('lead_entries').insert({
       id:                      leadId,
       capture_session_id:      backendSessionId,
@@ -100,6 +132,10 @@ export async function executePromotion(
       phones:                  phones.length   ? phones   : null,
       emails:                  emails.length   ? emails   : null,
       address:                 draftData.address?.trim()         || null,
+      country:                 resolveLeadCountry({
+                                 selectedCountry: draftData.country,
+                                 address:         draftData.address,
+                               }),
       website:                 draftData.website?.trim()         || null,
       state:                   deriveState(draftData.address?.trim() ?? ''),
       notes:                   draftData.notes?.trim()           || null,
@@ -137,10 +173,18 @@ export async function executePromotion(
     // ── Log CREATED activity (fire-and-forget, non-blocking) ────────────────
     await supabase.rpc('log_lead_created', { p_lead_id: leadId });
 
+    // ── Link to WhatsApp conversation if one exists for this phone ──────────
+    if (phones.length > 0) {
+      supabase.rpc('link_lead_to_conversation_by_phone', { p_lead_id: leadId })
+        .then(({ error }) => {
+          if (error) console.warn('[capturePromotionService] conversation link failed:', error.message);
+        });
+    }
+
     // ── Update / create completed_leads ────────────────────────────────────
     await _updateCompletedLead(
       completedLeadId, captureMethod, draftData, backendSessionId,
-      eventId, eventName, leadId,
+      eventId, eventName, leadId, identity.userId,
     );
 
     return { leadId, error: null, alreadyPromoted: false };
@@ -162,11 +206,13 @@ async function _updateCompletedLead(
   eventId:         string | null,
   eventName:       string | null,
   _leadId:         string,
+  ownerId:         string | null,
 ): Promise<void> {
   try {
     const lead = buildCompletedLead(
       completedLeadId, captureMethod, draftData,
       backendSessionId, eventId, eventName,
+      ownerId,
     );
     lead.status   = 'synced';
     lead.syncedAt = new Date().toISOString();

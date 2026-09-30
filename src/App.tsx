@@ -139,7 +139,7 @@ function MobileBottomNav({ tab, isAdmin, onTabChange, onMorePress }: MobileNavPr
 
   return (
     <nav
-      className="fixed bottom-0 inset-x-0 z-40 bg-white border-t border-stone-200 flex md:hidden"
+      className="fixed bottom-0 inset-x-0 z-40 bg-white border-t border-stone-200 flex lg:hidden"
       style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
     >
       {visibleTabs.map(t => {
@@ -148,7 +148,7 @@ function MobileBottomNav({ tab, isAdmin, onTabChange, onMorePress }: MobileNavPr
           <button
             key={t.id}
             onClick={() => onTabChange(t.id)}
-            className="flex-1 flex flex-col items-center justify-center gap-0.5 min-h-[3.75rem] px-1 relative transition-colors"
+            className="flex-1 flex flex-col items-center justify-center gap-0.5 min-h-[3.75rem] px-1.5 relative transition-colors"
             aria-label={t.label}
           >
             {t.emphasize ? (
@@ -185,7 +185,7 @@ function MobileBottomNav({ tab, isAdmin, onTabChange, onMorePress }: MobileNavPr
       {/* More — all users get it (My Account lives here on mobile) */}
       <button
         onClick={onMorePress}
-        className="flex-1 flex flex-col items-center justify-center gap-0.5 min-h-[3.75rem] px-1 relative transition-colors"
+        className="flex-1 flex flex-col items-center justify-center gap-0.5 min-h-[3.75rem] px-1.5 relative transition-colors"
         aria-label="More"
       >
         <span className={`transition-colors duration-150 ${moreActive ? 'text-stone-900' : 'text-stone-400'}`}>
@@ -221,6 +221,19 @@ function MobileMoreDrawer({
   tab, isAdmin, userName, repCode, role, initials,
   onTabChange, onClose, onLogout,
 }: MoreDrawerProps) {
+  useEffect(() => {
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = previous;
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+
   const items: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: 'account', label: 'My Account', icon: <User className="w-5 h-5" /> },
     ...(isAdmin
@@ -234,9 +247,9 @@ function MobileMoreDrawer({
 
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-black/30 md:hidden" onClick={onClose} />
+      <div className="fixed inset-0 z-45 bg-black/30 lg:hidden" onClick={onClose} />
       <div
-        className="fixed inset-x-0 bottom-0 z-50 bg-white rounded-t-2xl shadow-2xl md:hidden"
+        className="fixed inset-x-0 bottom-0 z-50 bg-white rounded-t-2xl shadow-2xl lg:hidden"
         style={{ paddingBottom: 'calc(1.5rem + env(safe-area-inset-bottom))' }}
       >
         <div className="flex justify-center pt-3 pb-2">
@@ -439,10 +452,10 @@ function Layout() {
     .slice(0, 2) || 'U';
 
   return (
-    <div className="min-h-screen bg-stone-50">
+    <div className="min-h-screen bg-stone-50 overflow-x-hidden">
 
       {/* ── Desktop header ── */}
-      <header className="hidden md:flex bg-white border-b border-stone-200 px-6 py-0 items-stretch justify-between">
+      <header className="hidden lg:flex bg-white border-b border-stone-200 px-6 py-0 items-stretch justify-between">
         <div className="flex items-stretch gap-6">
           <div className="flex flex-col justify-center py-3 pr-4 border-r border-stone-100">
             <h1 className="text-lg font-semibold text-stone-800 leading-tight">
@@ -540,7 +553,10 @@ function Layout() {
       </header>
 
       {/* ── Mobile top bar ── */}
-      <header className="flex md:hidden items-center justify-between bg-white border-b border-stone-200 px-4 py-3">
+      <header
+        className="sticky top-0 z-30 flex lg:hidden items-center justify-between bg-white border-b border-stone-200 px-5 py-4 pt-safe-top"
+        style={{ paddingTop: 'calc(1rem + env(safe-area-inset-top))' }}
+      >
         <div>
           <h1 className="text-base font-semibold text-stone-800 leading-tight">
             {import.meta.env.VITE_APP_NAME || 'Abhinav Perfumers'}
@@ -558,7 +574,7 @@ function Layout() {
       </header>
 
       {/* ── Page content ── */}
-      <main className="pb-mobile-nav md:pb-0">
+      <main className="pb-mobile-nav lg:pb-0">
         {tab === 'account' ? (
           <MyAccountPage onBack={() => handleTabChange(isAdmin ? 'dashboard' : 'capture')} />
         ) : (

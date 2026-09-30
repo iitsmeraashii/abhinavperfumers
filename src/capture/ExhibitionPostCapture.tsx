@@ -6,6 +6,7 @@ import type { BusinessCardAsset } from './types';
 interface Props {
   frontAssetId: string;
   backAssetId?: string | null;
+  ownerId?: string | null;
   onSaveAndNext: () => void;
   onAddDetails: () => void;
   onDiscard: () => void;
@@ -13,7 +14,7 @@ interface Props {
 }
 
 export function ExhibitionPostCapture({
-  frontAssetId, backAssetId, onSaveAndNext, onAddDetails, onDiscard, saving,
+  frontAssetId, backAssetId, ownerId, onSaveAndNext, onAddDetails, onDiscard, saving,
 }: Props) {
   const [frontAsset, setFrontAsset] = useState<BusinessCardAsset | null>(null);
   const [backAsset, setBackAsset]   = useState<BusinessCardAsset | null>(null);
@@ -24,8 +25,8 @@ export function ExhibitionPostCapture({
     (async () => {
       setLoading(true);
       const [front, back] = await Promise.all([
-        getAsset(frontAssetId),
-        backAssetId ? getAsset(backAssetId) : Promise.resolve(null),
+        getAsset(frontAssetId, ownerId ?? undefined),
+        backAssetId ? getAsset(backAssetId, ownerId ?? undefined) : Promise.resolve(null),
       ]);
       if (cancelled) return;
       setFrontAsset(front);

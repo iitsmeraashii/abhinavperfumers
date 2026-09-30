@@ -15,6 +15,7 @@
 //     constraint, status, stack) and failureSource classification
 
 import { supabase } from '../supabaseClient';
+import { isConsoleEnabled, isRuntimeDumpsEnabled } from '../runtime/runtimeDiagnostics';
 
 const TAG = '[ALPE][ASSET_SYNC]';
 
@@ -24,7 +25,7 @@ let _correlationId: string | null = null;
 
 export function startCorrelation(): string {
   _correlationId = `corr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-  console.log(TAG, 'correlationId started:', _correlationId);
+  if (isConsoleEnabled()) console.log(TAG, 'correlationId started:', _correlationId);
   return _correlationId;
 }
 
@@ -33,7 +34,7 @@ export function getCorrelationId(): string | null {
 }
 
 export function clearCorrelation(): void {
-  console.log(TAG, 'correlationId cleared:', _correlationId);
+  if (isConsoleEnabled()) console.log(TAG, 'correlationId cleared:', _correlationId);
   _correlationId = null;
 }
 
@@ -143,6 +144,7 @@ function classifyError(err: unknown, operation: string): FailureSource {
 // ─── Persistence to alpe_runtime_dumps ──────────────────────────────────────
 
 async function persistToDumps(entry: AssetSyncLogEntry): Promise<void> {
+  if (!isRuntimeDumpsEnabled()) return;
   try {
     await supabase
       .from('alpe_runtime_dumps')
@@ -189,7 +191,7 @@ export function logOperationStart(
     extra,
   };
 
-  console.log(TAG, `[START] ${operation}`, {
+  if (isConsoleEnabled()) console.log(TAG, `[START] ${operation}`, {
     correlationId:     corrId,
     backendSessionId:  entry.backendSessionId,
     localSessionId:    entry.localSessionId,
@@ -239,7 +241,7 @@ export function logOperationEnd(
   if (result.error) {
     entry.error = extractError(result.error);
     entry.failureSource = classifyError(result.error, entry.operation);
-    console.error(TAG, `[FAIL] ${entry.operation}`, {
+    if (isConsoleEnabled()) console.error(TAG, `[FAIL] ${entry.operation}`, {
       correlationId:   entry.correlationId,
       durationMs:       entry.durationMs,
       error:           entry.error,
@@ -248,7 +250,7 @@ export function logOperationEnd(
       localAssetId:    entry.localAssetId,
     });
   } else {
-    console.log(TAG, `[END] ${entry.operation}`, {
+    if (isConsoleEnabled()) console.log(TAG, `[END] ${entry.operation}`, {
       correlationId:      entry.correlationId,
       durationMs:          entry.durationMs,
       rowsAffected:        entry.rowsAffected,
@@ -292,7 +294,7 @@ export function logEvent(
     extra,
   };
 
-  console.log(TAG, `[EVENT] ${operation}`, {
+  if (isConsoleEnabled()) console.log(TAG, `[EVENT] ${operation}`, {
     correlationId:     corrId,
     backendSessionId:  entry.backendSessionId,
     localSessionId:    entry.localSessionId,

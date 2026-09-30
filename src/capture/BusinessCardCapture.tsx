@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { saveAsset, deleteAsset, getSessionAssets } from './captureAssetStorage';
+import { evidenceManager } from './captureEvidenceManager';
 import { useVisionExtraction } from './useVisionExtraction';
 import type { BusinessCardAsset, CardSide, CaptureSession, DraftData, OcrResult, VisionResult, FieldConfidenceReport, FieldConfidence as FieldGrade } from './types';
 import type { VisionState } from './useVisionExtraction';
@@ -29,6 +30,7 @@ interface Props {
   session: CaptureSession;
   sessionId: string;
   isOnline?: boolean;
+  ownerId?: string | null;
   extractionPolicy?: ExtractionPolicy;
   onComplete: (frontAssetId: string, backAssetId: string | null, ocrResult: OcrResult | null, visionResult: VisionResult | null) => void;
   onBack: () => void;
@@ -608,7 +610,7 @@ function resolveFieldConfidenceGrades(
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function BusinessCardCapture({
-  session, sessionId, isOnline = true, extractionPolicy = 'IMMEDIATE', onComplete, onBack, onAssetsChanged,
+  session, sessionId, isOnline = true, ownerId, extractionPolicy = 'IMMEDIATE', onComplete, onBack, onAssetsChanged,
   onDraftPatch, onVisionResult, onOcrResult, onOcrStateChange, onOcrDiagnostics: _ignored,
   onDebugLog, exhibitionMode = false,
 }: Props) {
@@ -669,7 +671,7 @@ export function BusinessCardCapture({
     async function restore() {
       const d = session.draftData;
       if (!d.cardSessionId) return;
-      const assets = await getSessionAssets(d.cardSessionId as string);
+      const assets = await getSessionAssets(d.cardSessionId as string, ownerId ?? undefined);
       const frontAsset = assets.find(a => a.side === 'front') ?? null;
       const backAsset  = assets.find(a => a.side === 'back')  ?? null;
       if (frontAsset) setFront({ asset: frontAsset, status: 'previewing' });
@@ -752,13 +754,16 @@ export function BusinessCardCapture({
     if (side === 'front') { cancelExtraction(); resetExtraction(); }
 
     const existing = side === 'front' ? front.asset : back.asset;
-    if (existing) await deleteAsset(existing.id);
+    if (existing) {
+      evidenceManager.abandonAsset(existing.id);
+      await deleteAsset(existing.id, ownerId ?? undefined);
+    }
 
     setState({ asset: null, status: 'saving' });
     setActiveCapture(null);
 
     try {
-      const asset = await saveAsset(sessionId, side, rawDataUrl);
+      const asset = await saveAsset(sessionId, side, rawDataUrl, ownerId);
       const newState: CardState = { asset, status: 'previewing' };
       setState(newState);
       showToast(side === 'front' ? 'Front captured' : 'Back captured');
@@ -788,7 +793,8 @@ export function BusinessCardCapture({
     const target = side === 'front' ? front : back;
     if (!target.asset) return;
     if (side === 'front') { cancelExtraction(); resetExtraction(); }
-    await deleteAsset(target.asset.id);
+    evidenceManager.abandonAsset(target.asset.id);
+    await deleteAsset(target.asset.id, ownerId ?? undefined);
     const newState: CardState = { asset: null, status: 'empty' };
     if (side === 'front') {
       setFront(newState);

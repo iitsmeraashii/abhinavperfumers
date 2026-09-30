@@ -23,6 +23,8 @@ import { decide } from './decisionEngine';
 import { alpeLog, alpeError, updateAlpeRuntime } from './diagnostics';
 
 const POLL_INTERVAL_MS = 5000;
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const SYNCED_RETENTION_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 
 export type SchedulerStatus = 'stopped' | 'starting' | 'running' | 'stopping';
 
@@ -46,6 +48,7 @@ class AlpeScheduler {
   private inFlightTick = false;
   private userId: string | null = null;
   private isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  private lastCleanupAt = 0;
 
   // ── Singleton guard ────────────────────────────────────────────────────────
 
@@ -164,6 +167,21 @@ class AlpeScheduler {
     updateAlpeRuntime({ pollCount: this.pollCount, lastPollAt: this.lastPollAt, jobsFoundLastPoll: 0, jobsClaimedLastPoll: 0 });
     alpeLog('Scheduler poll', { pollCount: this.pollCount });
 
+    // Throttled local cleanup: remove synced completed_leads older than 3 days.
+    // Runs at most once every 5 minutes, owner-scoped to the current user.
+    if (Date.now() - this.lastCleanupAt >= CLEANUP_INTERVAL_MS) {
+      this.lastCleanupAt = Date.now();
+      try {
+        const { cleanupOldSyncedCompletedLeads } = await import('../capture/completedLeadsStorage');
+        const deleted = await cleanupOldSyncedCompletedLeads(this.userId, SYNCED_RETENTION_MS);
+        if (deleted > 0) {
+          alpeLog('Local cleanup deleted old synced leads', { count: deleted });
+        }
+      } catch (err) {
+        alpeError('Local cleanup failed', err);
+      }
+    }
+
     try {
       const reconciliation = await reconcileCompletedLeads(this.userId);
       if (reconciliation.synced > 0 || reconciliation.failures > 0) {
@@ -227,7 +245,7 @@ class AlpeScheduler {
           lastAttemptAt:  new Date().toISOString(),
           failedAt:       decision.newState === 'FAILED' ? new Date().toISOString() : null,
           isExhausted,
-        });
+        }, this.userId ?? undefined);
       }
 
       if (decision.newState === 'COMPLETED' || decision.newState === 'REQUIRES_REVIEW') {
@@ -249,7 +267,7 @@ class AlpeScheduler {
         const { updateCompletedLeadStatus } = await import('../capture/completedLeadsStorage');
         const ok = await updateCompletedLeadStatus(job.capture_session_id, 'synced', {
           syncedAt: new Date().toISOString(),
-        });
+        }, this.userId ?? undefined);
         if (ok) {
           alpeLog('LOCAL_QUEUE_SYNCED', {
             jobId: job.id,

@@ -70,10 +70,14 @@ export function resetAlpeRuntime(): void {
 
 // ─── Console logger ──────────────────────────────────────────────────────────
 
+import { isConsoleEnabled } from '../runtime/runtimeDiagnostics';
+
 export function alpeLog(message: string, ...args: unknown[]): void {
+  if (!isConsoleEnabled()) return;
   console.log('[ALPE]', message, ...args);
 }
 
 export function alpeError(message: string, ...args: unknown[]): void {
+  if (!isConsoleEnabled()) return;
   console.error('[ALPE]', message, ...args);
 }

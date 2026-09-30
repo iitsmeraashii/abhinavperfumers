@@ -17,6 +17,7 @@
 import { supabase } from '../supabaseClient';
 import type { BusinessCardAsset } from './types';
 import { logOperationStart, logOperationEnd, logEvent, getCorrelationId } from './assetSyncDiagnostics';
+import { isConsoleEnabled } from '../runtime/runtimeDiagnostics';
 
 const BUCKET = 'lead-evidence';
 
@@ -55,7 +56,7 @@ export async function uploadBusinessCardAsset(
   const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
   const ts0 = new Date().toISOString();
 
-  console.log('[EVIDENCE_DIAG] UPLOAD_FUNCTION_ENTERED', {
+  if (isConsoleEnabled()) console.log('[EVIDENCE_DIAG] UPLOAD_FUNCTION_ENTERED', {
     ts: ts0,
     assetId: asset.id,
     localAssetId: asset.id,
@@ -86,7 +87,7 @@ export async function uploadBusinessCardAsset(
   try {
     userId = await getAuthUserId();
   } catch (err) {
-    console.error('[EVIDENCE_DIAG] GET_AUTH_USER_THREW', {
+    if (isConsoleEnabled()) console.error('[EVIDENCE_DIAG] GET_AUTH_USER_THREW', {
       ts: new Date().toISOString(),
       assetId: asset.id,
       sessionId: asset.sessionId,
@@ -111,7 +112,7 @@ export async function uploadBusinessCardAsset(
   });
 
   // ── Pre-upload summary ──
-  console.log('[EVIDENCE_DIAG] PRE_UPLOAD_SUMMARY', {
+  if (isConsoleEnabled()) console.log('[EVIDENCE_DIAG] PRE_UPLOAD_SUMMARY', {
     ts: new Date().toISOString(),
     bucket: BUCKET,
     storagePath,
@@ -124,7 +125,7 @@ export async function uploadBusinessCardAsset(
 
   // ── Immediately before the Storage SDK call ──
   const uploadStartMs = Date.now();
-  console.log('[EVIDENCE_DIAG] STORAGE_UPLOAD_BEGIN', {
+  if (isConsoleEnabled()) console.log('[EVIDENCE_DIAG] STORAGE_UPLOAD_BEGIN', {
     ts: new Date().toISOString(),
     bucket: BUCKET,
     storagePath,
@@ -146,7 +147,7 @@ export async function uploadBusinessCardAsset(
   } catch (err) {
     const uploadEndMs = Date.now();
     const durationMs = uploadEndMs - uploadStartMs;
-    console.error('[EVIDENCE_DIAG] STORAGE_UPLOAD_THREW', {
+    if (isConsoleEnabled()) console.error('[EVIDENCE_DIAG] STORAGE_UPLOAD_THREW', {
       ts: new Date().toISOString(),
       assetId: asset.id,
       sessionId: asset.sessionId,
@@ -164,7 +165,7 @@ export async function uploadBusinessCardAsset(
   // ── Immediately after the Storage SDK call ──
   const uploadEndMs = Date.now();
   const durationMs = uploadEndMs - uploadStartMs;
-  console.log('[EVIDENCE_DIAG] STORAGE_UPLOAD_RESULT', {
+  if (isConsoleEnabled()) console.log('[EVIDENCE_DIAG] STORAGE_UPLOAD_RESULT', {
     ts: new Date().toISOString(),
     assetId: asset.id,
     sessionId: asset.sessionId,
@@ -278,7 +279,7 @@ async function _writeAssetStorageMeta(
     storage_uploaded_at: writeTs,
   };
 
-  console.log('[EVIDENCE_DIAG] WRITE_META_BEGIN', {
+  if (isConsoleEnabled()) console.log('[EVIDENCE_DIAG] WRITE_META_BEGIN', {
     ts: writeTs,
     localAssetId: asset.id,
     sessionId: asset.sessionId,
@@ -350,7 +351,7 @@ async function _writeAssetStorageMeta(
         storage_bucket: rb?.storage_bucket ?? null,
         storage_upload_status: rb?.storage_upload_status ?? null,
       });
-      console.log('[EVIDENCE_DIAG] WRITE_META_READBACK', {
+      if (isConsoleEnabled()) console.log('[EVIDENCE_DIAG] WRITE_META_READBACK', {
         ts: new Date().toISOString(),
         localAssetId: asset.id,
         sessionId: asset.sessionId,
@@ -360,7 +361,7 @@ async function _writeAssetStorageMeta(
         status: rb?.storage_upload_status ?? null,
       });
       if (idMismatch) {
-        console.error('[STORAGE_DIAG] ID MISMATCH after _writeAssetStorageMeta!', {
+        if (isConsoleEnabled()) console.error('[STORAGE_DIAG] ID MISMATCH after _writeAssetStorageMeta!', {
           sessionId: asset.sessionId,
           localAssetId: asset.id,
           writtenRowId,
@@ -368,7 +369,7 @@ async function _writeAssetStorageMeta(
         });
       }
       if (pathNulled) {
-        console.error('[STORAGE_DIAG] storage_path NULL after write!', {
+        if (isConsoleEnabled()) console.error('[STORAGE_DIAG] storage_path NULL after write!', {
           sessionId: asset.sessionId,
           localAssetId: asset.id,
           writtenPath: storagePath,
@@ -402,12 +403,12 @@ export async function reconcileAssetStorageMetadata(
   }
 }
 
-export async function uploadNotesImage(backendSessionId: string, dataUrl: string, correlationId?: string | null): Promise<void> {
+export async function uploadNotesImage(backendSessionId: string, dataUrl: string, correlationId?: string | null, ownerId?: string | null): Promise<void> {
   if (!navigator.onLine || !dataUrl?.startsWith('data:')) return;
   const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
   const ctx = { backendSessionId, correlationId: correlationId ?? null };
   try {
-    const userId = await getAuthUserId();
+    const userId = ownerId ?? await getAuthUserId();
     if (!userId) return;
     const storagePath = `${userId}/${backendSessionId}/notes.jpg`;
     const blob = dataUrlToBlob(dataUrl);
@@ -429,8 +430,8 @@ export async function uploadNotesImage(backendSessionId: string, dataUrl: string
   }
 }
 
-export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob, mimeType: string): Promise<void> {
-  console.log('[VOICE_DIAG] uploadVoiceNote ENTRY', {
+export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob, mimeType: string, ownerId?: string | null): Promise<void> {
+  if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote ENTRY', {
     ts: new Date().toISOString(),
     backendSessionId,
     storageBucket: BUCKET,
@@ -440,7 +441,7 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
   });
 
   if (!navigator.onLine || !audioBlob || audioBlob.size === 0) {
-    console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
+    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
       backendSessionId,
       reason: !navigator.onLine ? 'offline' : !audioBlob ? 'null blob' : 'zero-size blob',
       storageBucket: BUCKET,
@@ -449,13 +450,14 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
   }
 
   try {
-    const userId = await getAuthUserId();
-    console.log('[VOICE_DIAG] uploadVoiceNote AUTH_USER', {
+    const userId = ownerId ?? await getAuthUserId();
+    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote AUTH_USER', {
       backendSessionId,
       userId: userId ?? null,
+      ownerIdProvided: ownerId != null,
     });
     if (!userId) {
-      console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
+      if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
         backendSessionId,
         reason: 'no authenticated user',
         storageBucket: BUCKET,
@@ -464,7 +466,7 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
     }
     const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm';
     const storagePath = `${userId}/${backendSessionId}/voice.${ext}`;
-    console.log('[VOICE_DIAG] uploadVoiceNote STORAGE_PATH', {
+    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote STORAGE_PATH', {
       backendSessionId,
       storageBucket: BUCKET,
       storagePath,
@@ -472,7 +474,7 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
       mimeType,
     });
 
-    console.log('[VOICE_DIAG] uploadVoiceNote UPLOAD_BEGIN', {
+    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote UPLOAD_BEGIN', {
       backendSessionId,
       storageBucket: BUCKET,
       storagePath,
@@ -483,7 +485,7 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
     const uploadStartMs = Date.now();
     const { error: uploadError } = await supabase.storage.from(BUCKET).upload(storagePath, audioBlob, { contentType: mimeType, upsert: true });
     const uploadDurationMs = Date.now() - uploadStartMs;
-    console.log('[VOICE_DIAG] uploadVoiceNote UPLOAD_RESULT', {
+    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote UPLOAD_RESULT', {
       backendSessionId,
       storageBucket: BUCKET,
       storagePath,
@@ -493,7 +495,7 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
         : null,
     });
     if (uploadError) {
-      console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
+      if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
         backendSessionId,
         reason: 'storage upload error',
         storageBucket: BUCKET,
@@ -503,7 +505,7 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
       return;
     }
     const { data: existing } = await supabase.from('capture_assets').select('id').eq('capture_session_id', backendSessionId).eq('asset_type', 'voice_note').maybeSingle();
-    console.log('[VOICE_DIAG] uploadVoiceNote METADATA_WRITE_BEGIN', {
+    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote METADATA_WRITE_BEGIN', {
       backendSessionId,
       storageBucket: BUCKET,
       storagePath,
@@ -518,7 +520,7 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
       storage_provider: 'SUPABASE', storage_bucket: BUCKET, storage_path: storagePath,
       storage_upload_status: 'uploaded', storage_uploaded_at: new Date().toISOString(), transcription_status: 'uploaded',
     }, { onConflict: 'capture_session_id,local_asset_id' });
-    console.log('[VOICE_DIAG] uploadVoiceNote METADATA_WRITE_RESULT', {
+    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote METADATA_WRITE_RESULT', {
       backendSessionId,
       storageBucket: BUCKET,
       storagePath,
@@ -529,7 +531,7 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
     if (assetError) {
       console.warn('[assetStorageUpload] uploadVoiceNote asset upsert error:', assetError.message);
     }
-    console.log('[VOICE_DIAG] uploadVoiceNote EXIT', {
+    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote EXIT', {
       backendSessionId,
       storageBucket: BUCKET,
       storagePath,
@@ -537,7 +539,7 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
     });
   } catch (err) {
     const errObj = err as Record<string, unknown>;
-    console.error('[VOICE_DIAG] uploadVoiceNote EXCEPTION', {
+    if (isConsoleEnabled()) console.error('[VOICE_DIAG] uploadVoiceNote EXCEPTION', {
       backendSessionId,
       storageBucket: BUCKET,
       storagePath: null,

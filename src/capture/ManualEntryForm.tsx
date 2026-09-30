@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  ArrowLeft, User, Building2, Phone, Mail, Briefcase,
+  ArrowLeft, User, Building2, Mail, Briefcase,
   CheckCircle2, Wifi, WifiOff, Trash2, ChevronDown, ChevronRight,
   Mic, Square, Camera, X, Image as ImageIcon,
   Flame, Thermometer, Snowflake,
@@ -13,6 +13,9 @@ import type { CaptureSession, DraftData, LeadTemperature, LeadType, ApplicationO
 import type { AppEvent } from '../EventContext';
 import { APPLICATION_OPTIONS } from './types';
 import type { UseManualEntryFormReturn } from './useManualEntryForm';
+import { CountrySelector } from './CountrySelector';
+import { PhoneInputWithCountry } from './PhoneInputWithCountry';
+import { splitInternationalPhone } from './splitInternationalPhone';
 import { Toast, DiscardDialog, DraftSaveIndicator } from './CaptureUI';
 import type { SaveState } from './useAutosave';
 import { TagInput } from '../components/TagInput';
@@ -868,6 +871,36 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const voiceTranscript = d.voiceNoteTranscript as string | undefined;
   const website         = String(d.website ?? '');
   const address         = String(d.address  ?? '');
+  const country         = d.country ? String(d.country) : null;
+  const phoneCountryCode = d.phoneCountryCode ? String(d.phoneCountryCode) : null;
+
+  // Derive the dial code for display from the phone value itself.
+  // For extracted international phones (e.g. '+918796314123'), this produces
+  // the matching country selector without mutating the draft.
+  const split = splitInternationalPhone(phone, phoneCountryCode);
+  const displayDialCode = phoneCountryCode ?? split.dialCode;
+  const displayPhone = (phoneCountryCode || split.dialCode) ? split.localNumber : phone;
+
+  // One-time effect: when an extracted international phone arrives with no
+  // phoneCountryCode set, split it into country + local number in the draft.
+  // This only fires once per draft (guarded by a ref) so user edits are preserved.
+  const didSplitPhone = useRef(false);
+  useEffect(() => {
+    if (didSplitPhone.current) return;
+    if (!phone || !phone.trim()) return;
+    if (phoneCountryCode) { didSplitPhone.current = true; return; }
+    const trimmed = phone.trim();
+    if (!trimmed.startsWith('+') && !trimmed.startsWith('00')) { didSplitPhone.current = true; return; }
+    if (split.dialCode && split.localNumber && split.localNumber !== trimmed) {
+      didSplitPhone.current = true;
+      handlePatchDraft({
+        phoneCountryCode: split.dialCode,
+        phone: split.localNumber,
+      });
+    } else {
+      didSplitPhone.current = true;
+    }
+  }, [phone, phoneCountryCode, split.dialCode, split.localNumber, handlePatchDraft]);
 
   const hasDraftData = !!(clientName || company || phone || email || designation || notes || notesImage
     || d.cardFrontAssetId || d.cardBackAssetId || d.rawQr
@@ -875,7 +908,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
     || (d.application && d.application.length) || (d.quickKeywords && d.quickKeywords.length)
     || (d.targetMarket && d.targetMarket.length) || (d.certification && d.certification.length)
     || (d.benchmark && d.benchmark.length) || d.leadType || d.leadTemperature
-    || d.previousRepCode || d.priceRange || d.website || d.address);
+    || d.previousRepCode || d.priceRange || d.website || d.address || d.country);
   const hasIdentifier = !!(clientName.trim() || company.trim() || phone.trim());
   // In Exhibition mode, evidence (card/QR) satisfies the minimum requirement.
   const hasEvidence = !!(d.cardFrontAssetId || d.rawQr);
@@ -1070,22 +1103,18 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
               </div>
             </div>
 
-            {/* Phone */}
+            {/* Phone (combined country + number) */}
             <div>
               <FieldLabel label="Phone" />
-              <div className="relative">
-                <Phone className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
-                <input
-                  type="tel"
-                  inputMode="tel"
-                  placeholder="+91 98765 43210"
-                  autoComplete="tel"
-                  value={phone}
-                  onChange={e => handleChange('phone', e.target.value)}
-                  onBlur={() => handleBlur('phone')}
-                  className={`${inputCls()} pl-10`}
-                />
-              </div>
+              <PhoneInputWithCountry
+                phoneCountryCode={displayDialCode}
+                onPhoneCountryChange={c => handlePatchDraft({ phoneCountryCode: c ?? undefined })}
+                phoneValue={displayPhone}
+                onPhoneChange={v => handleChange('phone', v)}
+                onPhoneBlur={() => handleBlur('phone')}
+                phonePlaceholder="98765 43210"
+                derivedDialCode={displayDialCode}
+              />
             </div>
 
             {/* Email */}
@@ -1159,16 +1188,26 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
             <div>
               <FieldLabel label="Address" optional />
               <div className="relative">
-                <MapPin className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
-                <input
-                  type="text"
+                <MapPin className="absolute left-3.5 top-4 w-4 h-4 text-stone-400 pointer-events-none" />
+                <textarea
+                  rows={2}
                   placeholder="e.g. Mumbai, Maharashtra"
                   autoComplete="street-address"
                   value={address}
                   onChange={e => handleChange('address', e.target.value)}
-                  className={`${inputCls()} pl-10`}
+                  className={`${inputCls()} pl-10 resize-none leading-relaxed break-words whitespace-pre-wrap`}
                 />
               </div>
+            </div>
+
+            {/* Country */}
+            <div>
+              <FieldLabel label="Country" optional />
+              <CountrySelector
+                value={country}
+                onChange={c => handlePatchDraft({ country: c ?? undefined })}
+                placeholder="Select country (auto-derived from address if left blank)…"
+              />
             </div>
 
           </div>
