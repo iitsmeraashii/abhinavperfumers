@@ -1,5 +1,7 @@
 # Capture Processing Pipeline Assessment
 
+> **Historical snapshot — not current implementation reference.** This assessment was written on 2026-07-03 to identify orchestration responsibilities for a future Capture Processing Engine. The ALPE processing pipeline (`src/alpe/`), scheduler, worker, and queue are now implemented, and many of the responsibilities this document recommends moving out of `CaptureLeadPage` have moved. Treat the step-by-step trace below as a point-in-time analysis of the synchronous CRM path, not a description of the current asynchronous ALPE path. For current implementation, see `docs/CAPTURE_ALPE_ARCHITECTURE.md`.
+
 > **Type:** Architecture assessment — read-only analysis
 > **Date:** 2026-07-03
 > **Scope:** Complete execution path from "Save & Next Lead" to `lead_entries` row

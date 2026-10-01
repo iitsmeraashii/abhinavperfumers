@@ -196,7 +196,7 @@ The central data structure. Contains all extracted + manually entered fields:
 **File:** `src/capture/useCaptureSession.ts`
 
 The hook manages the top-level state machine. Key behaviors:
-- **Autosave**: every 700ms (debounced) via `useAutosave.ts`, writes to IndexedDB `drafts` store
+- **Autosave**: every 600ms (debounced) via `useAutosave.ts`, writes to IndexedDB `drafts` store
 - **Draft recovery**: on page reload, `loadDraft()` restores the session from IndexedDB
 - **Sync**: fire-and-forget via `captureBackendSync.ts` functions
 - **Save & Next**: branches on `useAlpeProcessing()` flag → either `produceProcessingJob()` (ALPE) or `processCaptureSession()` (sync)
@@ -347,9 +347,9 @@ All functions accept a `SyncCallbacks` object: `{ onSyncing, onSynced, onSyncErr
 When `navigator.onLine === false`, sync calls are redirected to `enqueueOp()` instead of being dropped.
 
 #### IndexedDB Store: `pending_ops`
-Each op: `{ id, type, sessionId, createdAt, retries, payload }`
+Each op: `{ id, ownerId, type, sessionId, createdAt, retries, payload }`
 
-Op types: `upsert_session`, `upsert_asset`, `upsert_ocr_extraction`, `upsert_vision_extraction`, `upsert_qr_extraction`, `update_session_fields`, `promote_session`, `upload_voice_note`, `enqueue_processing_job`
+Op types (11): `upsert_session`, `upsert_asset`, `upsert_ocr_extraction`, `upsert_vision_extraction`, `upsert_qr_extraction`, `update_session_fields`, `promote_session`, `upload_voice_note`, `upload_notes_image`, `upload_business_card`, `enqueue_processing_job`
 
 #### Flush — `flushQueue()`
 Called by `useOnlineStatus` hook's `onReconnect` callback:
@@ -395,9 +395,10 @@ Returns `{ outcome: 'failed', error }` if session sync or asset readiness fails.
 Inserts: `{ id: jobId, capture_session_id, user_id, event_id, state: 'QUEUED', priority, processing_version, enqueued_at, scheduled_at, metadata }`
 
 #### claimNextJob(userId)
-1. Selects highest-priority `QUEUED` job for the user, ordered by `priority DESC, enqueued_at ASC`
-2. Atomic transition `QUEUED → PROCESSING` via optimistic lock (`.eq('state', 'QUEUED')`)
-3. Returns `QueueEntry` or null
+1. Fetches `QUEUED` **and** `RETRYING` jobs for the user, ordered by `priority DESC, enqueued_at ASC`
+2. Filters out exhausted `RETRYING` jobs (`retry_count >= MAX_RETRY_COUNT`)
+3. Atomic transition `QUEUED|RETRYING → PROCESSING` via optimistic lock (`.in('state', ['QUEUED', 'RETRYING'])`)
+4. Returns `QueueEntry` or null
 
 #### State Transitions
 | Function | From → To | Notes |
@@ -406,7 +407,7 @@ Inserts: `{ id: jobId, capture_session_id, user_id, event_id, state: 'QUEUED', p
 | `updateJobState(id, newState, patch)` | Any → terminal | Sets `processing_completed_at` for `COMPLETED`, `FAILED`, `INVALID`, `REQUIRES_REVIEW` |
 | `markRetrying(jobId, reason)` | `PROCESSING → RETRYING` | Calls `increment_retry_count` RPC, falls back to manual update |
 | `markRecovering(jobId)` | `PROCESSING → RECOVERING` | Stamps `processing_started_at` |
-| `requeueJob(jobId)` | `RECOVERING/RETRYING → QUEUED` | Resets `processing_started_at`, increments `retry_count` |
+| `requeueJob(jobId)` | `RECOVERING/RETRYING → QUEUED` | Resets `processing_started_at`; does **not** increment `retry_count` (that is done by `markRetrying` via the `increment_retry_count` RPC) |
 
 ### Queue State Machine
 ```
@@ -422,23 +423,31 @@ RECOVERING → QUEUED (recovery on scheduler start)
 
 ```typescript
 interface QueueEntry {
-  id:                  string;
-  capture_session_id:  string;
-  user_id:             string;
-  event_id:            string | null;
-  state:               QueueState;
-  priority:            number;
-  processing_version:  number;
-  enqueued_at:         string;
-  scheduled_at:        string | null;
-  processing_started_at: string | null;
+  id:                     string;
+  capture_session_id:     string;
+  user_id:                string;
+  event_id:               string | null;
+  state:                  ProcessingState;
+  priority:               number;
+  processing_version:     number;
+  enqueued_at:            string;
+  scheduled_at:           string | null;
+  processing_started_at:  string | null;
   processing_completed_at: string | null;
-  retry_count:         number;
-  max_retries:         number;
-  failure_reason:      string | null;
-  metadata:            Record<string, unknown> | null;
+  failure_reason:         string | null;
+  retry_count:            number;
+  recovery_count:         number;
+  metadata:               Record<string, unknown>;
+  updated_at:             string;
+  last_attempt_at:        string | null;
+  failed_at:              string | null;
+  failed_stage:           string | null;
+  error_code:             string | null;
+  error_message:          string | null;
 }
 ```
+
+`MAX_RETRY_COUNT = 3` is a separate constant in `types.ts`; there is no per-row `max_retries` column.
 
 ---
 
@@ -460,13 +469,16 @@ Singleton `AlpeScheduler` (exported as `scheduler`).
 - **Offline skip:** if `isOnline === false`, tick returns immediately
 
 ### Tick Sequence
-1. `claimNextJob(userId)` — atomic claim from `processing_queue`
-2. If no job: return
-3. `processJob(job)` — run the worker (see Section 9)
-4. `decide(workerResult)` — map worker result to queue decision (see Section 14)
-5. If `RETRYING` and retryable: `markRetrying(jobId, reason)`
-6. Otherwise: `updateJobState(jobId, decision.newState, { failure_reason })`
-7. Increment `jobsProcessed` on `COMPLETED` or `REQUIRES_REVIEW`
+1. **Throttled local cleanup** — at most once every 5 minutes, removes synced `completed_leads` records older than 3 days (owner-scoped)
+2. **Reconciliation pass** — `reconcileCompletedLeads(userId)` syncs local `completed_leads` with terminal queue rows
+3. `claimNextJob(userId)` — atomic claim of `QUEUED` or eligible `RETRYING` job from `processing_queue`
+4. If no job: return
+5. `processJob(job)` — run the worker (see Section 9)
+6. `decide(workerResult)` — map worker result to queue decision (see Section 14)
+7. If `RETRYING` and retryable: `markRetrying(jobId, reason, failedStage, errorMessage)`
+8. Otherwise: `updateJobState(jobId, decision.newState, { failure_reason, failed_stage, error_message })`
+9. On `RETRYING`/`FAILED`: updates local `completed_leads` with failure diagnostics (retries, lastError, failedStage, isExhausted)
+10. On `COMPLETED`/`REQUIRES_REVIEW`: reconciles local `completed_leads` to `synced`; increments `jobsProcessed`
 
 ### Scheduler State
 ```typescript
@@ -547,8 +559,18 @@ interface ProcessingContext {
   eventName:        string | null;
   completedLeadId:  string;           // = backendSessionId
   plan:             ExecutionPlan;
+  ownerId:          string | null;    // auth UID of the rep — scopes local IDB records
   evidence:         EvidenceAssets;
-  correlationId:   string | null;     // from job.metadata
+  correlationId?:   string | null;    // from job.metadata
+  // Enriched by stages:
+  resolvedEvidence?:    ResolvedEvidenceGroup;
+  extractionSource?:    string | null;
+  extractionConfidence?: number | null;
+  fieldConfidence?:     FieldConfidenceReport | null;
+  fieldStatus?:         FieldStatusReport | null;
+  extractionMetadata?:  ExtractionMetadata;
+  review?:              ReviewResult;
+  result?:              ProcessingResult;
 }
 ```
 
@@ -575,12 +597,17 @@ The worker is heavily instrumented with `traceStage()` calls that log to console
 
 ### ProcessingResult
 ```typescript
+type ProcessingOutcome = 'success' | 'queued' | 'failed';
+
 interface ProcessingResult {
-  outcome:   'success' | 'failed' | 'queued' | 'requires_review';
-  leadId:    string | null;
-  error:     string | null;
+  outcome:     ProcessingOutcome;
+  leadId:      string | null;
+  error:       string | null;
+  failedStage: PipelineStage | null;
 }
 ```
+
+There is **no** `'requires_review'` outcome in `ProcessingResult`. The review stage sets `ctx.review.required`, which is passed through to promotion as a flag — the pipeline outcome remains `success`, `queued`, or `failed`. The `WorkerResult` type does declare `requires_review` as a possible outcome, but the worker never produces it from the pipeline: the mapping is `success → completed`, `queued → queued`, everything else → `failed`.
 
 ### Stage 1: Evidence Upload — `executeEvidenceStage(ctx)`
 - Registers notes image with `evidenceManager` if `draftData.notesImageDataUrl` exists
@@ -592,10 +619,11 @@ interface ProcessingResult {
 - Stores resolved evidence on `ctx` for the extraction stage
 
 ### Stage 3: AI Extraction — `executeExtractionStage(ctx)`
-- For `BUSINESS_CARD` captures: calls `extractBusinessCard(resolvedFront)` from `src/alpe/extractionService.ts`
-  - If back card exists and front extraction yielded no email/phone, also calls `extractBusinessCard(resolvedBack)`
+- Extraction runs **once**. It prefers the front business card; if the front is not resolved, it falls back to the back. It does **not** run extraction on both sides.
+- For `BUSINESS_CARD` captures: calls `extractBusinessCard(cardRef)` where `cardRef` is the resolved front (preferred) or back (fallback) from `src/alpe/extractionService.ts`
   - Merges extracted fields into `ctx.session.draftData` — does NOT overwrite manually-set fields
 - For `QR` captures: calls `extractQr(resolvedQr)`
+- For `notes_image` only (no card/QR): hook only, no extraction — sets status `skipped`
 - Sets `ctx.extractionSource`, `ctx.extractionConfidence` (0–1), `ctx.fieldConfidence`, `ctx.fieldStatus`
 - For `MANUAL` captures: skips extraction, sets `extractionConfidence = null`
 
@@ -629,6 +657,8 @@ interface ProcessingResult {
 
 ### Stage Ordering
 Stages run sequentially. A failure in any stage short-circuits the pipeline — subsequent stages do not run. The `ctx.result` field holds the final outcome.
+
+The `PipelineStage` type in `src/alpe/types.ts` enumerates 11 stages: `LOAD_CONTEXT`, `VERIFY_ASSETS`, `UPLOAD_ASSETS`, `EVIDENCE_RESOLUTION`, `AI_EXTRACTION`, `PERSIST_EXTRACTION_METADATA`, `VALIDATION`, `DECISION`, `PROMOTION`, `PERSIST_RESULTS`, `COMPLETE`. Note that the runtime pipeline maps the review stage to `DECISION` and the extraction-metadata stage to `PERSIST_RESULTS` in the runtime diagnostics, which differs from the stage's functional name.
 
 ---
 
@@ -816,9 +846,12 @@ The promotion service is the only code that inserts into `lead_entries`. Both th
 ### Decision
 ```typescript
 interface Decision {
-  newState:       QueueState;           // 'COMPLETED' | 'FAILED' | 'RETRYING' | 'REQUIRES_REVIEW'
-  isRetryable:    boolean;
-  failureReason:  string | null;
+  newState:        ProcessingState;
+  failureReason:   string | null;
+  isRetryable:     boolean;
+  failedStage:     string | null;
+  errorMessage:    string | null;
+  nextRetryCount:  number | null;
 }
 ```
 
@@ -827,16 +860,14 @@ interface Decision {
 |---|---|---|
 | `completed` | `COMPLETED` | No |
 | `requires_review` | `REQUIRES_REVIEW` | No |
-| `queued` | `COMPLETED` | No (promotion was queued for offline replay) |
+| `queued` | `RETRYING` | Yes (offline/queued — retried on next poll after reconnect) |
 | `failed` (with retryable error) | `RETRYING` | Yes |
-| `failed` (non-retryable) | `FAILED` | No |
+| `failed` (non-retryable or retry-exhausted) | `FAILED` | No |
+
+**`INVALID`** is defined in the `ProcessingState` union but is **never emitted** by the decision engine — no code path transitions a job to `INVALID`.
 
 ### Retryable error detection
-The decision engine inspects the error message for known retryable patterns:
-- "Assets not yet uploaded" → retryable (uploads may complete on next poll)
-- Network errors → retryable
-- Auth errors → non-retryable
-- Validation failures → non-retryable
+The decision engine classifies errors as non-retryable when the error message contains auth/RLS/permission patterns (`'Not authenticated'`, `'JWT'`, `'row-level security'`, `'policy'`, `'permission'`). All other errors are retryable up to `MAX_RETRY_COUNT` (3). When retries are exhausted (`retry_count >= 3`), the job transitions to `FAILED`.
 
 ### Scheduler Application
 In `scheduler.ts` tick:
@@ -860,15 +891,18 @@ Called by `scheduler.start()` before polling begins.
 
 ### Recovery Steps
 1. **Interrupted jobs** — finds `PROCESSING` state jobs (crashed mid-flight, browser closed, etc.) → `markRecovering()` → `requeueJob()` (resets to `QUEUED`)
-2. **Retryable jobs** — finds `RETRYING` state jobs → `requeueJob()` (resets to `QUEUED`)
+2. **Retryable jobs** — finds `RETRYING` state jobs (within retry limit) → `requeueJob()` (resets to `QUEUED`)
+3. **Completed-job reconciliation** — calls `reconcileCompletedLeads(userId)` which matches terminal `COMPLETED`/`REQUIRES_REVIEW` queue rows to local `completed_leads` records and marks them `synced`. Also has a fallback path that checks `capture_sessions.promoted_lead_id` when the queue row was auto-deleted by a DB trigger.
 
 ### RecoveryReport
 ```typescript
 interface RecoveryReport {
-  interruptedRequeued:  number;
-  retryableRequeued:   number;
-  totalRecovered:      number;
-  errors:              string[];
+  interruptedRequeued:      number;
+  retryableRequeued:       number;
+  reconciledSynced:        number;
+  reconciliationFailures:  number;
+  totalRecovered:          number;
+  errors:                  string[];
 }
 ```
 

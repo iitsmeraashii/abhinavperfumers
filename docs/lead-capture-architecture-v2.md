@@ -1,7 +1,9 @@
 # Lead Capture Architecture v2
 
 > **Supersedes:** `lead-capture-exhibit-architecture.md`
-> **Status:** Current implementation as of 2026-07-03
+> **Status:** Current implementation as of 2026-07-03 (updated)
+>
+> **Note:** This document describes the CRM synchronous capture path and the offline queue. The ALPE asynchronous processing pipeline (`src/alpe/`) is documented separately in `docs/CAPTURE_ALPE_ARCHITECTURE.md`. Where this document references the processing pipeline, queue, or worker as "planned" or "not yet implemented," those features are now implemented — see the ALPE doc for current details.
 
 ---
 
@@ -162,7 +164,7 @@ Storage columns (`storage_bucket`, `storage_path`, `storage_upload_status`, `sto
 
 #### Voice note upload
 
-`uploadVoiceNote` is defined as an exported stub — the function signature exists but contains no implementation. It is a placeholder for when voice recording UI is added.
+`uploadVoiceNote` in `assetStorageUpload.ts` uploads the audio blob to Supabase Storage at `{userId}/{sessionId}/voice.webm`, creates a `capture_assets` row with `asset_type: 'voice_note'`, and chains to `transcribeVoiceNote()` for Whisper transcription. The full lifecycle (upload → transcribe → status updates) is owned by `voiceEvidenceManager.ts`, which also persists the blob to the `pending_ops` IndexedDB store at registration time so it survives refresh and offline conditions. Offline replay is handled by the `upload_voice_note` op type in `captureOfflineQueue.ts`.
 
 ---
 
@@ -310,7 +312,7 @@ Transient in-memory React state only. Not persisted. Lost on page reload. Used o
 
 ### IndexedDB stores
 
-Managed by `db.ts`. All stores use the same database (`capture_app`, version 5).
+Managed by `db.ts`. All stores use the same database (`capture_app`, version 8).
 
 | Store | Key | Content | Persists |
 |---|---|---|---|
@@ -370,6 +372,10 @@ interface PendingOp {
 | `upsert_vision_extraction` | `syncUpsertVisionExtraction` | OpenAI Vision extraction completed |
 | `update_session_fields` | `syncUpdateSessionFields` | Rep edits manual form fields (debounced 1.5s) |
 | `promote_session` | `syncPromoteSession` → `executePromotion` | Save & Next offline, or Save & Next with retryable network error |
+| `upload_voice_note` | `executeVoiceNoteUploadOp` | Voice note recorded offline |
+| `upload_notes_image` | `uploadNotesImage` | Notes image captured offline |
+| `upload_business_card` | `uploadBusinessCardAsset` | Business card captured offline |
+| `enqueue_processing_job` | `produceProcessingJob` | ALPE job enqueue deferred offline |
 
 ### Queue replay mechanism
 
@@ -444,9 +450,9 @@ interface CaptureProfileDescriptor {
 
 ### Current implementation status
 
-**CRM is the only active profile.** `DEFAULT_CAPTURE_PROFILE = 'CRM'`.
+**CRM is the default profile.** `DEFAULT_CAPTURE_PROFILE = 'CRM'`.
 
-Exhibition mode descriptors are defined in `CAPTURE_PROFILE_DESCRIPTORS` but no Exhibition-specific journey logic exists. The abstraction is a foundation for future implementation.
+Exhibition mode is **fully implemented at the strategy level** — `ExhibitionValidationStrategy`, `ExhibitionReviewStrategy`, `ExhibitionAIStrategy`, `ExhibitionUploadStrategy`, `ExhibitionPromotionStrategy`, and `ExhibitionResultStrategy` all exist in `profileStrategies.ts` and are registered in `PROFILE_STRATEGY_REGISTRY`. However, the ALPE worker's `resolveProfile()` currently returns `'CRM'` hardcoded — it does not yet resolve the profile from the session or event context. So while Exhibition strategies exist and can be selected, the ALPE worker currently always runs the CRM strategy bundle.
 
 ### Where `captureProfile` lives in state
 
@@ -463,7 +469,7 @@ Exhibition mode descriptors are defined in `CAPTURE_PROFILE_DESCRIPTORS` but no 
 ```
 CRM + Online     → immediate sync and promotion
 CRM + Offline    → queue all ops, promote when connectivity returns
-EXHIBITION + *   → (not yet implemented)
+EXHIBITION + *   → strategies exist and are registered; ALPE worker currently resolves CRM
 ```
 
 ---
@@ -622,7 +628,7 @@ Lead enters CRM pipeline
 | Offline-safe promotion queue | `captureOfflineQueue 'promote_session'` | Full |
 | Business card Storage upload | `assetStorageUpload.uploadBusinessCardAsset` | Full |
 | Notes image Storage upload | `assetStorageUpload.uploadNotesImage` | Full |
-| `CaptureProfile` abstraction | `captureProfile.ts` | Foundation only — CRM active |
+| `CaptureProfile` abstraction | `captureProfile.ts`, `profileStrategies.ts` | CRM is the worker's current resolved profile; Exhibition strategies are implemented and registered but not selected by `resolveProfile()` |
 | Lead queue page | `LeadQueuePage.tsx`, `leadQueueStorage.ts` | Full |
 | Completed leads local mirror | `completedLeadsStorage.ts` | Full |
 
@@ -630,7 +636,6 @@ Lead enters CRM pipeline
 
 | Feature | Module | Current State | Gap |
 |---|---|---|---|
-| Voice note capture | `DraftData.voiceNoteDurationMs/Transcript` | Schema columns and data fields defined | No recording UI; no upload |
 | Notes image capture | `DraftData.notesImageDataUrl` | Data URL stored and uploaded | No dedicated capture UI; data URL comes from an undocumented source |
 | `READY_FOR_REVIEW` status | `SessionStatus` type | Type defined | Not assigned by any code path |
 | Draft clearing after promotion | `CaptureLeadPage.handleSaveAndNext` | Session reset via `actions.resetSession()` | `clearDraft()` not called; draft persists until next IDLE autosave |
@@ -641,13 +646,8 @@ Lead enters CRM pipeline
 
 | Feature | Description |
 |---|---|
-| Exhibition Mode | Speed-first capture profile; non-blocking AI/OCR; no review screen. Types and descriptors defined; no journey implementation. |
-| Processing Engine | Background worker for vision extraction, notes OCR, audio transcription — independent of capture flow |
-| Asset Manager | Dedicated service for managing the full lifecycle of binary assets in Storage and IDB |
-| Background Upload Queue | Queued upload operations for offline-captured assets (currently Storage uploads are online-only; missed uploads are not retried) |
 | Review Queue | Explicit review screen showing extracted fields alongside original card photo with per-field confidence indicators |
-| Voice Note Recording UI | Microphone capture, duration tracking, Whisper transcription |
-| Processing Queue | IndexedDB or Supabase store for deferred heavy processing jobs |
+| Voice Note Recording UI | Microphone capture UI (voice note upload and transcription are implemented via `voiceEvidenceManager.ts`; the recording UI itself is the remaining gap) |
 
 ---
 
