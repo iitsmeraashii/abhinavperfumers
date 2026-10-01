@@ -516,7 +516,7 @@ The `reviewed_by` and `reviewed_at` columns exist but are never populated — th
 | `extraction_source` | text | Engine: `'openai_vision'`, `'tesseract_fallback'`, `'qr_parser'`, `'manual'` |
 | `extraction_status` | text | Lifecycle: `'done'`, `'failed'`, `'skipped'` |
 | `extraction_confidence` | float | Overall confidence 0–1 (or null) |
-| `extracted_fields` | jsonb | Canonical 5 fields: `clientName`, `company`, `phone`, `email`, `designation` (empty values omitted) |
+| `extracted_fields` | jsonb | Canonical 9 fields: `clientName`, `company`, `phone`, `email`, `designation`, `address`, `website`, `country`, `phoneCountryCode` (empty values omitted) |
 | `extraction_metadata` | jsonb | Full metadata object: `{ source, confidence, fieldConfidence, fieldStatus, fieldsExtracted }` |
 
 **Migration:** `20260814120000_add_capture_session_link_and_review_metadata.sql` — adds `extraction_metadata jsonb NOT NULL DEFAULT '{}'` and `review_metadata jsonb NOT NULL DEFAULT '{}'` to `capture_sessions`.

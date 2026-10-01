@@ -1,5 +1,7 @@
 # Lead Capture Exhibit Architecture
 
+> **Historical snapshot — not current implementation reference.** This document describes the capture architecture as it existed before the ALPE processing pipeline, profile strategies, and Storage upload infrastructure were implemented. Many specifics are outdated: `promoteSessionToLead` is now a deprecated shim (use `executePromotion`), Storage uploads are implemented for business cards/notes images/voice notes, the offline queue has 11 op types (including `promote_session`, `upload_voice_note`, `upload_notes_image`, `upload_business_card`, and `enqueue_processing_job`), the processing queue is implemented as a Supabase `processing_queue` table with a browser-resident scheduler, and the IndexedDB database is at version 8. For current implementation, see `docs/CAPTURE_ALPE_ARCHITECTURE.md` and `docs/lead-capture-architecture-v2.md`.
+
 ## Overview
 
 The Lead Capture module is an **offline-first capture pipeline** built for field sales
@@ -35,8 +37,8 @@ capture screen.
 
 ### 2. Capture Session Is the Source of Truth Until Promotion
 
-A `capture_sessions` row is the authoritative record of a capture attempt from the moment
-it is created until the moment `promoteSessionToLead` inserts a `lead_entries` row. During
+A `capture_sessions` row was the authoritative record of a capture attempt in this historical design from the moment
+it was created until the moment the promotion flow inserted a `lead_entries` row. In the current implementation, promotion is performed by `executePromotion`; `promoteSessionToLead` is a deprecated shim. During
 that window, the local `drafts` IndexedDB store mirrors the session's current state via
 autosave. The local state is always preferred over the backend for rendering; the backend
 is a downstream sink.
@@ -107,8 +109,8 @@ CRM mode is the default operating mode when connectivity is available.
 2. As OCR completes or QR is parsed, extraction results are synced immediately via
    `syncOcrOp` / `syncQrOp`.
 3. As the rep edits manual fields, `syncFieldsOp` fires on each significant change.
-4. When the rep taps "Save & Next", `promoteSessionToLead` is called directly — a live
-   `INSERT` into `lead_entries` and a subsequent `UPDATE` to mark the session promoted.
+4. In the historical synchronous path, tapping "Save & Next" called the promotion shim directly — a live
+   `INSERT` into `lead_entries` followed by an `UPDATE` to mark the session promoted. The current ALPE path uses the processing queue and `executePromotion`.
 5. Autosave writes the draft to IndexedDB throughout for crash recovery.
 
 **Failed promotion in CRM mode:** If the `lead_entries` INSERT fails (network error or
@@ -131,9 +133,7 @@ Exhibition mode is the operating state when connectivity is absent or unreliable
 4. The `LeadQueuePage` shows all captured leads with their local sync status.
 5. On reconnect, `window.online` fires → `handleReconnect` → `flushQueue()` replays all
    `pending_ops` in creation order using the same sync functions as CRM mode.
-6. **Promotion remains a live network call.** If the rep taps "Save & Next" while
-   offline, promotion is attempted immediately, fails, and the record is saved locally as
-   `'local_only'`. There is currently no queued promotion path.
+6. In this historical design, promotion was described as a live network call. The current implementation has a queued `promote_session` operation and an `enqueue_processing_job` path, so offline promotion can be replayed when connectivity returns.
 
 ---
 
@@ -206,8 +206,7 @@ the front or back face of a business card.
 
 **What it does not hold:** Image bytes. The actual JPEG data URL lives only in the
 `assets` IndexedDB store. `capture_assets` rows are metadata only. `storage_path` exists
-as a column but is not populated — there is no Supabase Storage upload in the current
-implementation.
+as a column but was not populated in the historical implementation. The current implementation uploads business-card images, notes images, and voice notes to Supabase Storage.
 
 **Lifecycle:** Asset is compressed and saved to IDB by `saveAsset()`. A sync call
 (`syncUpsertAsset`) writes the metadata row to Supabase. The local `asset.id` is reused
@@ -230,7 +229,7 @@ capture session. Multiple rows can exist for a single session.
 
 | Field | Purpose |
 |---|---|
-| `engine` | Which engine produced this row: `tesseract_ocr`, `qr_parser`, `openai_vision` (planned) |
+| `engine` | Which engine produced this row: `tesseract_ocr`, `qr_parser`, or `openai_vision` |
 | `raw_text` | Unprocessed text: Tesseract raw output, or raw QR string |
 | `extracted_json` | Structured contact fields as parsed by the relevant engine |
 | `confidence` | `'high' | 'medium' | 'low'` — engine-specific |
@@ -249,15 +248,15 @@ path); or any reference to which `lead_entries` row resulted from this extractio
 
 - Tesseract OCR → written to `extraction_results` with `engine: 'tesseract_ocr'`
 - QR parsing → written to `extraction_results` with `engine: 'qr_parser'`
-- OpenAI Vision → **not yet written to `extraction_results`**; currently synced only to
-  `capture_sessions.extracted_fields` / `capture_sessions.extracted_data`
+- OpenAI Vision → written through the current vision extraction sync path; this historical document's earlier claim that it was not persisted is obsolete.
 
 ---
 
 ## Lead Promotion Responsibilities
 
-**Function:** `promoteSessionToLead` in `src/capture/captureBackendSync.ts`  
-**Trigger:** Rep taps "Save & Next" in `CaptureLeadPage`
+**Historical function:** `promoteSessionToLead` in `src/capture/captureBackendSync.ts`  
+**Current function:** `executePromotion` in `src/capture/capturePromotionService.ts`  
+**Trigger:** Rep taps "Save & Next" in `CaptureLeadPage` or ALPE reaches promotion
 
 Promotion is the single step that converts a capture session into a CRM lead.
 
@@ -307,7 +306,7 @@ Promotion is the single step that converts a capture session into a CRM lead.
 
 ## Offline Queue Responsibilities
 
-**Table:** `pending_ops` (IndexedDB store, version 3)  
+**Table:** `pending_ops` (IndexedDB store in the shared `capture_app` database, currently version 8)  
 **Module:** `src/capture/captureOfflineQueue.ts`
 
 The offline queue is a write-ahead log for backend sync operations. It bridges the gap
@@ -325,7 +324,7 @@ between what the rep captured on-device and what has been confirmed by the backe
 
 **What is not queued:**
 
-- `promoteSessionToLead` — promotion is always a live call; there is no `'promote_session'`
+- `promote_session` — queued promotion replay handled by the current sync adapter; `promoteSessionToLead` remains only as a deprecated shim
   op type.
 - `syncAbandonSession` — abandonment only fires online when the rep discards a draft.
 
@@ -346,7 +345,7 @@ upsert overwrites with identical data.
 
 ## Processing Queue Responsibilities (Planned)
 
-The processing queue is a planned addition to the architecture. It is not yet implemented.
+The processing queue is implemented in the current system as the Supabase `processing_queue` table, claimed by the browser-resident ALPE scheduler.
 
 **Purpose:** Decouple heavy processing tasks (vision extraction, notes image OCR, audio
 transcription, AI field summarisation) from the capture flow. These tasks can take seconds
@@ -483,8 +482,7 @@ Rep reviews and edits, then saves via standard Save & Next flow
 
 ## Audio Lifecycle (Planned)
 
-Audio transcription is not yet implemented. The data model has reserved the necessary
-fields.
+The historical design did not include audio transcription. The current implementation supports voice-note upload and transcription through the capture and processing services.
 
 **Intended flow:**
 
@@ -520,7 +518,7 @@ A `capture_assets` row for the audio file would require `asset_type: 'voice_note
 
 ## Notes Image Lifecycle (Planned)
 
-Notes image OCR is not yet implemented. The data model has reserved the necessary fields.
+The historical design did not include notes-image OCR. Notes-image upload infrastructure exists in the current implementation; OCR behavior should be verified against the current capture pipeline documentation.
 
 **Intended flow:**
 
