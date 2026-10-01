@@ -46,6 +46,23 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
+// ─── Transport-error detection ───────────────────────────────────────────────
+// The PostgREST client (postgrest-js) catches fetch failures and returns them
+// as { status: 0, error: { message: "FetchError: ..." } }. A real HTTP response
+// always has status >= 200. status === 0 is the structured signal that no
+// response was received — DNS failure, connection refused, request blocked, etc.
+// We do NOT rely on navigator.onLine because the Supabase domain can be
+// unreachable while general internet is available.
+function isTransportError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const e = error as Record<string, unknown>;
+  const status = e.status;
+  if (status === 0) return true;
+  // Also check the message for the FetchError prefix the library uses.
+  const msg = typeof e.message === 'string' ? e.message : '';
+  return msg.startsWith('FetchError');
+}
+
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -53,6 +70,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [authUser, setAuthUser] = useState<SupabaseUser | null>(null);
   const [session,  setSession]  = useState<Session | null>(null);
   const [loading,  setLoading]  = useState(true);
+
+  // Mirror of salesRep readable inside loadRepProfile without re-creating the
+  // onAuthStateChange subscription. Used to decide whether a transport failure
+  // should preserve the existing in-memory profile.
+  const salesRepRef = useRef<SalesRep | null>(null);
+  const setSalesRepSafe = useCallback((rep: SalesRep | null) => {
+    salesRepRef.current = rep;
+    setSalesRep(rep);
+  }, []);
 
   // Guard: prevents loadRepProfile from running concurrently when both
   // getSession() and onAuthStateChange fire on mount with the same session.
@@ -63,7 +89,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // onAuthStateChange fires immediately with the current session state,
     // which handles both "already logged in" and "not logged in" cases.
     // We do NOT call getSession() separately to avoid the double-load race.
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
       setSession(s);
       setAuthUser(s?.user ?? null);
 
@@ -75,7 +101,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         })();
       } else {
         // Signed out or no session
-        setSalesRep(null);
+        setSalesRepSafe(null);
         setLoading(false);
         // Clear stale legacy token if present
         localStorage.removeItem('session_token');
@@ -97,7 +123,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       // Link auth_user_id if not yet done (idempotent — safe to call every time)
-      await supabase.rpc('link_auth_user_to_rep');
+      // A transport failure here is non-fatal — the profile query below is the
+      // authoritative check. If link fails due to network, skip to the query.
+      const { error: linkError } = await supabase.rpc('link_auth_user_to_rep');
+      if (linkError && isTransportError(linkError)) {
+        console.warn('[AuthContext] link_auth_user_to_rep transport failure — continuing to profile query');
+      }
 
       const { data, error } = await supabase
         .from('my_rep_profile')
@@ -105,28 +136,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .maybeSingle();
 
       if (error) {
-        console.error('[AuthContext] loadRepProfile query failed', error);
+        if (isTransportError(error)) {
+          // Transient network/backend failure — Supabase unreachable.
+          // Do NOT sign out or clear an already-validated profile.
+          if (salesRepRef.current) {
+            console.warn('[AuthContext] Profile revalidation failed (transport) — preserving existing salesRep');
+          } else {
+            console.warn('[AuthContext] Profile load failed (transport) — no existing salesRep, staying unauthenticated');
+          }
+          return;
+        }
+        // Authoritative server error (e.g. 401, 403) — session is genuinely invalid.
+        console.error('[AuthContext] loadRepProfile query rejected by server', error);
         await supabase.auth.signOut();
-        setSalesRep(null);
+        setSalesRepSafe(null);
         return;
       }
 
       if (!data) {
-        // Valid Supabase auth user but no matching sales_rep row — unauthorized
+        // Server confirmed: valid auth user but no matching sales_rep row.
         console.warn('[AuthContext] No sales_rep row for auth user', s.user.email);
         await supabase.auth.signOut();
-        setSalesRep(null);
+        setSalesRepSafe(null);
         return;
       }
 
       if (!data.login_enabled || !data.is_active) {
+        // Server confirmed: representative is disabled or inactive.
         console.warn('[AuthContext] Rep account disabled/inactive', data.rep_code);
         await supabase.auth.signOut();
-        setSalesRep(null);
+        setSalesRepSafe(null);
         return;
       }
 
-      setSalesRep({
+      setSalesRepSafe({
         id:                      data.id,
         rep_code:                data.rep_code,
         name:                    data.name,
@@ -140,8 +183,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         default_capture_profile: (data.default_capture_profile as CaptureProfile) ?? 'CRM',
       });
     } catch (err) {
-      console.error('[AuthContext] loadRepProfile threw', err);
-      setSalesRep(null);
+      // A thrown error from the Supabase client itself is a transport failure.
+      // Preserve the existing profile if one exists; do not sign out.
+      if (salesRepRef.current) {
+        console.warn('[AuthContext] loadRepProfile threw (transport) — preserving existing salesRep', err);
+      } else {
+        console.warn('[AuthContext] loadRepProfile threw (transport) — no existing salesRep, staying unauthenticated', err);
+      }
     } finally {
       profileLoadingRef.current = false;
       setLoading(false);
@@ -209,7 +257,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Does NOT touch IndexedDB — offline drafts are preserved.
   async function logout(): Promise<void> {
     await supabase.auth.signOut();
-    // onAuthStateChange sets everything to null via the subscriber above
+    // onAuthStateChange sets everything to null via the subscriber above.
+    // Also clear immediately in case signOut's network call fails (offline logout).
+    setSalesRepSafe(null);
   }
 
   // ── Legacy user shape (backward-compat for all existing consumers) ─────────
@@ -227,7 +277,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // (e.g. Capture page's default profile init) see the new value immediately,
   // without requiring a logout/login cycle.
   const updateSalesRep = useCallback((patch: Partial<SalesRep>) => {
-    setSalesRep(prev => (prev ? { ...prev, ...patch } : prev));
+    setSalesRep(prev => {
+      const next = prev ? { ...prev, ...patch } : prev;
+      salesRepRef.current = next;
+      return next;
+    });
   }, []);
 
   return (
