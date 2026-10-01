@@ -9,9 +9,9 @@ import {
   UserPlus, FileText, Layers, Sparkles,
 } from 'lucide-react';
 import { supabase } from '../supabaseClient';
-import type { CaptureSession, DraftData, LeadTemperature, LeadType, ApplicationOption } from './types';
+import type { CaptureSession, DraftData, LeadTemperature, LeadType } from './types';
 import type { AppEvent } from '../EventContext';
-import { APPLICATION_OPTIONS } from './types';
+import { APPLICATION_OPTIONS, APPLICATION_OTHER } from './types';
 import type { UseManualEntryFormReturn } from './useManualEntryForm';
 import { CountrySelector } from './CountrySelector';
 import { PhoneInputWithCountry } from './PhoneInputWithCountry';
@@ -19,6 +19,8 @@ import { splitInternationalPhone } from './splitInternationalPhone';
 import { Toast, DiscardDialog, DraftSaveIndicator } from './CaptureUI';
 import type { SaveState } from './useAutosave';
 import { TagInput } from '../components/TagInput';
+import { getPriceRangeQuickValues } from '../runtime/runtimeDiagnostics';
+import { BUILTIN_PRICE_RANGE_VALUES } from '../runtime/runtimeConfiguration';
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
@@ -491,14 +493,43 @@ function ApplicationChips({
   selected,
   onChange,
 }: {
-  selected: ApplicationOption[];
-  onChange: (v: ApplicationOption[]) => void;
+  selected: string[];
+  onChange: (v: string[]) => void;
 }) {
-  function toggle(opt: ApplicationOption) {
-    if (selected.includes(opt)) {
-      onChange(selected.filter(s => s !== opt));
+  const predefined = selected.filter(s => (APPLICATION_OPTIONS as readonly string[]).includes(s));
+  const customValues = selected.filter(s =>
+    s !== APPLICATION_OTHER && !(APPLICATION_OPTIONS as readonly string[]).includes(s));
+  // "Other" open state is purely UI — never persisted in the application array.
+  // On mount, Other is open only if an existing custom value is present.
+  const [otherOpen, setOtherOpen] = useState(customValues.length > 0);
+  const customText = customValues[0] ?? '';
+
+  function emit(nextPredefined: string[], nextCustom: string[]) {
+    onChange([...nextPredefined, ...nextCustom]);
+  }
+
+  function togglePredefined(opt: string) {
+    if (predefined.includes(opt)) {
+      emit(predefined.filter(s => s !== opt), customValues);
     } else {
-      onChange([...selected, opt]);
+      emit([...predefined, opt], customValues);
+    }
+  }
+
+  function toggleOther() {
+    if (otherOpen) {
+      setOtherOpen(false);
+      emit(predefined, []);
+    } else {
+      setOtherOpen(true);
+    }
+  }
+
+  function handleCustomText(text: string) {
+    if (text.trim()) {
+      emit(predefined, [text.trim()]);
+    } else {
+      emit(predefined, []);
     }
   }
 
@@ -507,12 +538,12 @@ function ApplicationChips({
       <FieldLabel label="Application" optional />
       <div className="flex flex-wrap gap-2">
         {APPLICATION_OPTIONS.map(opt => {
-          const active = selected.includes(opt);
+          const active = predefined.includes(opt);
           return (
             <button
               key={opt}
               type="button"
-              onClick={() => toggle(opt)}
+              onClick={() => togglePredefined(opt)}
               className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150 active:scale-95
                 ${active
                   ? 'bg-stone-900 text-white shadow-sm'
@@ -522,12 +553,35 @@ function ApplicationChips({
             </button>
           );
         })}
+        <button
+          key={APPLICATION_OTHER}
+          type="button"
+          onClick={toggleOther}
+          className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150 active:scale-95
+            border border-dashed
+            ${otherOpen
+              ? 'bg-stone-200 text-stone-700 border-stone-400 shadow-sm'
+              : 'bg-transparent text-stone-500 border-stone-300 hover:bg-stone-50'}`}
+        >
+          Other
+        </button>
       </div>
+      {otherOpen && (
+        <input
+          type="text"
+          inputMode="text"
+          value={customText}
+          onChange={e => handleCustomText(e.target.value)}
+          className={`${inputCls()} mt-2`}
+        />
+      )}
     </div>
   );
 }
 
 // ─── Price range with quick insert buttons ────────────────────────────────────
+
+const PRICE_RANGE_OPERATORS = ['<', '>', '=', '-'] as const;
 
 function PriceRangeInput({
   value,
@@ -537,6 +591,8 @@ function PriceRangeInput({
   onChange: (v: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const quickValues = getPriceRangeQuickValues()
+    .filter(value => !(PRICE_RANGE_OPERATORS as readonly string[]).includes(value));
 
   function insert(char: string) {
     const el = inputRef.current;
@@ -563,16 +619,27 @@ function PriceRangeInput({
         onChange={e => onChange(e.target.value)}
         className={inputCls()}
       />
-      <div className="flex gap-2 mt-2">
-        {['<', '>', '=', '-', 'INR', 'USD'].map(ch => (
+      <div className="flex flex-wrap gap-2 mt-2">
+        {PRICE_RANGE_OPERATORS.map(op => (
           <button
-            key={ch}
+            key={op}
             type="button"
-            onClick={() => insert(ch === 'INR' || ch === 'USD' ? ch + ' ' : ch + ' ')}
+            onClick={() => insert(op + ' ')}
             className="px-3 py-2 rounded-lg bg-stone-100 text-stone-600 text-sm font-mono
               hover:bg-stone-200 active:bg-stone-300 active:scale-95 transition-all"
           >
-            {ch}
+            {op}
+          </button>
+        ))}
+        {quickValues.map(qv => (
+          <button
+            key={qv}
+            type="button"
+            onClick={() => insert(qv + ' ')}
+            className="px-3 py-2 rounded-lg bg-stone-100 text-stone-600 text-sm font-mono
+              hover:bg-stone-200 active:bg-stone-300 active:scale-95 transition-all"
+          >
+            {qv}
           </button>
         ))}
       </div>
@@ -860,7 +927,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const leadTemperature = d.leadTemperature as LeadTemperature | undefined;
   const leadType        = d.leadType as LeadType | undefined;
   const previousRepCode = String(d.previousRepCode ?? '');
-  const application     = (d.application ?? []) as ApplicationOption[];
+  const application     = (d.application ?? []) as string[];
   const priceRange      = String(d.priceRange ?? '');
   const quickKeywords   = (d.quickKeywords ?? []) as string[];
   const targetMarket    = (d.targetMarket ?? []) as string[];

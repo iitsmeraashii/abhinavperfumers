@@ -9,6 +9,7 @@
 import {
   getCached,
   getCachedReviewConfig,
+  getCachedPriceRangeQuickValues,
   isLoaded,
   load,
   reload,
@@ -16,6 +17,7 @@ import {
   unsubscribe,
 } from './runtimeConfiguration';
 import type { DiagnosticsConfig } from './runtimeConfiguration';
+import { BUILTIN_PRICE_RANGE_VALUES } from './runtimeConfiguration';
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -117,4 +119,20 @@ export function isReady(): boolean {
  */
 export function getReviewMinimumConfidence(): number {
   return getCachedReviewConfig().minimumConfidence;
+}
+
+/**
+ * Synchronously return the full list of Price Range quick-input values:
+ * built-in defaults (INR, USD) followed by the admin-configured additional
+ * values. Reads from the in-memory cache — O(1), never hits the database.
+ * If the cache has not been loaded, returns only the built-in defaults.
+ */
+export function getPriceRangeQuickValues(): string[] {
+  const seen = new Set<string>();
+  return [...BUILTIN_PRICE_RANGE_VALUES, ...getCachedPriceRangeQuickValues()].filter(value => {
+    const key = value.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

@@ -50,6 +50,28 @@ interface ConfigRow {
   review_minimum_confidence:  number | null;
 }
 
+// ─── Price Range Quick Values ────────────────────────────────────────────────
+
+/** Built-in defaults always rendered in the Price Range quick buttons. */
+export const BUILTIN_PRICE_RANGE_VALUES: string[] = ['INR', 'USD', '<', '>', '=', '-'];
+
+const DEFAULT_PRICE_RANGE_VALUES: string[] = [];
+
+export function normalizePriceRangeQuickValues(values: string[]): string[] {
+  const seen = new Set<string>();
+  const builtInKeys = new Set(BUILTIN_PRICE_RANGE_VALUES.map(value => value.toLowerCase()));
+  return values.reduce<string[]>((normalized, value) => {
+    const trimmed = value.trim();
+    const key = trimmed.toLowerCase();
+    if (!trimmed || builtInKeys.has(key) || seen.has(key)) return normalized;
+    seen.add(key);
+    normalized.push(trimmed);
+    return normalized;
+  }, []);
+}
+
+let _priceRangeCache: string[] | null = null;
+
 // ─── Cache state ─────────────────────────────────────────────────────────────
 
 let _cache: DiagnosticsConfig | null = null;
@@ -90,6 +112,13 @@ async function fetchConfig(): Promise<{ diagnostics: DiagnosticsConfig; review: 
   return { diagnostics: mapRow(row), review: mapReviewRow(row) };
 }
 
+async function fetchPriceRangeQuickValues(): Promise<string[]> {
+  const { data, error } = await supabase.rpc('get_price_range_quick_values');
+  if (!error && Array.isArray(data)) return normalizePriceRangeQuickValues(data as string[]);
+  // RPC not available (migration not applied) — fall back to localStorage
+  return loadPriceRangeFromLS();
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
@@ -105,8 +134,12 @@ export async function load(): Promise<DiagnosticsConfig> {
     .then(({ diagnostics, review }) => {
       _cache = diagnostics;
       _reviewCache = review;
-      return diagnostics;
     })
+    .then(() => fetchPriceRangeQuickValues())
+    .then(values => {
+      _priceRangeCache = values;
+    })
+    .then(() => _cache!)
     .finally(() => {
       _loadPromise = null;
     });
@@ -123,6 +156,7 @@ export async function reload(): Promise<DiagnosticsConfig> {
   const { diagnostics, review } = await fetchConfig();
   _cache = diagnostics;
   _reviewCache = review;
+  _priceRangeCache = await fetchPriceRangeQuickValues();
   return _cache;
 }
 
@@ -142,6 +176,37 @@ export function getCached(): DiagnosticsConfig {
  */
 export function getCachedReviewConfig(): ReviewConfig {
   return _reviewCache ?? { ...DEFAULT_REVIEW_CONFIG };
+}
+
+/**
+ * Synchronously return the cached additional Price Range quick-input values
+ * (excluding built-in INR/USD). Falls back to an empty array if the cache
+ * has not been loaded yet — the caller should prepend BUILTIN_PRICE_RANGE_VALUES.
+ * O(1) — never hits the database.
+ */
+export function getCachedPriceRangeQuickValues(): string[] {
+  return _priceRangeCache ?? [...DEFAULT_PRICE_RANGE_VALUES];
+}
+
+const PRICE_RANGE_LS_KEY = 'price_range_quick_values';
+
+function loadPriceRangeFromLS(): string[] {
+  try {
+    const raw = localStorage.getItem(PRICE_RANGE_LS_KEY);
+    if (!raw) return [...DEFAULT_PRICE_RANGE_VALUES];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? normalizePriceRangeQuickValues(parsed.filter((v): v is string => typeof v === 'string'))
+      : [...DEFAULT_PRICE_RANGE_VALUES];
+  } catch { return [...DEFAULT_PRICE_RANGE_VALUES]; }
+}
+
+/**
+ * Update the in-memory cache directly (used by the admin save fallback).
+ * O(1) — never hits the database.
+ */
+export function setCachedPriceRangeQuickValues(values: string[]): void {
+  _priceRangeCache = normalizePriceRangeQuickValues(values);
 }
 
 /**
