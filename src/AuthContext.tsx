@@ -46,21 +46,34 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-// ─── Transport-error detection ───────────────────────────────────────────────
-// The PostgREST client (postgrest-js) catches fetch failures and returns them
-// as { status: 0, error: { message: "FetchError: ..." } }. A real HTTP response
-// always has status >= 200. status === 0 is the structured signal that no
-// response was received — DNS failure, connection refused, request blocked, etc.
+// ─── Response classification ─────────────────────────────────────────────────
+// The PostgREST client (postgrest-js) returns a flat object:
+//
+//   { data, error, count, status, statusText }
+//
+// On a transport failure (fetch never reaches the server — DNS failure,
+// connection refused, request blocked, etc.) the catch handler in
+// PostgrestBuilder.then() returns:
+//
+//   { data: null, error: { message, details, hint, code }, status: 0, ... }
+//
+// The `status: 0` is on the TOP-LEVEL response, NOT on `error`. The error
+// object has no `status` property. This is why the previous implementation
+// failed: it passed only `error` to the classifier and checked `error.status`,
+// which was always `undefined`.
+//
 // We do NOT rely on navigator.onLine because the Supabase domain can be
 // unreachable while general internet is available.
-function isTransportError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const e = error as Record<string, unknown>;
-  const status = e.status;
-  if (status === 0) return true;
-  // Also check the message for the FetchError prefix the library uses.
-  const msg = typeof e.message === 'string' ? e.message : '';
-  return msg.startsWith('FetchError');
+type ErrorClass = 'transient' | 'authoritative' | 'none';
+
+function classifyResponseError(status: number, error: unknown): ErrorClass {
+  if (!error) return 'none';
+  // status === 0: no HTTP response received (transport failure).
+  if (status === 0) return 'transient';
+  // 5xx: server is broken/overloaded — not an authoritative auth rejection.
+  if (status >= 500) return 'transient';
+  // 401/403/404 etc.: server responded and authoritatively rejected the request.
+  return 'authoritative';
 }
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
@@ -72,7 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading,  setLoading]  = useState(true);
 
   // Mirror of salesRep readable inside loadRepProfile without re-creating the
-  // onAuthStateChange subscription. Used to decide whether a transport failure
+  // onAuthStateChange subscription. Used to decide whether a transient failure
   // should preserve the existing in-memory profile.
   const salesRepRef = useRef<SalesRep | null>(null);
   const setSalesRepSafe = useCallback((rep: SalesRep | null) => {
@@ -89,7 +102,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // onAuthStateChange fires immediately with the current session state,
     // which handles both "already logged in" and "not logged in" cases.
     // We do NOT call getSession() separately to avoid the double-load race.
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
+      console.log('[AuthContext] auth event:', event, 'session:', !!s, 'salesRep:', !!salesRepRef.current);
+
       setSession(s);
       setAuthUser(s?.user ?? null);
 
@@ -100,7 +115,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await loadRepProfile(s);
         })();
       } else {
-        // Signed out or no session
+        // No session — could be INITIAL_SESSION (not logged in) or SIGNED_OUT.
+        // Per the installed auth-js library, a network failure during token
+        // refresh does NOT emit SIGNED_OUT — it emits no event at all and
+        // leaves the session in storage. So reaching this branch means either
+        // a genuine sign-out or the app started with no session.
         setSalesRepSafe(null);
         setLoading(false);
         // Clear stale legacy token if present
@@ -123,31 +142,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       // Link auth_user_id if not yet done (idempotent — safe to call every time)
-      // A transport failure here is non-fatal — the profile query below is the
-      // authoritative check. If link fails due to network, skip to the query.
-      const { error: linkError } = await supabase.rpc('link_auth_user_to_rep');
-      if (linkError && isTransportError(linkError)) {
-        console.warn('[AuthContext] link_auth_user_to_rep transport failure — continuing to profile query');
+      // A failure here is non-fatal — the profile query below is the
+      // authoritative check. We continue regardless of the error type.
+      const linkResult = await supabase.rpc('link_auth_user_to_rep');
+      if (linkResult.error) {
+        const linkClass = classifyResponseError(linkResult.status, linkResult.error);
+        console.warn('[AuthContext] link_auth_user_to_rep failed', {
+          status: linkResult.status,
+          class: linkClass,
+          code: (linkResult.error as unknown as Record<string, unknown>)?.code ?? null,
+        });
       }
 
-      const { data, error } = await supabase
+      const profileResult = await supabase
         .from('my_rep_profile')
         .select('id, rep_code, name, role, email, phone, auth_user_id, login_enabled, is_active, default_event_id, default_capture_profile')
         .maybeSingle();
 
+      const { data, error, status } = profileResult;
+      const errorClass = classifyResponseError(status, error);
+
       if (error) {
-        if (isTransportError(error)) {
-          // Transient network/backend failure — Supabase unreachable.
+        if (errorClass === 'transient') {
+          // Transient network/backend failure — Supabase unreachable or 5xx.
           // Do NOT sign out or clear an already-validated profile.
           if (salesRepRef.current) {
-            console.warn('[AuthContext] Profile revalidation failed (transport) — preserving existing salesRep');
+            console.warn('[AuthContext] Profile revalidation failed (transient) — preserving existing salesRep', {
+              status,
+              code: (error as unknown as Record<string, unknown>)?.code ?? null,
+            });
           } else {
-            console.warn('[AuthContext] Profile load failed (transport) — no existing salesRep, staying unauthenticated');
+            console.warn('[AuthContext] Profile load failed (transient) — no existing salesRep, staying unauthenticated', {
+              status,
+              code: (error as unknown as Record<string, unknown>)?.code ?? null,
+            });
           }
           return;
         }
         // Authoritative server error (e.g. 401, 403) — session is genuinely invalid.
-        console.error('[AuthContext] loadRepProfile query rejected by server', error);
+        console.error('[AuthContext] loadRepProfile query rejected by server', {
+          status,
+          code: (error as unknown as Record<string, unknown>)?.code ?? null,
+        });
+        console.log('[AuthContext] signOut reason: profile_http_' + status);
         await supabase.auth.signOut();
         setSalesRepSafe(null);
         return;
@@ -156,14 +193,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!data) {
         // Server confirmed: valid auth user but no matching sales_rep row.
         console.warn('[AuthContext] No sales_rep row for auth user', s.user.email);
+        console.log('[AuthContext] signOut reason: profile_missing');
         await supabase.auth.signOut();
         setSalesRepSafe(null);
         return;
       }
 
-      if (!data.login_enabled || !data.is_active) {
-        // Server confirmed: representative is disabled or inactive.
-        console.warn('[AuthContext] Rep account disabled/inactive', data.rep_code);
+      if (!data.login_enabled) {
+        // Server confirmed: representative login is disabled.
+        console.warn('[AuthContext] Rep account login disabled', data.rep_code);
+        console.log('[AuthContext] signOut reason: profile_disabled');
+        await supabase.auth.signOut();
+        setSalesRepSafe(null);
+        return;
+      }
+
+      if (!data.is_active) {
+        // Server confirmed: representative is inactive.
+        console.warn('[AuthContext] Rep account inactive', data.rep_code);
+        console.log('[AuthContext] signOut reason: profile_inactive');
         await supabase.auth.signOut();
         setSalesRepSafe(null);
         return;
@@ -186,9 +234,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // A thrown error from the Supabase client itself is a transport failure.
       // Preserve the existing profile if one exists; do not sign out.
       if (salesRepRef.current) {
-        console.warn('[AuthContext] loadRepProfile threw (transport) — preserving existing salesRep', err);
+        console.warn('[AuthContext] loadRepProfile threw (transient) — preserving existing salesRep', err);
       } else {
-        console.warn('[AuthContext] loadRepProfile threw (transport) — no existing salesRep, staying unauthenticated', err);
+        console.warn('[AuthContext] loadRepProfile threw (transient) — no existing salesRep, staying unauthenticated', err);
       }
     } finally {
       profileLoadingRef.current = false;
@@ -256,6 +304,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Clears Supabase session and local state.
   // Does NOT touch IndexedDB — offline drafts are preserved.
   async function logout(): Promise<void> {
+    console.log('[AuthContext] signOut reason: explicit_user_logout');
     await supabase.auth.signOut();
     // onAuthStateChange sets everything to null via the subscriber above.
     // Also clear immediately in case signOut's network call fails (offline logout).
