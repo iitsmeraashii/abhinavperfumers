@@ -138,6 +138,12 @@ export const APPLICATION_OPTIONS = [
 
 export type ApplicationOption = typeof APPLICATION_OPTIONS[number];
 
+/**
+ * Sentinel chip value that signals the user selected "Other" and wants
+ * to type a custom application. Never persisted as a real application.
+ */
+export const APPLICATION_OTHER = '__other__';
+
 export interface DraftData {
   // Section 1 — priority contact
   clientName?:        string;
@@ -154,7 +160,7 @@ export interface DraftData {
   // Section 3 — additional details
   leadType?:          LeadType;
   previousRepCode?:   string;
-  application?:       ApplicationOption[];
+  application?:       string[];
   priceRange?:        string;
   quickKeywords?:     string[];
   targetMarket?:      string[];

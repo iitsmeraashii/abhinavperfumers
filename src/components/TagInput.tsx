@@ -5,6 +5,8 @@ interface TagInputProps {
   value: string[];
   onChange: (tags: string[]) => void;
   placeholder?: string;
+  forbiddenValues?: string[];
+  onForbidden?: () => void;
 }
 
 /**
@@ -16,13 +18,18 @@ interface TagInputProps {
  * Deduplication is case-insensitive. Empty/whitespace values are ignored.
  * Backspace on empty input removes the last tag.
  */
-export function TagInput({ value, onChange, placeholder = 'Add…' }: TagInputProps) {
+export function TagInput({ value, onChange, placeholder = 'Add…', forbiddenValues = [], onForbidden }: TagInputProps) {
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   function commit(raw: string) {
     const trimmed = raw.trim();
     if (!trimmed) { setInput(''); return; }
+    if (forbiddenValues.some(v => v.toLowerCase() === trimmed.toLowerCase())) {
+      onForbidden?.();
+      setInput('');
+      return;
+    }
     if (value.some(t => t.toLowerCase() === trimmed.toLowerCase())) { setInput(''); return; }
     onChange([...value, trimmed]);
     setInput('');
