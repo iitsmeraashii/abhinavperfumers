@@ -1,5 +1,7 @@
 # Capture Domain Architecture Review
 
+> **Historical snapshot — not current implementation reference.** This assessment was written on 2026-07-03 as a pre-Processing Engine design review. Several items it identifies as gaps or future work have since been implemented: the shared `captureAuth.ts` module (R1) now exists, the ALPE processing pipeline and scheduler are implemented, and `completed_leads` status transitions are now coordinated by the ALPE scheduler. Treat the findings below as a point-in-time analysis, not a description of the current codebase. For current implementation, see `docs/CAPTURE_ALPE_ARCHITECTURE.md`.
+
 > **Type:** Architecture assessment — read-only analysis
 > **Date:** 2026-07-03
 > **Scope:** CaptureProfile, CaptureSession (useCaptureSession), CaptureEvidenceManager, PromotionService
@@ -227,9 +229,11 @@ async function executePromotion(options): Promise<PromoteSessionResult>
 
 ### 2.1 Duplicated `getAuthIdentity`
 
-Both `captureBackendSync.ts` (line 50) and `capturePromotionService.ts` (line 37) contain identical `getAuthIdentity()` implementations. They both call `supabase.auth.getUser()` and then `supabase.from('my_rep_profile').select('rep_code').maybeSingle()`. They return the same `AuthIdentity` shape.
+**Resolved.** Both `captureBackendSync.ts` and `capturePromotionService.ts` previously contained identical `getAuthIdentity()` implementations. This has been fixed: a shared module `src/capture/captureAuth.ts` now exports a single `getAuthIdentity(): Promise<AuthIdentity | null>`, and both modules import from it. The original analysis below is preserved for historical context.
 
-This is a direct duplication. Any change to the auth lookup pattern (e.g. switching to a different profile view) must be applied in two places. The fix is a shared private module — `captureAuth.ts` — exporting a single `getAuthIdentity()`. This is the smallest pre-Engine cleanup that removes a concrete drift risk.
+~~Both `captureBackendSync.ts` (line 50) and `capturePromotionService.ts` (line 37) contain identical `getAuthIdentity()` implementations. They both call `supabase.auth.getUser()` and then `supabase.from('my_rep_profile').select('rep_code').maybeSingle()`. They return the same `AuthIdentity` shape.~~
+
+~~This is a direct duplication. Any change to the auth lookup pattern (e.g. switching to a different profile view) must be applied in two places. The fix is a shared private module — `captureAuth.ts` — exporting a single `getAuthIdentity()`. This is the smallest pre-Engine cleanup that removes a concrete drift risk.~~
 
 ---
 
@@ -312,13 +316,11 @@ These are listed in dependency order — each enables the next.
 
 ---
 
-#### R1 — Extract shared `getAuthIdentity` (1 file, ~15 lines)
+#### R1 — Extract shared `getAuthIdentity` (1 file, ~15 lines) — **DONE**
 
-**Current state:** Duplicated in `captureBackendSync.ts` and `capturePromotionService.ts`.
+**Current state:** ~~Duplicated in `captureBackendSync.ts` and `capturePromotionService.ts`.~~
 
-**Required change:** Create `src/capture/captureAuth.ts` exporting a single `getAuthIdentity(): Promise<AuthIdentity | null>`. Both modules import from it.
-
-**Why this is needed first:** The Processing Engine will also need auth identity. A third duplicate would make the drift problem permanent.
+**Completed:** `src/capture/captureAuth.ts` now exists and exports a single `getAuthIdentity(): Promise<AuthIdentity | null>`. Both `captureBackendSync.ts` and `capturePromotionService.ts` import from it.
 
 ---
 

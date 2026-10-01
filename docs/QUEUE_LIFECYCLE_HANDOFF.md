@@ -32,13 +32,13 @@ When the rep presses "Save & Next", the capture session hook (`useCaptureSession
 
 ## 2. IndexedDB Stores
 
-**File:** `src/capture/db.ts` (version 3) and `src/capture/completedLeadsStorage.ts` (version 5)
+**File:** `src/capture/db.ts` (version 8)
 
 Three IndexedDB stores participate in the Queue:
 
 | Store | Key | Written by | Read by |
 |---|---|---|---|
-| `drafts` | `active_capture_draft` (single) or `id` (multi) | `captureDraftStorage.ts` — autosave every 700ms | `leadQueueStorage.ts` |
+| `drafts` | `active_capture_draft` (single) or `id` (multi) | `captureDraftStorage.ts` — autosave every 600ms | `leadQueueStorage.ts` |
 | `completed_leads` | `id` (= sessionId UUID) | `completedLeadsStorage.ts` — `saveCompletedLead()` | `leadQueueStorage.ts` |
 | `pending_ops` | `id` (`op_<timestamp>_<rand>`) | `captureOfflineQueue.ts` — `enqueueOp()` | `captureOfflineQueue.ts` — `flushQueue()` |
 
@@ -83,7 +83,7 @@ Removes the record and emits `notify()`.
 ### Enqueue
 When `navigator.onLine === false`, sync calls from `captureBackendSync.ts` are redirected to `enqueueOp()` instead of being dropped. Each op stores `{ id, type, sessionId, createdAt, retries, payload }`.
 
-Op types: `upsert_session`, `upsert_asset`, `upsert_ocr_extraction`, `upsert_qr_extraction`, `upsert_vision_extraction`, `update_session_fields`, `promote_session`, `upload_voice_note`, `enqueue_processing_job`.
+Op types (11): `upsert_session`, `upsert_asset`, `upsert_ocr_extraction`, `upsert_qr_extraction`, `upsert_vision_extraction`, `update_session_fields`, `promote_session`, `upload_voice_note`, `upload_notes_image`, `upload_business_card`, `enqueue_processing_job`.
 
 ### Flush — `flushQueue()`
 Called by `useOnlineStatus` hook's `onReconnect` callback when connectivity returns.
@@ -107,9 +107,10 @@ After `flushQueue()` completes, `CaptureLeadPage` calls `notifyAlpeReconnect()` 
 Inserts a row: `{ id: jobId, capture_session_id, user_id, event_id, state: 'QUEUED', priority, processing_version, enqueued_at, scheduled_at, ... }`.
 
 ### Claim — `claimNextJob(userId)`
-1. Selects highest-priority `QUEUED` job for the user, ordered by `priority DESC, enqueued_at ASC`.
-2. Atomic transition `QUEUED → PROCESSING` via optimistic lock (`.eq('state', 'QUEUED')`).
-3. Returns the claimed `QueueEntry` or null.
+1. Fetches `QUEUED` **and** `RETRYING` jobs for the user, ordered by `priority DESC, enqueued_at ASC`.
+2. Filters out exhausted `RETRYING` jobs (`retry_count >= MAX_RETRY_COUNT`, where `MAX_RETRY_COUNT = 3`).
+3. Atomic transition `QUEUED|RETRYING → PROCESSING` via optimistic lock (`.in('state', ['QUEUED', 'RETRYING'])`).
+4. Returns the claimed `QueueEntry` or null.
 
 ### State Machine
 ```
@@ -124,7 +125,7 @@ QUEUED → PROCESSING → COMPLETED
 - `COMPLETED`, `FAILED`, `INVALID`, `REQUIRES_REVIEW` → sets `processing_completed_at`.
 - `markRetrying()` → calls `increment_retry_count` RPC, falls back to manual update.
 - `markRecovering()` → sets state to `RECOVERING`, stamps `processing_started_at`.
-- `requeueJob()` → resets state to `QUEUED`, clears `processing_started_at`.
+- `requeueJob()` → resets state to `QUEUED`, clears `processing_started_at`. Does **not** increment `retry_count` (that is done by `markRetrying` via the `increment_retry_count` RPC).
 
 ### Recovery — `recoveryService.ts`
 On scheduler start, `runRecovery(userId)`:
@@ -348,7 +349,7 @@ Fetches from `lead_entries` by ID. Displays:
 - But the detail page dropdown has no option for it, no review banner, no "Mark as Reviewed" button, and no display of `review_metadata` (review reasons, confidence violations, contact violations).
 
 ### Gap 2: `completed_leads` status `failed` is never set
-`buildCompletedLead()` sets `local_only` or `needs_review`. `jobProducer.ts` sets `pending_sync`. `_updateCompletedLead()` sets `synced`. No code path sets `failed`. The Queue UI has a "failed" filter tab and Retry button, but no completed lead ever reaches `failed` status through the current flow.
+`buildCompletedLead()` sets `local_only` or `needs_review`. `jobProducer.ts` sets `pending_sync`. `_updateCompletedLead()` sets `synced`. The scheduler's tick **does** set `failed` on `completed_leads` when the decision is `RETRYING` or `FAILED` (via `updateCompletedLeadStatus` with `retries`, `lastError`, `failedStage`, `isExhausted`). However, no code path sets the `failed` status via `buildCompletedLead()` — it is only reached through scheduler-driven failure updates.
 
 ### Gap 3: `completed_leads` status `syncing` is never set
 Declared in the type but no code path assigns it.
@@ -357,7 +358,7 @@ Declared in the type but no code path assigns it.
 The Queue UI reads only from IndexedDB (`completed_leads`). It does not query `processing_queue` for the current backend state. A job in `PROCESSING` or `RETRYING` state on the backend still shows as `pending_sync` locally until promotion succeeds (→ `synced`) or the user manually retries.
 
 ### Gap 5: No feedback path from ALPE completion to `completed_leads`
-When the scheduler's worker successfully promotes a lead (`outcome: 'completed'`), `executePromotion()` updates `completed_leads` to `synced`. But when the worker returns `requires_review`, the `processing_queue` row transitions to `REQUIRES_REVIEW` — the local `completed_leads` record remains `pending_sync`. There is no callback or polling mechanism to update the local record to reflect the review-required state.
+When the scheduler's worker successfully promotes a lead (`outcome: 'completed'`), `executePromotion()` updates `completed_leads` to `synced`. When the worker returns `requires_review`, the scheduler's tick calls `updateCompletedLeadStatus` to mark the local record `synced` as well (the `COMPLETED`/`REQUIRES_REVIEW` branch in the tick). However, the local record does not distinguish a `REQUIRES_REVIEW` outcome from a `COMPLETED` one — both are marked `synced`. Review metadata (reasons, violations) is persisted to `capture_sessions.review_metadata` but is not surfaced in the `completed_leads` record or the Queue UI.
 
 ### Gap 6: `needs_review` status in completed_leads is a dead end
 `buildCompletedLead()` sets `needs_review` when there is no clientName and no company. But nothing in the pipeline or UI transitions this status — there is no "edit and resubmit" flow from the Queue for `needs_review` items.
