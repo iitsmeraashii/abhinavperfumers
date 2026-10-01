@@ -2,6 +2,8 @@
 
 > **Architecture Specification**
 
+> **Historical snapshot — not current implementation reference.** This is the original architectural design specification for ALPE. The implementation under `src/alpe/` is now the authority. The spec describes **six** canonical processing states (QUEUED, PROCESSING, COMPLETED, REQUIRES_REVIEW, INVALID, FAILED); the implementation has **eight** (adding RETRYING and RECOVERING). The spec does not describe the `queued → RETRYING` decision engine mapping, the scheduler's reconciliation and cleanup passes, or the `RETRYING`/`RECOVERING` recovery states. The `INVALID` state is defined in the spec and in the `ProcessingState` type but is **never emitted** by the current decision engine. For the current implementation, see `docs/CAPTURE_ALPE_ARCHITECTURE.md`.
+
 | Property | Value |
 |----------|--------|
 | Version | 1.0 (Draft) |
@@ -1600,6 +1602,8 @@ Unlike the Worker, the Pipeline defines business execution rather than execution
 
 ## Pipeline Stages
 
+The following nine stages are the original design-time sequence for this specification. They are retained for historical context and are not a literal description of the current runtime pipeline.
+
 1. Load Processing Context
 2. Verify Assets
 3. Upload Pending Assets
@@ -1610,7 +1614,7 @@ Unlike the Worker, the Pipeline defines business execution rather than execution
 8. Persist Results
 9. Complete Processing
 
-Every stage enriches the Processing Context.
+The current implementation instead executes evidence, evidence resolution, extraction, extraction-metadata persistence, validation, review, and promotion stages in `src/alpe/pipeline.ts`. Every stage enriches the Processing Context.
 
 No stage directly communicates with another stage.
 
@@ -2445,6 +2449,8 @@ Terminal states require no additional automatic processing unless explicitly res
 ---
 
 # 7.4 Canonical Processing States
+
+> **Implementation note:** The implementation in `src/alpe/types.ts` defines **eight** processing states, not six. In addition to the six below, the implementation adds `RETRYING` (a job that failed and is eligible for retry) and `RECOVERING` (a job being restored after an interruption). See `ProcessingState` in `src/alpe/types.ts`. Additionally, `INVALID` is defined but **never emitted** by the current decision engine — no code path transitions a job to `INVALID`. The `queued` worker outcome maps to `RETRYING` (not `COMPLETED`), and `failed` maps to `RETRYING` (retryable) or `FAILED` (exhausted/non-retryable).
 
 The ALPE state machine consists of six canonical processing states.
 
