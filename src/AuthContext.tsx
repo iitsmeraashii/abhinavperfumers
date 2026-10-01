@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, Re
 import type { Session, User as SupabaseUser } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 import type { CaptureProfile } from './capture/captureProfile';
+import { saveCachedAuthProfile, loadCachedAuthProfile, clearCachedAuthProfile } from './capture/authProfileStorage';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -131,6 +132,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Cache identity guard ──────────────────────────────────────────────────
+  // When a genuine Supabase session arrives, ensure any cached profile
+  // belonging to a DIFFERENT authUserId is invalidated. This prevents
+  // a future offline restoration from restoring Rep A's profile for Rep B.
+  // Returns true if the session user matches the cache (or no cache exists).
+  async function ensureCacheMatchesUser(authUserId: string): Promise<void> {
+    const cached = await loadCachedAuthProfile();
+    if (cached && cached.authUserId !== authUserId) {
+      console.warn('[AuthContext] cached profile belongs to different user — clearing', {
+        cachedAuthUserId: cached.authUserId,
+        newAuthUserId: authUserId,
+      });
+      await clearCachedAuthProfile();
+    }
+  }
+
   // ── Load rep profile ───────────────────────────────────────────────────────
   // Reads the authenticated rep's row via my_rep_profile view (RLS-filtered
   // to auth.uid()). Calls link_auth_user_to_rep() first in case this is a
@@ -139,6 +156,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Deduplicate concurrent calls (mount fires getSession + onAuthStateChange)
     if (profileLoadingRef.current) return;
     profileLoadingRef.current = true;
+
+    // Invalidate any cached profile belonging to a different auth user before
+    // proceeding. This runs before any network profile query so that even if
+    // the profile query fails transiently, a stale cross-user cache is gone.
+    await ensureCacheMatchesUser(s.user.id);
 
     try {
       // Link auth_user_id if not yet done (idempotent — safe to call every time)
@@ -217,7 +239,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      setSalesRepSafe({
+      const validatedRep: SalesRep = {
         id:                      data.id,
         rep_code:                data.rep_code,
         name:                    data.name,
@@ -229,7 +251,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         is_active:               data.is_active,
         default_event_id:        data.default_event_id ?? null,
         default_capture_profile: (data.default_capture_profile as CaptureProfile) ?? 'CRM',
-      });
+      };
+      setSalesRepSafe(validatedRep);
+
+      // Persist the server-validated profile to IndexedDB for future offline
+      // restoration. Fire-and-forget: a cache-write failure must not break the
+      // online session. This runs ONLY after a confirmed authoritative success
+      // — never on transient failures, missing profiles, or disabled accounts.
+      saveCachedAuthProfile(validatedRep)
+        .then(() => console.log('[AuthContext] validated auth profile cached', { repCode: validatedRep.rep_code, validatedAt: Date.now() }))
+        .catch((cacheErr) => console.warn('[AuthContext] auth profile cache write failed (non-fatal)', cacheErr));
     } catch (err) {
       // A thrown error from the Supabase client itself is a transport failure.
       // Preserve the existing profile if one exists; do not sign out.
@@ -302,13 +333,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // ── Logout ─────────────────────────────────────────────────────────────────
   // Clears Supabase session and local state.
-  // Does NOT touch IndexedDB — offline drafts are preserved.
+  // Offline drafts in IndexedDB are preserved, but the auth_profile cache is
+  // invalidated so a future offline reload cannot restore the signed-out user.
   async function logout(): Promise<void> {
     console.log('[AuthContext] signOut reason: explicit_user_logout');
-    await supabase.auth.signOut();
-    // onAuthStateChange sets everything to null via the subscriber above.
-    // Also clear immediately in case signOut's network call fails (offline logout).
+    // 1. Clear in-memory app access immediately.
     setSalesRepSafe(null);
+    // 2. Clear the persisted auth profile locally — this MUST NOT depend on
+    //    network availability. Even if Supabase is unreachable, offline
+    //    eligibility is revoked.
+    clearCachedAuthProfile()
+      .catch((err) => console.warn('[AuthContext] auth profile cache clear failed (non-fatal)', err));
+    // 3. Attempt Supabase signOut. If this fails (offline), local state is
+    //    already cleared above.
+    await supabase.auth.signOut();
   }
 
   // ── Legacy user shape (backward-compat for all existing consumers) ─────────
