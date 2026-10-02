@@ -98,6 +98,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // getSession() and onAuthStateChange fire on mount with the same session.
   const profileLoadingRef = useRef(false);
 
+  // Generation guard: incremented on explicit logout. loadRepProfile captures
+  // the value at start; if it changes mid-flight, the invocation is stale and
+  // must perform no side effects. This prevents an in-flight profile load from
+  // restoring salesRep or rewriting auth_profile after the user logs out.
+  const authGenerationRef = useRef(0);
+
   // ── Bootstrap ──────────────────────────────────────────────────────────────
   useEffect(() => {
     // onAuthStateChange fires immediately with the current session state,
@@ -157,16 +163,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (profileLoadingRef.current) return;
     profileLoadingRef.current = true;
 
+    // Capture the generation at start. If logout() increments it while this
+    // invocation is awaiting an async operation, the invocation is stale.
+    const generation = authGenerationRef.current;
+
     // Invalidate any cached profile belonging to a different auth user before
     // proceeding. This runs before any network profile query so that even if
     // the profile query fails transiently, a stale cross-user cache is gone.
     await ensureCacheMatchesUser(s.user.id);
+    if (generation !== authGenerationRef.current) return;
 
     try {
       // Link auth_user_id if not yet done (idempotent — safe to call every time)
       // A failure here is non-fatal — the profile query below is the
       // authoritative check. We continue regardless of the error type.
       const linkResult = await supabase.rpc('link_auth_user_to_rep');
+      if (generation !== authGenerationRef.current) return;
       if (linkResult.error) {
         const linkClass = classifyResponseError(linkResult.status, linkResult.error);
         console.warn('[AuthContext] link_auth_user_to_rep failed', {
@@ -180,6 +192,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .from('my_rep_profile')
         .select('id, rep_code, name, role, email, phone, auth_user_id, login_enabled, is_active, default_event_id, default_capture_profile')
         .maybeSingle();
+
+      if (generation !== authGenerationRef.current) return;
 
       const { data, error, status } = profileResult;
       const errorClass = classifyResponseError(status, error);
@@ -238,6 +252,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSalesRepSafe(null);
         return;
       }
+
+      if (generation !== authGenerationRef.current) return;
 
       const validatedRep: SalesRep = {
         id:                      data.id,
@@ -341,6 +357,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // server being reachable. The remote signOut is best-effort.
   async function logout(): Promise<void> {
     console.log('[AuthContext] signOut reason: explicit_user_logout');
+    // 0. Invalidate any in-flight loadRepProfile so it cannot restore salesRep
+    //    or rewrite auth_profile after logout completes.
+    authGenerationRef.current++;
     // 1. Clear in-memory app access immediately.
     setSalesRepSafe(null);
     // 2. Await IndexedDB auth profile removal — not fire-and-forget.
