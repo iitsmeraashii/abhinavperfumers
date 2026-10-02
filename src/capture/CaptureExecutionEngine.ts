@@ -55,6 +55,7 @@ import type {
   UpdateSessionExtractionMetaPayload,
 } from './captureBackendSync';
 import { enqueueOp } from './captureOfflineQueue';
+import { isCloudSyncAllowed } from '../authModeState';
 import type { CompletedLeadStatus } from './completedLeadsStorage';
 import type { DraftData } from './types';
 import {
@@ -211,7 +212,7 @@ class CaptureExecutionEngine {
   private _shouldSync(queue: QueuePolicy, isOnline: boolean): boolean {
     if (queue === 'ALWAYS_QUEUE') return false;
     if (queue === 'OFFLINE_ONLY') return false;
-    return isOnline; // ONLINE_FIRST
+    return isOnline && isCloudSyncAllowed(); // ONLINE_FIRST
   }
 
   // ── Sync routing ─────────────────────────────────────────────────────────────
