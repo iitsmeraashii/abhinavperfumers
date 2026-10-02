@@ -21,6 +21,7 @@ import type { RecoveryReport } from './recoveryService';
 import { processJob } from './worker';
 import { decide } from './decisionEngine';
 import { alpeLog, alpeError, updateAlpeRuntime } from './diagnostics';
+import { isCloudSyncAllowed } from '../authModeState';
 
 const POLL_INTERVAL_MS = 5000;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -66,6 +67,14 @@ class AlpeScheduler {
   /** Start the scheduler. Idempotent — no-op if already running. */
   async start(userId: string): Promise<void> {
     if (this.status === 'running' || this.status === 'starting') {
+      return;
+    }
+    // Do not start recovery or polling until AuthContext has completed
+    // authoritative profile validation. When authMode is offline-restored
+    // or unauthenticated, Supabase calls would fail or use stale creds.
+    // The React hook re-invokes start() when authMode transitions to online.
+    if (!isCloudSyncAllowed()) {
+      alpeLog('Scheduler start deferred — cloud sync not allowed', { userId });
       return;
     }
 
@@ -160,6 +169,10 @@ class AlpeScheduler {
     // Skip polling when offline — Supabase queries would fail and waste cycles.
     // The scheduler resumes via notifyReconnect() when connectivity returns.
     if (!this.isOnline) return;
+    // Authoritative auth gate: even if the browser is online, cloud work
+    // must not run until AuthContext has validated the profile. Logout or
+    // offline-restoration sets this to false synchronously.
+    if (!isCloudSyncAllowed()) return;
 
     this.inFlightTick = true;
     this.pollCount++;

@@ -1,7 +1,19 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from 'react';
+import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import type { Session, User as SupabaseUser } from '@supabase/supabase-js';
-import { supabase } from './supabaseClient';
+import { supabase, clearLocalSupabaseAuthSession } from './supabaseClient';
 import type { CaptureProfile } from './capture/captureProfile';
+import {
+  saveCachedAuthProfile,
+  loadCachedAuthProfile,
+  clearCachedAuthProfile,
+  checkOfflineEligibility,
+  cachedProfileToSalesRep,
+} from './capture/authProfileStorage';
+import {
+  setAuthModeState as publishAuthMode,
+} from './authModeState';
+import type { AuthMode } from './authModeState';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +42,8 @@ export interface AuthUser {
   email?:      string;
 }
 
+export type { AuthMode };
+
 interface AuthContextType {
   // Legacy field — identical shape to old User, safe for all existing consumers
   user:     AuthUser | null;
@@ -37,6 +51,7 @@ interface AuthContextType {
   salesRep: SalesRep | null;
   authUser: SupabaseUser | null;
   session:  Session | null;
+  authMode: AuthMode;
   loading:  boolean;
   login:    (rep_code: string, password: string) => Promise<string | null>;
   logout:   () => Promise<void>;
@@ -46,17 +61,180 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
+// ─── Response classification ─────────────────────────────────────────────────
+// The PostgREST client (postgrest-js) returns a flat object:
+//
+//   { data, error, count, status, statusText }
+//
+// On a transport failure (fetch never reaches the server — DNS failure,
+// connection refused, request blocked, etc.) the catch handler in
+// PostgrestBuilder.then() returns:
+//
+//   { data: null, error: { message, details, hint, code }, status: 0, ... }
+//
+// The `status: 0` is on the TOP-LEVEL response, NOT on `error`. The error
+// object has no `status` property. This is why the previous implementation
+// failed: it passed only `error` to the classifier and checked `error.status`,
+// which was always `undefined`.
+//
+// We do NOT rely on navigator.onLine because the Supabase domain can be
+// unreachable while general internet is available.
+type ErrorClass = 'transient' | 'authoritative' | 'none';
+
+function classifyResponseError(status: number, error: unknown): ErrorClass {
+  if (!error) return 'none';
+  // status === 0: no HTTP response received (transport failure).
+  if (status === 0) return 'transient';
+  // 5xx: server is broken/overloaded — not an authoritative auth rejection.
+  if (status >= 500) return 'transient';
+  // 401/403/404 etc.: server responded and authoritatively rejected the request.
+  return 'authoritative';
+}
+
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [salesRep, setSalesRep] = useState<SalesRep | null>(null);
   const [authUser, setAuthUser] = useState<SupabaseUser | null>(null);
   const [session,  setSession]  = useState<Session | null>(null);
+  const [authMode, setReactAuthMode] = useState<AuthMode>('unauthenticated');
   const [loading,  setLoading]  = useState(true);
+
+  // Single transition helper: publishes to the shared module FIRST (so
+  // non-React services immediately see the restrictive mode), then updates
+  // React state.
+  const transitionAuthMode = useCallback((next: AuthMode) => {
+    publishAuthMode(next);
+    setReactAuthMode(next);
+  }, []);
+
+  // Mirror of salesRep readable inside loadRepProfile without re-creating the
+  // onAuthStateChange subscription. Used to decide whether a transient failure
+  // should preserve the existing in-memory profile.
+  const salesRepRef = useRef<SalesRep | null>(null);
+  const setSalesRepSafe = useCallback((rep: SalesRep | null) => {
+    salesRepRef.current = rep;
+    setSalesRep(rep);
+    if (rep === null) transitionAuthMode('unauthenticated');
+  }, []);
 
   // Guard: prevents loadRepProfile from running concurrently when both
   // getSession() and onAuthStateChange fire on mount with the same session.
   const profileLoadingRef = useRef(false);
+
+  // Generation guard: incremented on explicit logout. loadRepProfile captures
+  // the value at start; if it changes mid-flight, the invocation is stale and
+  // must perform no side effects. This prevents an in-flight profile load from
+  // restoring salesRep or rewriting auth_profile after the user logs out.
+  const authGenerationRef = useRef(0);
+
+  // Track whether we have already attempted offline restoration for the current
+  // bootstrap. Prevents repeated restoration attempts during a single cold start
+  // when multiple auth events fire.
+  const offlineRestoreAttemptedRef = useRef(false);
+
+  // ── Offline restoration ──────────────────────────────────────────────────
+  // Attempts to restore app access from a previously server-validated cached
+  // profile. Called when:
+  //   (A) loadRepProfile hits a transient failure on a cold start with a real
+  //       Supabase session, OR
+  //   (B) INITIAL_SESSION is null but persisted Supabase identity evidence
+  //       suggests the user was previously authenticated.
+  //
+  // Returns true if access was restored, false otherwise.
+  async function tryOfflineRestore(generation: number): Promise<boolean> {
+    const cached = await loadCachedAuthProfile();
+    if (generation !== authGenerationRef.current) return false;
+
+    const result = checkOfflineEligibility(cached);
+    if (!result.eligible || !result.profile) {
+      console.warn('[AuthContext] offline profile rejected:', result.reason);
+      return false;
+    }
+
+    const restoredRep = cachedProfileToSalesRep(result.profile);
+    if (generation !== authGenerationRef.current) return false;
+
+    setSalesRepSafe(restoredRep);
+    transitionAuthMode('offline-restored');
+    console.log('[AuthContext] offline profile restored', {
+      repCode: restoredRep.rep_code,
+      validatedAt: result.profile.validatedAt,
+    });
+    // Do NOT update validatedAt. Do NOT rewrite auth_profile.
+    // Only successful server validation may refresh the 15-day window.
+    return true;
+  }
+
+  // ── Resolve null INITIAL_SESSION ──────────────────────────────────────────
+  // When onAuthStateChange fires INITIAL_SESSION with session=null, the cause
+  // could be: (1) genuinely unauthenticated, (2) transient network failure
+  // during token refresh, or (3) authoritative auth rejection.
+  //
+  // We call supabase.auth.getSession() to classify the cause. getSession()
+  // re-reads storage and attempts refresh if needed. Its error tells us whether
+  // the failure is retryable (network) or authoritative.
+  //
+  // This MUST run outside the synchronous onAuthStateChange callback to avoid
+  // auth-js lock contention.
+  async function resolveNullInitialSession(generation: number): Promise<void> {
+    try {
+      const { data, error } = await supabase.auth.getSession();
+
+      if (generation !== authGenerationRef.current) return;
+
+      // Case 1: getSession returned a real session — the INITIAL_SESSION null
+      // was stale or the session recovered between events. Run normal profile
+      // validation.
+      if (data.session?.user) {
+        console.log('[AuthContext] null INITIAL_SESSION resolved: real session found via getSession()');
+        await loadRepProfile(data.session);
+        return;
+      }
+
+      // Case 2: null session + retryable network error — transient failure.
+      if (error && isAuthRetryableFetchError(error)) {
+        console.warn('[AuthContext] null INITIAL_SESSION resolved: retryable auth error, attempting offline restore');
+        const restored = await tryOfflineRestore(generation);
+        if (generation !== authGenerationRef.current) return;
+        if (!restored) {
+          console.warn('[AuthContext] offline restore failed — staying unauthenticated');
+          setSalesRepSafe(null);
+          setLoading(false);
+          localStorage.removeItem('session_token');
+        }
+        return;
+      }
+
+      // Case 3: null session + no error — genuinely unauthenticated.
+      // Case 4: null session + non-retryable error — authoritative rejection.
+      if (error) {
+        console.warn('[AuthContext] null INITIAL_SESSION resolved: non-retryable auth error', {
+          name: error.name,
+          status: error.status,
+        });
+        // Authoritative auth failure — clear cached profile so it can't be used
+        // for future offline restoration.
+        try { await clearCachedAuthProfile(); } catch { /* best-effort */ }
+      } else {
+        console.log('[AuthContext] null INITIAL_SESSION resolved: no session, no error — unauthenticated');
+      }
+
+      setSalesRepSafe(null);
+      setLoading(false);
+      localStorage.removeItem('session_token');
+    } catch (err) {
+      // Unexpected thrown exception from getSession() (e.g. storage access
+      // denied, runtime error). Fail closed for this startup attempt — do
+      // NOT grant offline access, do NOT destroy the cache, do NOT update
+      // validatedAt. Just resolve to unauthenticated so the app does not
+      // hang on the loading spinner.
+      if (generation !== authGenerationRef.current) return;
+      console.warn('[AuthContext] null INITIAL_SESSION: getSession() threw unexpectedly — failing closed', err);
+      setSalesRepSafe(null);
+      setLoading(false);
+    }
+  }
 
   // ── Bootstrap ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -64,6 +242,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // which handles both "already logged in" and "not logged in" cases.
     // We do NOT call getSession() separately to avoid the double-load race.
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
+      console.log('[AuthContext] auth event:', event, 'session:', !!s, 'salesRep:', !!salesRepRef.current);
+
       setSession(s);
       setAuthUser(s?.user ?? null);
 
@@ -74,8 +254,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await loadRepProfile(s);
         })();
       } else {
-        // Signed out or no session
-        setSalesRep(null);
+        // No session in the event. Could be:
+        //  - INITIAL_SESSION with no stored session (genuinely unauthenticated)
+        //  - INITIAL_SESSION null because token refresh failed offline
+        //  - SIGNED_OUT from explicit logout or server-side revocation
+        //
+        // If salesRep already exists (warm session preserved), keep it.
+        if (salesRepRef.current) {
+          setLoading(false);
+          return;
+        }
+
+        // Case B: INITIAL_SESSION null — classify via getSession() before
+        // deciding whether offline restoration is warranted.
+        if (event === 'INITIAL_SESSION' && !offlineRestoreAttemptedRef.current) {
+          offlineRestoreAttemptedRef.current = true;
+          const generation = authGenerationRef.current;
+          (async () => {
+            await resolveNullInitialSession(generation);
+          })();
+          return;
+        }
+
+        // SIGNED_OUT or other null-session event — genuinely unauthenticated.
+        setSalesRepSafe(null);
         setLoading(false);
         // Clear stale legacy token if present
         localStorage.removeItem('session_token');
@@ -86,6 +288,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Cache identity guard ──────────────────────────────────────────────────
+  // When a genuine Supabase session arrives, ensure any cached profile
+  // belonging to a DIFFERENT authUserId is invalidated. This prevents
+  // a future offline restoration from restoring Rep A's profile for Rep B.
+  // Returns true if the session user matches the cache (or no cache exists).
+  async function ensureCacheMatchesUser(authUserId: string): Promise<void> {
+    const cached = await loadCachedAuthProfile();
+    if (cached && cached.authUserId !== authUserId) {
+      console.warn('[AuthContext] cached profile belongs to different user — clearing', {
+        cachedAuthUserId: cached.authUserId,
+        newAuthUserId: authUserId,
+      });
+      await clearCachedAuthProfile();
+    }
+  }
+
   // ── Load rep profile ───────────────────────────────────────────────────────
   // Reads the authenticated rep's row via my_rep_profile view (RLS-filtered
   // to auth.uid()). Calls link_auth_user_to_rep() first in case this is a
@@ -95,38 +313,110 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (profileLoadingRef.current) return;
     profileLoadingRef.current = true;
 
+    // Capture the generation at start. If logout() increments it while this
+    // invocation is awaiting an async operation, the invocation is stale.
+    const generation = authGenerationRef.current;
+
+    // Invalidate any cached profile belonging to a different auth user before
+    // proceeding. This runs before any network profile query so that even if
+    // the profile query fails transiently, a stale cross-user cache is gone.
+    await ensureCacheMatchesUser(s.user.id);
+    if (generation !== authGenerationRef.current) return;
+
     try {
       // Link auth_user_id if not yet done (idempotent — safe to call every time)
-      await supabase.rpc('link_auth_user_to_rep');
+      // A failure here is non-fatal — the profile query below is the
+      // authoritative check. We continue regardless of the error type.
+      const linkResult = await supabase.rpc('link_auth_user_to_rep');
+      if (generation !== authGenerationRef.current) return;
+      if (linkResult.error) {
+        const linkClass = classifyResponseError(linkResult.status, linkResult.error);
+        console.warn('[AuthContext] link_auth_user_to_rep failed', {
+          status: linkResult.status,
+          class: linkClass,
+          code: (linkResult.error as unknown as Record<string, unknown>)?.code ?? null,
+        });
+      }
 
-      const { data, error } = await supabase
+      const profileResult = await supabase
         .from('my_rep_profile')
         .select('id, rep_code, name, role, email, phone, auth_user_id, login_enabled, is_active, default_event_id, default_capture_profile')
         .maybeSingle();
 
+      if (generation !== authGenerationRef.current) return;
+
+      const { data, error, status } = profileResult;
+      const errorClass = classifyResponseError(status, error);
+
       if (error) {
-        console.error('[AuthContext] loadRepProfile query failed', error);
+        if (errorClass === 'transient') {
+          // Transient network/backend failure — Supabase unreachable or 5xx.
+          if (salesRepRef.current) {
+            // Warm session: preserve existing profile, do not sign out.
+            console.warn('[AuthContext] Profile revalidation failed (transient) — preserving existing salesRep', {
+              status,
+              code: (error as unknown as Record<string, unknown>)?.code ?? null,
+            });
+          } else {
+            // Case A: cold start with real Supabase session but profile server
+            // is unreachable. Try offline restoration from cached profile.
+            console.warn('[AuthContext] Profile load failed (transient) — attempting offline restore', {
+              status,
+              code: (error as unknown as Record<string, unknown>)?.code ?? null,
+            });
+            const restored = await tryOfflineRestore(generation);
+            if (generation !== authGenerationRef.current) return;
+            if (!restored) {
+              console.warn('[AuthContext] offline restore failed — staying unauthenticated');
+            }
+          }
+          return;
+        }
+        // Authoritative server error (e.g. 401, 403) — session is genuinely invalid.
+        console.error('[AuthContext] loadRepProfile query rejected by server', {
+          status,
+          code: (error as unknown as Record<string, unknown>)?.code ?? null,
+        });
+        console.log('[AuthContext] signOut reason: profile_http_' + status);
+        await clearCachedAuthProfile();
         await supabase.auth.signOut();
-        setSalesRep(null);
+        setSalesRepSafe(null);
         return;
       }
 
       if (!data) {
-        // Valid Supabase auth user but no matching sales_rep row — unauthorized
+        // Server confirmed: valid auth user but no matching sales_rep row.
         console.warn('[AuthContext] No sales_rep row for auth user', s.user.email);
+        console.log('[AuthContext] signOut reason: profile_missing');
+        await clearCachedAuthProfile();
         await supabase.auth.signOut();
-        setSalesRep(null);
+        setSalesRepSafe(null);
         return;
       }
 
-      if (!data.login_enabled || !data.is_active) {
-        console.warn('[AuthContext] Rep account disabled/inactive', data.rep_code);
+      if (!data.login_enabled) {
+        // Server confirmed: representative login is disabled.
+        console.warn('[AuthContext] Rep account login disabled', data.rep_code);
+        console.log('[AuthContext] signOut reason: profile_disabled');
+        await clearCachedAuthProfile();
         await supabase.auth.signOut();
-        setSalesRep(null);
+        setSalesRepSafe(null);
         return;
       }
 
-      setSalesRep({
+      if (!data.is_active) {
+        // Server confirmed: representative is inactive.
+        console.warn('[AuthContext] Rep account inactive', data.rep_code);
+        console.log('[AuthContext] signOut reason: profile_inactive');
+        await clearCachedAuthProfile();
+        await supabase.auth.signOut();
+        setSalesRepSafe(null);
+        return;
+      }
+
+      if (generation !== authGenerationRef.current) return;
+
+      const validatedRep: SalesRep = {
         id:                      data.id,
         rep_code:                data.rep_code,
         name:                    data.name,
@@ -138,10 +428,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         is_active:               data.is_active,
         default_event_id:        data.default_event_id ?? null,
         default_capture_profile: (data.default_capture_profile as CaptureProfile) ?? 'CRM',
-      });
+      };
+      setSalesRepSafe(validatedRep);
+      transitionAuthMode('online');
+
+      // Persist the server-validated profile to IndexedDB for future offline
+      // restoration. Fire-and-forget: a cache-write failure must not break the
+      // online session. This runs ONLY after a confirmed authoritative success
+      // — never on transient failures, missing profiles, or disabled accounts.
+      saveCachedAuthProfile(validatedRep)
+        .then(() => console.log('[AuthContext] validated auth profile cached', { repCode: validatedRep.rep_code, validatedAt: Date.now() }))
+        .catch((cacheErr) => console.warn('[AuthContext] auth profile cache write failed (non-fatal)', cacheErr));
     } catch (err) {
-      console.error('[AuthContext] loadRepProfile threw', err);
-      setSalesRep(null);
+      // A thrown error from the Supabase client itself is a transport failure.
+      if (salesRepRef.current) {
+        // Warm session: preserve existing profile.
+        console.warn('[AuthContext] loadRepProfile threw (transient) — preserving existing salesRep', err);
+      } else {
+        // Cold start: try offline restoration.
+        console.warn('[AuthContext] loadRepProfile threw (transient) — attempting offline restore', err);
+        const restored = await tryOfflineRestore(generation);
+        if (generation !== authGenerationRef.current) return;
+        if (!restored) {
+          console.warn('[AuthContext] offline restore failed — staying unauthenticated');
+        }
+      }
     } finally {
       profileLoadingRef.current = false;
       setLoading(false);
@@ -206,10 +517,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // ── Logout ─────────────────────────────────────────────────────────────────
   // Clears Supabase session and local state.
-  // Does NOT touch IndexedDB — offline drafts are preserved.
+  // Offline drafts in IndexedDB are preserved, but the auth_profile cache and
+  // the Supabase persisted session are invalidated so a future offline reload
+  // cannot restore the signed-out user.
+  //
+  // Local invalidation is DETERMINISTIC — it does not depend on the Supabase
+  // server being reachable. The remote signOut is best-effort.
   async function logout(): Promise<void> {
-    await supabase.auth.signOut();
-    // onAuthStateChange sets everything to null via the subscriber above
+    console.log('[AuthContext] signOut reason: explicit_user_logout');
+    // 0. Invalidate any in-flight loadRepProfile / offline restoration so they
+    //    cannot restore salesRep or rewrite auth_profile after logout completes.
+    authGenerationRef.current++;
+    // 1. Clear in-memory app access immediately.
+    setSalesRepSafe(null);
+    transitionAuthMode('unauthenticated');
+    // 2. Await IndexedDB auth profile removal — not fire-and-forget.
+    try {
+      await clearCachedAuthProfile();
+    } catch (err) {
+      console.warn('[AuthContext] auth profile cache clear failed (non-fatal)', err);
+    }
+    // 3. Attempt Supabase signOut (best-effort, may fail offline).
+    //    Use scope:'local' so it does not revoke sessions on other devices.
+    try {
+      await supabase.auth.signOut({ scope: 'local' });
+    } catch {
+      // Network failure — handled by deterministic local cleanup below.
+    }
+    // 4. GUARANTEE local Supabase session removal regardless of signOut result.
+    //    When Supabase is unreachable, signOut's network call fails before
+    //    _removeSession runs, leaving the session in localStorage. This
+    //    ensures it is gone.
+    clearLocalSupabaseAuthSession();
   }
 
   // ── Legacy user shape (backward-compat for all existing consumers) ─────────
@@ -227,11 +566,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // (e.g. Capture page's default profile init) see the new value immediately,
   // without requiring a logout/login cycle.
   const updateSalesRep = useCallback((patch: Partial<SalesRep>) => {
-    setSalesRep(prev => (prev ? { ...prev, ...patch } : prev));
+    setSalesRep(prev => {
+      const next = prev ? { ...prev, ...patch } : prev;
+      salesRepRef.current = next;
+      return next;
+    });
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, salesRep, authUser, session, loading, login, logout, updateSalesRep }}>
+    <AuthContext.Provider value={{ user, salesRep, authUser, session, authMode, loading, login, logout, updateSalesRep }}>
       {children}
     </AuthContext.Provider>
   );

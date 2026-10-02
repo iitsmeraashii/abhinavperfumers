@@ -13,6 +13,7 @@
 import { produceProcessingJob } from '../alpe';
 import type { ProduceJobResult } from '../alpe';
 import { enqueueOp } from './captureOfflineQueue';
+import { isCloudSyncAllowed } from '../authModeState';
 import type { CaptureSession } from './types';
 
 // ─── Adapter result ──────────────────────────────────────────────────────────
@@ -49,7 +50,7 @@ export interface SubmitParams {
 export async function submitCaptureSession(params: SubmitParams): Promise<AdapterResult> {
   const { session, backendSessionId, eventId, eventName, isOnline, correlationId, ownerId } = params;
 
-  if (!isOnline) {
+  if (!isOnline || !isCloudSyncAllowed()) {
     await enqueueOp('enqueue_processing_job', backendSessionId, {
       backendSessionId,
       draftData:     session.draftData,

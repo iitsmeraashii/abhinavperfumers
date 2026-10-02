@@ -4,7 +4,7 @@
 
 const DB_NAME = 'capture_app';
 // Keep DB_VERSION centralized here so every store uses the same database version.
-const DB_VERSION = 8;
+const DB_VERSION = 9;
 
 export function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -47,6 +47,12 @@ export function openDB(): Promise<IDBDatabase> {
         if (!clStore.indexNames.contains('by_owner')) {
           clStore.createIndex('by_owner', 'ownerId', { unique: false });
         }
+      }
+      if (!db.objectStoreNames.contains('auth_profile')) {
+        // Single-record store keyed by a fixed key ('current'). The record
+        // itself contains authUserId so future restoration can verify identity
+        // before use. Non-destructive: existing stores are untouched.
+        db.createObjectStore('auth_profile', { keyPath: 'key' });
       }
     };
 

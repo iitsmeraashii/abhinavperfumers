@@ -46,6 +46,7 @@ import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, Ocr
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
 import { isConsoleEnabled } from './runtime/runtimeDiagnostics';
+import { isCloudSyncAllowed } from './authModeState';
 
 const QrScannerView = lazy(() =>
   import('./capture/QrScannerView').then(m => ({ default: m.QrScannerView })),
@@ -802,7 +803,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     // the row may not exist yet when the user takes a photo. Without this
     // awaited upsert, the FK constraint on capture_assets silently rejects
     // the asset insert and the photo is lost.
-    if (isOnline) {
+    if (isOnline && isCloudSyncAllowed()) {
       const { syncUpsertSession } = await import('./capture/captureBackendSync');
       const sessionOp = logOperationStart('syncUpsertSession (pre-asset)', {
         backendSessionId: bsid,

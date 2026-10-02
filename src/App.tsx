@@ -19,6 +19,8 @@ import ConversationsPage from './ConversationsPage';
 import ConversationDetailPage from './ConversationDetailPage';
 import WhatsAppAssetsPage from './WhatsAppAssetsPage';
 import { supabase } from './supabaseClient';
+import { flushQueue } from './capture/captureOfflineQueue';
+import { isConsoleEnabled } from './runtime/runtimeDiagnostics';
 import {
   LogOut, Loader2,
   LayoutDashboard, List, CalendarDays, Bell, PlusCircle,
@@ -306,8 +308,21 @@ function MobileMoreDrawer({
 // ─── Main layout ──────────────────────────────────────────────────────────────
 
 function Layout() {
-  const { user, logout } = useAuth();
-  useAlpeScheduler(user?.authUserId);
+  const { user, logout, authMode } = useAuth();
+  useAlpeScheduler(user?.authUserId, authMode);
+
+  // Flush the offline pending_ops queue once when authoritative auth succeeds.
+  // The browser online event may fire while authMode is still 'offline-restored',
+  // causing the reconnect flush to no-op. This effect catches the subsequent
+  // transition to 'online' and guarantees pending work gets a flush opportunity.
+  useEffect(() => {
+    if (authMode !== 'online' || !user?.authUserId) return;
+    flushQueue(user.authUserId).catch((err) => {
+      if (isConsoleEnabled()) console.error('[POST_AUTH_FLUSH] failed', err);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authMode, user?.authUserId]);
+
   const { refreshSelectedEvent, clearEvent } = useEvent();
   const isAdmin = user?.role === 'admin';
 
