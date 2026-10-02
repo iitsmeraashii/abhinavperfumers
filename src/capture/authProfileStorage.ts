@@ -6,6 +6,7 @@
 import { dbGet, dbPut, dbDelete } from './db';
 import type { CaptureProfile } from './captureProfile';
 import type { SalesRep } from '../AuthContext';
+import { hasPersistedSupabaseSessionForUser } from '../supabaseClient';
 
 // Bump this when the persisted shape changes in a breaking way.
 // Future restoration logic can reject stale/incompatible records.
@@ -77,4 +78,105 @@ export async function loadCachedAuthProfile(): Promise<CachedAuthProfile | null>
  */
 export async function clearCachedAuthProfile(): Promise<void> {
   await dbDelete('auth_profile', AUTH_PROFILE_KEY);
+}
+
+// ─── Offline restoration support ────────────────────────────────────────────
+
+/** Maximum age (15 days) for a cached profile to remain eligible for offline access. */
+export const OFFLINE_AUTH_MAX_AGE_MS = 15 * 24 * 60 * 60 * 1000;
+
+// Allow a small clock-skew tolerance so a profile validated moments ago is not
+// rejected if the client clock is slightly ahead of the server's validation time.
+const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
+
+export type OfflineRejectionReason =
+  | 'no_cache'
+  | 'schema_unsupported'
+  | 'missing_identity'
+  | 'missing_fields'
+  | 'login_disabled'
+  | 'inactive'
+  | 'invalid_validatedAt'
+  | 'expired'
+  | 'no_persisted_session'
+  | 'identity_mismatch';
+
+export interface OfflineEligibilityResult {
+  eligible: boolean;
+  reason: OfflineRejectionReason | null;
+  profile: CachedAuthProfile | null;
+}
+
+/**
+ * Determine whether a cached profile is eligible for offline app access.
+ *
+ * This is a LOCAL offline-access policy based on a previous successful server
+ * authorization — it is NOT server authorization itself.
+ *
+ * Requirements:
+ *  - supported schemaVersion
+ *  - authUserId / repId / repCode present
+ *  - loginEnabled === true
+ *  - isActive === true
+ *  - validatedAt is finite, positive, not materially in the future, and ≤ 15 days old
+ *  - persisted Supabase session user.id === cached.authUserId
+ *
+ * Does NOT update validatedAt. Does NOT modify any storage.
+ */
+export function checkOfflineEligibility(cached: CachedAuthProfile | null): OfflineEligibilityResult {
+  if (!cached) return { eligible: false, reason: 'no_cache', profile: null };
+  if (cached.schemaVersion !== AUTH_PROFILE_SCHEMA_VERSION) {
+    return { eligible: false, reason: 'schema_unsupported', profile: cached };
+  }
+  if (!cached.authUserId || !cached.repId || !cached.repCode) {
+    return { eligible: false, reason: 'missing_identity', profile: cached };
+  }
+  if (!cached.name || !cached.role) {
+    return { eligible: false, reason: 'missing_fields', profile: cached };
+  }
+  if (!cached.loginEnabled) {
+    return { eligible: false, reason: 'login_disabled', profile: cached };
+  }
+  if (!cached.isActive) {
+    return { eligible: false, reason: 'inactive', profile: cached };
+  }
+
+  const now = Date.now();
+  const { validatedAt } = cached;
+  if (!Number.isFinite(validatedAt) || validatedAt <= 0) {
+    return { eligible: false, reason: 'invalid_validatedAt', profile: cached };
+  }
+  if (validatedAt > now + CLOCK_SKEW_TOLERANCE_MS) {
+    return { eligible: false, reason: 'invalid_validatedAt', profile: cached };
+  }
+  if (now - validatedAt > OFFLINE_AUTH_MAX_AGE_MS) {
+    return { eligible: false, reason: 'expired', profile: cached };
+  }
+
+  if (!hasPersistedSupabaseSessionForUser(cached.authUserId)) {
+    return { eligible: false, reason: 'no_persisted_session', profile: cached };
+  }
+
+  return { eligible: true, reason: null, profile: cached };
+}
+
+/**
+ * Reconstruct a SalesRep from a cached profile.
+ * Uses only data already present in the validated cached record.
+ * Does NOT fabricate fields, Supabase User objects, or Session objects.
+ */
+export function cachedProfileToSalesRep(cached: CachedAuthProfile): SalesRep {
+  return {
+    id:                      cached.repId,
+    rep_code:                cached.repCode,
+    name:                    cached.name,
+    role:                    cached.role,
+    email:                   cached.email,
+    phone:                   cached.phone,
+    auth_user_id:            cached.authUserId,
+    login_enabled:           cached.loginEnabled,
+    is_active:               cached.isActive,
+    default_event_id:        cached.defaultEventId,
+    default_capture_profile: cached.defaultCaptureProfile,
+  };
 }

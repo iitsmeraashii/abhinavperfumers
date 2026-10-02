@@ -2,7 +2,13 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, Re
 import type { Session, User as SupabaseUser } from '@supabase/supabase-js';
 import { supabase, clearLocalSupabaseAuthSession } from './supabaseClient';
 import type { CaptureProfile } from './capture/captureProfile';
-import { saveCachedAuthProfile, loadCachedAuthProfile, clearCachedAuthProfile } from './capture/authProfileStorage';
+import {
+  saveCachedAuthProfile,
+  loadCachedAuthProfile,
+  clearCachedAuthProfile,
+  checkOfflineEligibility,
+  cachedProfileToSalesRep,
+} from './capture/authProfileStorage';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +37,11 @@ export interface AuthUser {
   email?:      string;
 }
 
+type AuthMode =
+  | 'unauthenticated'
+  | 'online'
+  | 'offline-restored';
+
 interface AuthContextType {
   // Legacy field — identical shape to old User, safe for all existing consumers
   user:     AuthUser | null;
@@ -38,6 +49,7 @@ interface AuthContextType {
   salesRep: SalesRep | null;
   authUser: SupabaseUser | null;
   session:  Session | null;
+  authMode: AuthMode;
   loading:  boolean;
   login:    (rep_code: string, password: string) => Promise<string | null>;
   logout:   () => Promise<void>;
@@ -83,6 +95,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [salesRep, setSalesRep] = useState<SalesRep | null>(null);
   const [authUser, setAuthUser] = useState<SupabaseUser | null>(null);
   const [session,  setSession]  = useState<Session | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>('unauthenticated');
   const [loading,  setLoading]  = useState(true);
 
   // Mirror of salesRep readable inside loadRepProfile without re-creating the
@@ -92,6 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const setSalesRepSafe = useCallback((rep: SalesRep | null) => {
     salesRepRef.current = rep;
     setSalesRep(rep);
+    if (rep === null) setAuthMode('unauthenticated');
   }, []);
 
   // Guard: prevents loadRepProfile from running concurrently when both
@@ -103,6 +117,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // must perform no side effects. This prevents an in-flight profile load from
   // restoring salesRep or rewriting auth_profile after the user logs out.
   const authGenerationRef = useRef(0);
+
+  // Track whether we have already attempted offline restoration for the current
+  // bootstrap. Prevents repeated restoration attempts during a single cold start
+  // when multiple auth events fire.
+  const offlineRestoreAttemptedRef = useRef(false);
+
+  // ── Offline restoration ──────────────────────────────────────────────────
+  // Attempts to restore app access from a previously server-validated cached
+  // profile. Called when:
+  //   (A) loadRepProfile hits a transient failure on a cold start with a real
+  //       Supabase session, OR
+  //   (B) INITIAL_SESSION is null but persisted Supabase identity evidence
+  //       suggests the user was previously authenticated.
+  //
+  // Returns true if access was restored, false otherwise.
+  async function tryOfflineRestore(generation: number): Promise<boolean> {
+    const cached = await loadCachedAuthProfile();
+    if (generation !== authGenerationRef.current) return false;
+
+    const result = checkOfflineEligibility(cached);
+    if (!result.eligible || !result.profile) {
+      console.warn('[AuthContext] offline profile rejected:', result.reason);
+      return false;
+    }
+
+    const restoredRep = cachedProfileToSalesRep(result.profile);
+    if (generation !== authGenerationRef.current) return false;
+
+    setSalesRepSafe(restoredRep);
+    setAuthMode('offline-restored');
+    console.log('[AuthContext] offline profile restored', {
+      repCode: restoredRep.rep_code,
+      validatedAt: result.profile.validatedAt,
+    });
+    // Do NOT update validatedAt. Do NOT rewrite auth_profile.
+    // Only successful server validation may refresh the 15-day window.
+    return true;
+  }
 
   // ── Bootstrap ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -122,11 +174,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await loadRepProfile(s);
         })();
       } else {
-        // No session — could be INITIAL_SESSION (not logged in) or SIGNED_OUT.
-        // Per the installed auth-js library, a network failure during token
-        // refresh does NOT emit SIGNED_OUT — it emits no event at all and
-        // leaves the session in storage. So reaching this branch means either
-        // a genuine sign-out or the app started with no session.
+        // No session in the event. Could be:
+        //  - INITIAL_SESSION with no stored session (genuinely unauthenticated)
+        //  - INITIAL_SESSION null because token refresh failed offline
+        //  - SIGNED_OUT from explicit logout or server-side revocation
+        //
+        // If salesRep already exists (warm session preserved), keep it.
+        if (salesRepRef.current) {
+          setLoading(false);
+          return;
+        }
+
+        // Case B: INITIAL_SESSION null due to offline refresh failure.
+        // Attempt offline restoration before falling through to LoginPage.
+        if (event === 'INITIAL_SESSION' && !offlineRestoreAttemptedRef.current) {
+          offlineRestoreAttemptedRef.current = true;
+          const generation = authGenerationRef.current;
+          (async () => {
+            const restored = await tryOfflineRestore(generation);
+            if (generation !== authGenerationRef.current) return;
+            if (!restored) {
+              setSalesRepSafe(null);
+              setLoading(false);
+              localStorage.removeItem('session_token');
+            }
+          })();
+          return;
+        }
+
+        // SIGNED_OUT or other null-session event — genuinely unauthenticated.
         setSalesRepSafe(null);
         setLoading(false);
         // Clear stale legacy token if present
@@ -201,17 +277,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (error) {
         if (errorClass === 'transient') {
           // Transient network/backend failure — Supabase unreachable or 5xx.
-          // Do NOT sign out or clear an already-validated profile.
           if (salesRepRef.current) {
+            // Warm session: preserve existing profile, do not sign out.
             console.warn('[AuthContext] Profile revalidation failed (transient) — preserving existing salesRep', {
               status,
               code: (error as unknown as Record<string, unknown>)?.code ?? null,
             });
           } else {
-            console.warn('[AuthContext] Profile load failed (transient) — no existing salesRep, staying unauthenticated', {
+            // Case A: cold start with real Supabase session but profile server
+            // is unreachable. Try offline restoration from cached profile.
+            console.warn('[AuthContext] Profile load failed (transient) — attempting offline restore', {
               status,
               code: (error as unknown as Record<string, unknown>)?.code ?? null,
             });
+            const restored = await tryOfflineRestore(generation);
+            if (generation !== authGenerationRef.current) return;
+            if (!restored) {
+              console.warn('[AuthContext] offline restore failed — staying unauthenticated');
+            }
           }
           return;
         }
@@ -221,6 +304,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           code: (error as unknown as Record<string, unknown>)?.code ?? null,
         });
         console.log('[AuthContext] signOut reason: profile_http_' + status);
+        await clearCachedAuthProfile();
         await supabase.auth.signOut();
         setSalesRepSafe(null);
         return;
@@ -230,6 +314,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Server confirmed: valid auth user but no matching sales_rep row.
         console.warn('[AuthContext] No sales_rep row for auth user', s.user.email);
         console.log('[AuthContext] signOut reason: profile_missing');
+        await clearCachedAuthProfile();
         await supabase.auth.signOut();
         setSalesRepSafe(null);
         return;
@@ -239,6 +324,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Server confirmed: representative login is disabled.
         console.warn('[AuthContext] Rep account login disabled', data.rep_code);
         console.log('[AuthContext] signOut reason: profile_disabled');
+        await clearCachedAuthProfile();
         await supabase.auth.signOut();
         setSalesRepSafe(null);
         return;
@@ -248,6 +334,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Server confirmed: representative is inactive.
         console.warn('[AuthContext] Rep account inactive', data.rep_code);
         console.log('[AuthContext] signOut reason: profile_inactive');
+        await clearCachedAuthProfile();
         await supabase.auth.signOut();
         setSalesRepSafe(null);
         return;
@@ -269,6 +356,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         default_capture_profile: (data.default_capture_profile as CaptureProfile) ?? 'CRM',
       };
       setSalesRepSafe(validatedRep);
+      setAuthMode('online');
 
       // Persist the server-validated profile to IndexedDB for future offline
       // restoration. Fire-and-forget: a cache-write failure must not break the
@@ -279,11 +367,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .catch((cacheErr) => console.warn('[AuthContext] auth profile cache write failed (non-fatal)', cacheErr));
     } catch (err) {
       // A thrown error from the Supabase client itself is a transport failure.
-      // Preserve the existing profile if one exists; do not sign out.
       if (salesRepRef.current) {
+        // Warm session: preserve existing profile.
         console.warn('[AuthContext] loadRepProfile threw (transient) — preserving existing salesRep', err);
       } else {
-        console.warn('[AuthContext] loadRepProfile threw (transient) — no existing salesRep, staying unauthenticated', err);
+        // Cold start: try offline restoration.
+        console.warn('[AuthContext] loadRepProfile threw (transient) — attempting offline restore', err);
+        const restored = await tryOfflineRestore(generation);
+        if (generation !== authGenerationRef.current) return;
+        if (!restored) {
+          console.warn('[AuthContext] offline restore failed — staying unauthenticated');
+        }
       }
     } finally {
       profileLoadingRef.current = false;
@@ -357,11 +451,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // server being reachable. The remote signOut is best-effort.
   async function logout(): Promise<void> {
     console.log('[AuthContext] signOut reason: explicit_user_logout');
-    // 0. Invalidate any in-flight loadRepProfile so it cannot restore salesRep
-    //    or rewrite auth_profile after logout completes.
+    // 0. Invalidate any in-flight loadRepProfile / offline restoration so they
+    //    cannot restore salesRep or rewrite auth_profile after logout completes.
     authGenerationRef.current++;
     // 1. Clear in-memory app access immediately.
     setSalesRepSafe(null);
+    setAuthMode('unauthenticated');
     // 2. Await IndexedDB auth profile removal — not fire-and-forget.
     try {
       await clearCachedAuthProfile();
@@ -405,7 +500,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, salesRep, authUser, session, loading, login, logout, updateSalesRep }}>
+    <AuthContext.Provider value={{ user, salesRep, authUser, session, authMode, loading, login, logout, updateSalesRep }}>
       {children}
     </AuthContext.Provider>
   );

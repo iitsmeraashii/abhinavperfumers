@@ -49,3 +49,24 @@ export function clearLocalSupabaseAuthSession(): void {
     }
   }
 }
+
+/**
+ * Check whether this app has a persisted Supabase auth session belonging to
+ * the given authUserId. Reads the Supabase-owned localStorage session record
+ * and parses it ONLY to compare stored user.id with the expected value.
+ *
+ * Returns true if the persisted session's user.id matches. Returns false if
+ * the record is missing, malformed, or belongs to a different user.
+ *
+ * This function NEVER returns or exposes tokens, session objects, or raw JSON.
+ */
+export function hasPersistedSupabaseSessionForUser(authUserId: string): boolean {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as { user?: { id?: string } };
+    return parsed?.user?.id === authUserId;
+  } catch {
+    return false;
+  }
+}
