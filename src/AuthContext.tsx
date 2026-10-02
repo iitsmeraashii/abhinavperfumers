@@ -10,6 +10,10 @@ import {
   checkOfflineEligibility,
   cachedProfileToSalesRep,
 } from './capture/authProfileStorage';
+import {
+  setAuthModeState as publishAuthMode,
+} from './authModeState';
+import type { AuthMode } from './authModeState';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -38,10 +42,7 @@ export interface AuthUser {
   email?:      string;
 }
 
-type AuthMode =
-  | 'unauthenticated'
-  | 'online'
-  | 'offline-restored';
+export type { AuthMode };
 
 interface AuthContextType {
   // Legacy field — identical shape to old User, safe for all existing consumers
@@ -96,8 +97,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [salesRep, setSalesRep] = useState<SalesRep | null>(null);
   const [authUser, setAuthUser] = useState<SupabaseUser | null>(null);
   const [session,  setSession]  = useState<Session | null>(null);
-  const [authMode, setAuthMode] = useState<AuthMode>('unauthenticated');
+  const [authMode, setReactAuthMode] = useState<AuthMode>('unauthenticated');
   const [loading,  setLoading]  = useState(true);
+
+  // Single transition helper: publishes to the shared module FIRST (so
+  // non-React services immediately see the restrictive mode), then updates
+  // React state.
+  const transitionAuthMode = useCallback((next: AuthMode) => {
+    publishAuthMode(next);
+    setReactAuthMode(next);
+  }, []);
 
   // Mirror of salesRep readable inside loadRepProfile without re-creating the
   // onAuthStateChange subscription. Used to decide whether a transient failure
@@ -106,7 +115,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const setSalesRepSafe = useCallback((rep: SalesRep | null) => {
     salesRepRef.current = rep;
     setSalesRep(rep);
-    if (rep === null) setAuthMode('unauthenticated');
+    if (rep === null) transitionAuthMode('unauthenticated');
   }, []);
 
   // Guard: prevents loadRepProfile from running concurrently when both
@@ -147,7 +156,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (generation !== authGenerationRef.current) return false;
 
     setSalesRepSafe(restoredRep);
-    setAuthMode('offline-restored');
+    transitionAuthMode('offline-restored');
     console.log('[AuthContext] offline profile restored', {
       repCode: restoredRep.rep_code,
       validatedAt: result.profile.validatedAt,
@@ -421,7 +430,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         default_capture_profile: (data.default_capture_profile as CaptureProfile) ?? 'CRM',
       };
       setSalesRepSafe(validatedRep);
-      setAuthMode('online');
+      transitionAuthMode('online');
 
       // Persist the server-validated profile to IndexedDB for future offline
       // restoration. Fire-and-forget: a cache-write failure must not break the
@@ -521,7 +530,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     authGenerationRef.current++;
     // 1. Clear in-memory app access immediately.
     setSalesRepSafe(null);
-    setAuthMode('unauthenticated');
+    transitionAuthMode('unauthenticated');
     // 2. Await IndexedDB auth profile removal — not fire-and-forget.
     try {
       await clearCachedAuthProfile();
