@@ -13,14 +13,21 @@ import { useEffect, useState, useRef } from 'react';
 import { useAlpeProcessing } from './featureFlag';
 import { startScheduler, stopScheduler, getSchedulerState } from './scheduler';
 import type { SchedulerState } from './scheduler';
+import type { AuthMode } from '../authModeState';
 
-export function useAlpeScheduler(userId: string | null | undefined): SchedulerState {
+export function useAlpeScheduler(
+  userId: string | null | undefined,
+  authMode: AuthMode,
+): SchedulerState {
   const alpeEnabled = useAlpeProcessing();
   const [state, setState] = useState<SchedulerState>(getSchedulerState());
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (!alpeEnabled || !userId) return;
+    // Only start the scheduler when ALPE is enabled, a user is signed in,
+    // AND AuthContext has completed authoritative profile validation.
+    // This prevents recovery/polling during offline-restored mode.
+    if (!alpeEnabled || !userId || authMode !== 'online') return;
 
     let cancelled = false;
 
@@ -48,7 +55,7 @@ export function useAlpeScheduler(userId: string | null | undefined): SchedulerSt
       stopScheduler();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [alpeEnabled, userId]);
+  }, [alpeEnabled, userId, authMode]);
 
   return state;
 }

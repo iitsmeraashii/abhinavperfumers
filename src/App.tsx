@@ -306,8 +306,8 @@ function MobileMoreDrawer({
 // ─── Main layout ──────────────────────────────────────────────────────────────
 
 function Layout() {
-  const { user, logout } = useAuth();
-  useAlpeScheduler(user?.authUserId);
+  const { user, logout, authMode } = useAuth();
+  useAlpeScheduler(user?.authUserId, authMode);
   const { refreshSelectedEvent, clearEvent } = useEvent();
   const isAdmin = user?.role === 'admin';
 
