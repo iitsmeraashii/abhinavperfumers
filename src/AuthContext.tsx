@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import type { Session, User as SupabaseUser } from '@supabase/supabase-js';
-import { supabase } from './supabaseClient';
+import { supabase, clearLocalSupabaseAuthSession } from './supabaseClient';
 import type { CaptureProfile } from './capture/captureProfile';
 import { saveCachedAuthProfile, loadCachedAuthProfile, clearCachedAuthProfile } from './capture/authProfileStorage';
 
@@ -333,20 +333,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // ── Logout ─────────────────────────────────────────────────────────────────
   // Clears Supabase session and local state.
-  // Offline drafts in IndexedDB are preserved, but the auth_profile cache is
-  // invalidated so a future offline reload cannot restore the signed-out user.
+  // Offline drafts in IndexedDB are preserved, but the auth_profile cache and
+  // the Supabase persisted session are invalidated so a future offline reload
+  // cannot restore the signed-out user.
+  //
+  // Local invalidation is DETERMINISTIC — it does not depend on the Supabase
+  // server being reachable. The remote signOut is best-effort.
   async function logout(): Promise<void> {
     console.log('[AuthContext] signOut reason: explicit_user_logout');
     // 1. Clear in-memory app access immediately.
     setSalesRepSafe(null);
-    // 2. Clear the persisted auth profile locally — this MUST NOT depend on
-    //    network availability. Even if Supabase is unreachable, offline
-    //    eligibility is revoked.
-    clearCachedAuthProfile()
-      .catch((err) => console.warn('[AuthContext] auth profile cache clear failed (non-fatal)', err));
-    // 3. Attempt Supabase signOut. If this fails (offline), local state is
-    //    already cleared above.
-    await supabase.auth.signOut();
+    // 2. Await IndexedDB auth profile removal — not fire-and-forget.
+    try {
+      await clearCachedAuthProfile();
+    } catch (err) {
+      console.warn('[AuthContext] auth profile cache clear failed (non-fatal)', err);
+    }
+    // 3. Attempt Supabase signOut (best-effort, may fail offline).
+    //    Use scope:'local' so it does not revoke sessions on other devices.
+    try {
+      await supabase.auth.signOut({ scope: 'local' });
+    } catch {
+      // Network failure — handled by deterministic local cleanup below.
+    }
+    // 4. GUARANTEE local Supabase session removal regardless of signOut result.
+    //    When Supabase is unreachable, signOut's network call fails before
+    //    _removeSession runs, leaving the session in localStorage. This
+    //    ensures it is gone.
+    clearLocalSupabaseAuthSession();
   }
 
   // ── Legacy user shape (backward-compat for all existing consumers) ─────────
