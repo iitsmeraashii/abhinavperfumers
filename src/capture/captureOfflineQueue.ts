@@ -8,6 +8,7 @@
 //   - Completed ops are removed from the queue
 //   - The queue is per-device (not shared across tabs — that's fine)
 
+import { isCloudSyncAllowed } from '../authModeState';
 import { dbPut, dbDelete, dbGetAllInStore } from './db';
 import {
   syncUpsertSession,
@@ -99,6 +100,10 @@ export async function flushQueue(
 
   if (flushLocks.get(lockKey)) return { flushed: 0, remaining: 0 };
   if (!navigator.onLine) return { flushed: 0, remaining: 0 };
+  if (!isCloudSyncAllowed()) {
+    const remaining = await getPendingCount(ownerId);
+    return { flushed: 0, remaining };
+  }
 
   flushLocks.set(lockKey, true);
 
@@ -116,6 +121,7 @@ export async function flushQueue(
 
     for (const op of ops) {
       if (!navigator.onLine) break;
+      if (!isCloudSyncAllowed()) break;
 
       try {
         await executeOp(op);

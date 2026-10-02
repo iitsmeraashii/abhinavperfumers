@@ -25,6 +25,7 @@ import { enqueueJob } from './processingQueueRepository';
 import type { EnqueueResult } from './types';
 import { isConsoleEnabled } from '../runtime/runtimeDiagnostics';
 import { alpeLog, alpeError } from './diagnostics';
+import { isCloudSyncAllowed } from '../authModeState';
 
 export interface ProduceJobParams {
   backendSessionId: string;
@@ -68,6 +69,17 @@ export async function produceProcessingJob(
     return { outcome: 'failed', jobId: null, error: 'Not authenticated' };
   }
   alpeLog('produceProcessingJob stage=auth ok', { ...stageCtx, userId: identity.userId, ts: ts() });
+
+  // Defensive gate: this function is called from captureProcessingAdapter
+  // (gated) and from captureOfflineQueue flush (gated by flushQueue), but
+  // guard the cloud-write boundary here as well. If cloud sync is not
+  // allowed, skip all Supabase work — the caller is responsible for
+  // enqueuing the job for later replay.
+  if (!isCloudSyncAllowed()) {
+    alpeLog('produceProcessingJob cloud sync not allowed — deferring', { ...stageCtx, ts: ts() });
+    logOperationEnd(op, { extra: { deferred: 'cloud sync not allowed' } });
+    return { outcome: 'queued', jobId: null, error: null };
+  }
 
   // Guarantee the capture_sessions row exists before inserting into
   // processing_queue. routeSessionSync is fire-and-forget, so by the time
