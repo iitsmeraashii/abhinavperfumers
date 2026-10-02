@@ -169,50 +169,62 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // This MUST run outside the synchronous onAuthStateChange callback to avoid
   // auth-js lock contention.
   async function resolveNullInitialSession(generation: number): Promise<void> {
-    const { data, error } = await supabase.auth.getSession();
+    try {
+      const { data, error } = await supabase.auth.getSession();
 
-    if (generation !== authGenerationRef.current) return;
-
-    // Case 1: getSession returned a real session — the INITIAL_SESSION null
-    // was stale or the session recovered between events. Run normal profile
-    // validation.
-    if (data.session?.user) {
-      console.log('[AuthContext] null INITIAL_SESSION resolved: real session found via getSession()');
-      await loadRepProfile(data.session);
-      return;
-    }
-
-    // Case 2: null session + retryable network error — transient failure.
-    if (error && isAuthRetryableFetchError(error)) {
-      console.warn('[AuthContext] null INITIAL_SESSION resolved: retryable auth error, attempting offline restore');
-      const restored = await tryOfflineRestore(generation);
       if (generation !== authGenerationRef.current) return;
-      if (!restored) {
-        console.warn('[AuthContext] offline restore failed — staying unauthenticated');
-        setSalesRepSafe(null);
-        setLoading(false);
-        localStorage.removeItem('session_token');
+
+      // Case 1: getSession returned a real session — the INITIAL_SESSION null
+      // was stale or the session recovered between events. Run normal profile
+      // validation.
+      if (data.session?.user) {
+        console.log('[AuthContext] null INITIAL_SESSION resolved: real session found via getSession()');
+        await loadRepProfile(data.session);
+        return;
       }
-      return;
-    }
 
-    // Case 3: null session + no error — genuinely unauthenticated.
-    // Case 4: null session + non-retryable error — authoritative rejection.
-    if (error) {
-      console.warn('[AuthContext] null INITIAL_SESSION resolved: non-retryable auth error', {
-        name: error.name,
-        status: error.status,
-      });
-      // Authoritative auth failure — clear cached profile so it can't be used
-      // for future offline restoration.
-      try { await clearCachedAuthProfile(); } catch { /* best-effort */ }
-    } else {
-      console.log('[AuthContext] null INITIAL_SESSION resolved: no session, no error — unauthenticated');
-    }
+      // Case 2: null session + retryable network error — transient failure.
+      if (error && isAuthRetryableFetchError(error)) {
+        console.warn('[AuthContext] null INITIAL_SESSION resolved: retryable auth error, attempting offline restore');
+        const restored = await tryOfflineRestore(generation);
+        if (generation !== authGenerationRef.current) return;
+        if (!restored) {
+          console.warn('[AuthContext] offline restore failed — staying unauthenticated');
+          setSalesRepSafe(null);
+          setLoading(false);
+          localStorage.removeItem('session_token');
+        }
+        return;
+      }
 
-    setSalesRepSafe(null);
-    setLoading(false);
-    localStorage.removeItem('session_token');
+      // Case 3: null session + no error — genuinely unauthenticated.
+      // Case 4: null session + non-retryable error — authoritative rejection.
+      if (error) {
+        console.warn('[AuthContext] null INITIAL_SESSION resolved: non-retryable auth error', {
+          name: error.name,
+          status: error.status,
+        });
+        // Authoritative auth failure — clear cached profile so it can't be used
+        // for future offline restoration.
+        try { await clearCachedAuthProfile(); } catch { /* best-effort */ }
+      } else {
+        console.log('[AuthContext] null INITIAL_SESSION resolved: no session, no error — unauthenticated');
+      }
+
+      setSalesRepSafe(null);
+      setLoading(false);
+      localStorage.removeItem('session_token');
+    } catch (err) {
+      // Unexpected thrown exception from getSession() (e.g. storage access
+      // denied, runtime error). Fail closed for this startup attempt — do
+      // NOT grant offline access, do NOT destroy the cache, do NOT update
+      // validatedAt. Just resolve to unauthenticated so the app does not
+      // hang on the loading spinner.
+      if (generation !== authGenerationRef.current) return;
+      console.warn('[AuthContext] null INITIAL_SESSION: getSession() threw unexpectedly — failing closed', err);
+      setSalesRepSafe(null);
+      setLoading(false);
+    }
   }
 
   // ── Bootstrap ──────────────────────────────────────────────────────────────
