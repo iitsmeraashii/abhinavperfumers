@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from 'react';
+import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import type { Session, User as SupabaseUser } from '@supabase/supabase-js';
 import { supabase, clearLocalSupabaseAuthSession } from './supabaseClient';
 import type { CaptureProfile } from './capture/captureProfile';
@@ -156,6 +157,64 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return true;
   }
 
+  // ── Resolve null INITIAL_SESSION ──────────────────────────────────────────
+  // When onAuthStateChange fires INITIAL_SESSION with session=null, the cause
+  // could be: (1) genuinely unauthenticated, (2) transient network failure
+  // during token refresh, or (3) authoritative auth rejection.
+  //
+  // We call supabase.auth.getSession() to classify the cause. getSession()
+  // re-reads storage and attempts refresh if needed. Its error tells us whether
+  // the failure is retryable (network) or authoritative.
+  //
+  // This MUST run outside the synchronous onAuthStateChange callback to avoid
+  // auth-js lock contention.
+  async function resolveNullInitialSession(generation: number): Promise<void> {
+    const { data, error } = await supabase.auth.getSession();
+
+    if (generation !== authGenerationRef.current) return;
+
+    // Case 1: getSession returned a real session — the INITIAL_SESSION null
+    // was stale or the session recovered between events. Run normal profile
+    // validation.
+    if (data.session?.user) {
+      console.log('[AuthContext] null INITIAL_SESSION resolved: real session found via getSession()');
+      await loadRepProfile(data.session);
+      return;
+    }
+
+    // Case 2: null session + retryable network error — transient failure.
+    if (error && isAuthRetryableFetchError(error)) {
+      console.warn('[AuthContext] null INITIAL_SESSION resolved: retryable auth error, attempting offline restore');
+      const restored = await tryOfflineRestore(generation);
+      if (generation !== authGenerationRef.current) return;
+      if (!restored) {
+        console.warn('[AuthContext] offline restore failed — staying unauthenticated');
+        setSalesRepSafe(null);
+        setLoading(false);
+        localStorage.removeItem('session_token');
+      }
+      return;
+    }
+
+    // Case 3: null session + no error — genuinely unauthenticated.
+    // Case 4: null session + non-retryable error — authoritative rejection.
+    if (error) {
+      console.warn('[AuthContext] null INITIAL_SESSION resolved: non-retryable auth error', {
+        name: error.name,
+        status: error.status,
+      });
+      // Authoritative auth failure — clear cached profile so it can't be used
+      // for future offline restoration.
+      try { await clearCachedAuthProfile(); } catch { /* best-effort */ }
+    } else {
+      console.log('[AuthContext] null INITIAL_SESSION resolved: no session, no error — unauthenticated');
+    }
+
+    setSalesRepSafe(null);
+    setLoading(false);
+    localStorage.removeItem('session_token');
+  }
+
   // ── Bootstrap ──────────────────────────────────────────────────────────────
   useEffect(() => {
     // onAuthStateChange fires immediately with the current session state,
@@ -185,19 +244,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return;
         }
 
-        // Case B: INITIAL_SESSION null due to offline refresh failure.
-        // Attempt offline restoration before falling through to LoginPage.
+        // Case B: INITIAL_SESSION null — classify via getSession() before
+        // deciding whether offline restoration is warranted.
         if (event === 'INITIAL_SESSION' && !offlineRestoreAttemptedRef.current) {
           offlineRestoreAttemptedRef.current = true;
           const generation = authGenerationRef.current;
           (async () => {
-            const restored = await tryOfflineRestore(generation);
-            if (generation !== authGenerationRef.current) return;
-            if (!restored) {
-              setSalesRepSafe(null);
-              setLoading(false);
-              localStorage.removeItem('session_token');
-            }
+            await resolveNullInitialSession(generation);
           })();
           return;
         }
