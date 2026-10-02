@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Abhinav Perfumers CRM</string>
+    <string name="title_activity_main">Abhinav Perfumers CRM</string>
+    <string name="package_name">com.abhinavperfumers.app</string>
+    <string name="custom_url_scheme">com.abhinavperfumers.app</string>
+</resources>

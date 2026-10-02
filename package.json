@@ -8,9 +8,15 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.app.json"
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "cap:sync": "npm run build && cap sync",
+    "cap:sync:android": "npm run build && cap sync android",
+    "cap:sync:ios": "npm run build && cap sync ios"
   },
   "dependencies": {
+    "@capacitor/android": "8.5.2",
+    "@capacitor/core": "8.5.2",
+    "@capacitor/ios": "8.5.2",
     "@supabase/supabase-js": "^2.57.4",
     "html5-qrcode": "^2.3.8",
     "lucide-react": "^0.344.0",
@@ -19,6 +25,7 @@
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.5.2",
     "@eslint/js": "^9.9.1",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
