@@ -100,7 +100,10 @@ export async function flushQueue(
 
   if (flushLocks.get(lockKey)) return { flushed: 0, remaining: 0 };
   if (!navigator.onLine) return { flushed: 0, remaining: 0 };
-  if (!isCloudSyncAllowed()) return { flushed: 0, remaining: 0 };
+  if (!isCloudSyncAllowed()) {
+    const remaining = await getPendingCount(ownerId);
+    return { flushed: 0, remaining };
+  }
 
   flushLocks.set(lockKey, true);
 
