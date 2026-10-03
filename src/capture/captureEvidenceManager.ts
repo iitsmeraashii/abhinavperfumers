@@ -1,3 +1,4 @@
+import { isTransportOnline } from '../connectivity/connectivityStore';
 // Capture Evidence Manager — single owner of the Evidence lifecycle.
 //
 // Responsibilities:
@@ -189,7 +190,7 @@ class CaptureEvidenceManager {
 
   onSaveAndNext(sessionId: string, correlationId?: string | null, ownerId?: string | null): void {
     // Voice evidence is handled by VoiceEvidenceManager — it manages its own
-    // online/offline routing, so it must be called before the navigator.onLine
+    // online/offline routing, so it must be called before the isTransportOnline()
     // gate that applies to notes and reconciliation.
     const _voiceMgrExists = !!voiceEvidenceManager;
     const _onSaveExists = typeof voiceEvidenceManager?.onSaveAndNext === 'function';
@@ -214,7 +215,7 @@ class CaptureEvidenceManager {
       });
     }
 
-    if (!navigator.onLine) return;
+    if (!isTransportOnline()) return;
 
     if (this._pendingNotes?.sessionId === sessionId) {
       const { dataUrl, ownerId, localOpId } = this._pendingNotes;
@@ -280,7 +281,7 @@ class CaptureEvidenceManager {
       return;
     }
 
-    if (!navigator.onLine || !isCloudSyncAllowed()) return;
+    if (!isTransportOnline() || !isCloudSyncAllowed()) return;
 
     this._pendingCardUploads.delete(sessionId);
 
@@ -427,7 +428,7 @@ class CaptureEvidenceManager {
   }
 
   private async _uploadBusinessCard(asset: BusinessCardAsset, timing: UploadTiming, correlationId?: string | null): Promise<void> {
-    const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : 'unknown';
+    const isOnline = isTransportOnline();
     const storageBucket = 'lead-evidence';
     const storagePath = `${asset.sessionId}/${asset.id}.jpg`;
 
@@ -477,13 +478,13 @@ class CaptureEvidenceManager {
       return;
     }
 
-    if (!navigator.onLine || !isCloudSyncAllowed()) {
+    if (!isTransportOnline() || !isCloudSyncAllowed()) {
       await this._queueCard(asset);
       _diag('UPLOAD_BUSINESS_CARD_RETURN', {
         backendSessionId: asset.sessionId,
         localAssetId: asset.id,
         returnPoint: 'OFFLINE',
-        reason: 'navigator.onLine is false — upload skipped',
+        reason: 'isTransportOnline() is false — upload skipped',
         isOnline: false,
       });
       return;

@@ -1,3 +1,4 @@
+import { connectivityStore } from './connectivity/connectivityStore';
 import { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './AuthContext';
 import { useAlpeScheduler } from './alpe/useAlpeScheduler';
@@ -695,6 +696,7 @@ function AppRoutes() {
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  useEffect(() => connectivityStore.subscribe(() => {}), []);
   return (
     <AuthProvider>
       <EventProvider>

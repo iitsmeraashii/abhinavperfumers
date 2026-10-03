@@ -19,10 +19,12 @@ const mocks = {
   jobProducer: `export const produceProcessingJob=async()=>{globalThis.h.jobs++; return globalThis.h.jobResult;};`,
 };
 (async()=>{
- await esbuild.build({stdin:{contents:`export * from './src/capture/captureOfflineQueue'; export * from './src/authModeState'; export {loadQueueItems} from './src/capture/leadQueueStorage'; export * from './src/capture/captureProfile'; export {parseQrPayload} from './src/capture/parseQrPayload'; export * from './src/capture/captureProcessingAdapter'; export {evidenceManager} from './src/capture/captureEvidenceManager';`,resolveDir:process.cwd()},bundle:true,platform:'node',format:'cjs',outfile:path.join(temp,'actual.cjs'),logLevel:'silent',plugins:[{name:'boundaries',setup(b){b.onResolve({filter:/.*/},args=>{const name=path.basename(args.path);if(mocks[name])return {path:name,namespace:'mock'};});b.onLoad({filter:/.*/,namespace:'mock'},args=>({contents:mocks[args.path],loader:'js'}));}}]});
+ await esbuild.build({stdin:{contents:`export {connectivityStore} from './src/connectivity/connectivityStore'; export * from './src/capture/captureOfflineQueue'; export * from './src/authModeState'; export {loadQueueItems} from './src/capture/leadQueueStorage'; export * from './src/capture/captureProfile'; export {parseQrPayload} from './src/capture/parseQrPayload'; export * from './src/capture/captureProcessingAdapter'; export {evidenceManager} from './src/capture/captureEvidenceManager';`,resolveDir:process.cwd()},bundle:true,platform:'node',format:'cjs',outfile:path.join(temp,'actual.cjs'),logLevel:'silent',plugins:[{name:'boundaries',setup(b){b.onResolve({filter:/.*/},args=>{const name=path.basename(args.path);if(mocks[name])return {path:name,namespace:'mock'};});b.onLoad({filter:/.*/,namespace:'mock'},args=>({contents:mocks[args.path],loader:'js'}));}}]});
  globalThis.h={rows:new Map(),leads:new Map(),assets:new Map(),uploads:[],jobs:0,uploadResult:{uploaded:false,metadataWritten:false},jobResult:{outcome:'failed',jobId:null,error:'Evidence not ready'}};
- Object.defineProperty(navigator,'onLine',{value:true,writable:true,configurable:true});
- const q=require(path.join(temp,'actual.cjs'));q.setAuthModeState('online');
+ global.window = new EventTarget();
+ let transportOnline=true;
+ Object.defineProperty(navigator,'onLine',{get:()=>transportOnline,set:value=>{transportOnline=value;window.dispatchEvent(new Event(value?'online':'offline'));},configurable:true});
+ const q=require(path.join(temp,'actual.cjs'));q.connectivityStore.subscribe(()=>{});q.setAuthModeState('online');
  const card={assetId:'card',sessionId:'s',ownerId:'u',dataUrl:'data:image/jpeg;base64,YQ==',side:'front',mimeType:'image/jpeg'};
  await q.enqueueOp('upload_business_card','s',card,'u');await q.flushQueue('u');assert.equal(h.rows.size,1);assert.equal([...h.rows.values()][0].retries,1);
  h.uploadResult={uploaded:true,metadataWritten:false};await q.flushQueue('u');assert.equal(h.rows.size,1,'metadata failure must retain retry');
@@ -88,7 +90,7 @@ const mocks = {
  await q.submitCaptureSession({...manual,backendSessionId:'restart-manual'});
  await q.submitCaptureSession({...manual,backendSessionId:'restart-qr',session:{draftData:qrDraft,captureMethod:'MANUAL',originalCaptureMethod:'QR'}});
  assert.equal(h.rows.size,4);assert.equal((await q.loadQueueItems('u')).length,3);
- delete require.cache[require.resolve(path.join(temp,'actual.cjs'))];const restored=require(path.join(temp,'actual.cjs'));
+ delete require.cache[require.resolve(path.join(temp,'actual.cjs'))];const restored=require(path.join(temp,'actual.cjs'));restored.connectivityStore.subscribe(()=>{});
  const before=h.uploads.length;await restored.flushQueue('u');assert.equal(h.uploads.length,before,'new runtime starts unauthorized');assert.equal(h.rows.size,4);
  restored.setAuthModeState('online');h.uploadResult={uploaded:true,metadataWritten:true};h.jobResult={outcome:'queued',jobId:'replayed',error:null};
  let tick,cleared=false;const oldSet=global.setInterval,oldClear=global.clearInterval;

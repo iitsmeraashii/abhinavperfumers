@@ -1,3 +1,4 @@
+import { isTransportOnline } from '../connectivity/connectivityStore';
 // Offline sync queue — persists pending backend operations to IndexedDB.
 // On reconnect, all queued ops are flushed in creation order.
 //
@@ -124,7 +125,7 @@ export async function flushQueue(
   const lockKey = ownerId ?? UNSCOPED_KEY;
 
   if (flushLocks.get(lockKey)) return { flushed: 0, remaining: 0 };
-  if (!navigator.onLine) return { flushed: 0, remaining: 0 };
+  if (!isTransportOnline()) return { flushed: 0, remaining: 0 };
   if (!isCloudSyncAllowed()) {
     const remaining = await getPendingCount(ownerId);
     return { flushed: 0, remaining };
@@ -147,7 +148,7 @@ export async function flushQueue(
     let flushed = 0;
 
     for (const op of ops) {
-      if (!navigator.onLine) break;
+      if (!isTransportOnline()) break;
       if (!isCloudSyncAllowed()) break;
 
       if (op.type === 'enqueue_processing_job') {

@@ -24,7 +24,7 @@ export enum ConnectivityState {
  */
 export interface ConnectivitySnapshot {
   state:      ConnectivityState;
-  /** Raw navigator.onLine value at the time the snapshot was taken. */
+  /** Shared transport availability at the time the snapshot was taken. */
   isOnline:   boolean;
 }
 
