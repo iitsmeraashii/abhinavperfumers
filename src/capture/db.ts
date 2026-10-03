@@ -103,6 +103,42 @@ export async function dbGet<T>(store: string, key: string): Promise<T | null> {
   }
 }
 
+/** Queue dependency checks must fail closed if storage cannot be read. */
+export async function dbGetAllInStoreStrict<T>(store: string): Promise<T[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).getAll();
+    req.onsuccess = () => resolve(req.result ?? []);
+    req.onerror = () => reject(req.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+export async function dbDeleteStrict(store: string, key: string): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+/** Strict write for capture durability: reject open, setup and commit failures. */
+export async function dbPutStrict(store: string, value: object): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    const req = tx.objectStore(store).put(value);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+    req.onerror = () => reject(req.error);
+  });
+}
+
 export async function dbPut(store: string, value: object): Promise<void> {
   try {
     const db = await openDB();

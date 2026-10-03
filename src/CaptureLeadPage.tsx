@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { useEvent } from './EventContext';
+import { effectiveCaptureProfile } from './capture/captureProfile';
 import { useAuth } from './AuthContext';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
@@ -45,7 +46,6 @@ import type { CaptureProfile, DraftData } from './capture/types';
 import type { BackendSyncState, CaptureMethod, BusinessCardAsset, OcrResult, OcrStatus, VisionResult } from './capture/types';
 import type { OcrPipelineDiagnostics } from './capture/useOcr';
 import type { ParsedContact } from './capture/parseQrPayload';
-import { isConsoleEnabled } from './runtime/runtimeDiagnostics';
 import { isCloudSyncAllowed } from './authModeState';
 
 const QrScannerView = lazy(() =>
@@ -56,7 +56,7 @@ const QrScannerView = lazy(() =>
 
 export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: string | null }) {
   const { selectedEvent, activeEvents } = useEvent();
-  const { salesRep, user } = useAuth();
+  const { salesRep, user, authMode } = useAuth();
   const authUserId = user?.authUserId ?? null;
 
   // Resolve the effective event for a capture session: the per-lead override
@@ -67,13 +67,14 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     if (overrideId && overrideId !== selectedEvent?.id) {
       const ev = activeEvents.find(e => e.id === overrideId);
       if (ev) return { id: ev.id, eventCode: ev.event_code, eventName: ev.name };
+      return { id: overrideId, eventCode: null, eventName: null };
     }
     return {
-      id:        selectedEvent?.id         ?? null,
+      id:        selectedEvent?.id         ?? salesRep?.default_event_id ?? null,
       eventCode: selectedEvent?.event_code ?? null,
       eventName: selectedEvent?.name       ?? null,
     };
-  }, [selectedEvent, activeEvents]);
+  }, [selectedEvent, activeEvents, salesRep?.default_event_id]);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isFlushing, setIsFlushing] = useState(false);
   const [promotionToast, setPromotionToast] = useState<{ message: string; isError: boolean } | null>(null);
@@ -173,11 +174,11 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
   // reopening Capture (or backing out of a session) restores the persisted
   // default rather than keeping a temporary override.
   useEffect(() => {
-    if (session.sessionStatus === 'IDLE' && salesRep?.default_capture_profile) {
-      actions.setCaptureProfile(salesRep.default_capture_profile);
+    if (session.sessionStatus === 'IDLE') {
+      actions.setCaptureProfile(effectiveCaptureProfile(salesRep?.default_capture_profile ?? 'CRM', isOnline && authMode === 'online'));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [salesRep?.default_capture_profile, session.sessionStatus]);
+  }, [salesRep?.default_capture_profile, session.sessionStatus, isOnline, authMode]);
 
   // ── Sync routing callbacks ──────────────────────────────────────────────────
   // The execution engine owns the online-vs-offline routing decision. The UI
@@ -326,6 +327,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
 
   // ── Profile selection ─────────────────────────────────────────────────────
   const handleProfileChange = useCallback((profile: CaptureProfile) => {
+    profile = effectiveCaptureProfile(profile, isOnline && isCloudSyncAllowed());
     actions.setCaptureProfile(profile);
     // If a session is already active, re-resolve the profile engine and
     // rebuild the plan so derived policies update immediately.
@@ -348,7 +350,9 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       correlationId: corrId,
     }, { correlationId: corrId });
     form.handleReset();
-    profileEngine.resolve(sessionRef.current.captureProfile);
+    const selectedProfile = effectiveCaptureProfile(sessionRef.current.captureProfile, isOnline && isCloudSyncAllowed());
+    actions.setCaptureProfile(selectedProfile);
+    profileEngine.resolve(selectedProfile);
 
     // Build the execution plan once when a session starts.
     const newPlan = executionEngine.buildPlan(
@@ -468,8 +472,8 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     }
     if (cardSessionId) {
       // Abandon all known card assets so in-flight uploads are cancelled.
-      if (cardAssets.front) evidenceManager.abandonAsset(cardAssets.front.id);
-      if (cardAssets.back) evidenceManager.abandonAsset(cardAssets.back.id);
+      if (cardAssets.front) await evidenceManager.abandonAsset(cardAssets.front.id);
+      if (cardAssets.back) await evidenceManager.abandonAsset(cardAssets.back.id);
       await deleteSessionAssets(cardSessionId, authUserId ?? undefined);
       setCardSessionId('');
       setCardAssets({ front: null, back: null });
@@ -520,80 +524,41 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
           isOnline,
         );
 
-    // ── ALPE (Exhibition) path: fire-and-forget ──────────────────────────
-    // The entire processing pipeline — session upsert, job enqueue, asset
-    // upload, AI extraction, validation, promotion — runs in the background.
-    // The UI resets immediately so the rep can capture the next lead.
+    // Reset only after durable local acceptance or confirmed cloud submission.
+    // Extraction and promotion remain asynchronous in ALPE.
     if (useAlpe) {
-      // Capture all values needed by the background task BEFORE resetting
-      // session state, since refs will point at the fresh (empty) session.
+      // Snapshot this capture before submitting and resetting the form.
       const sessionSnapshot = s;
       const ev        = resolveEvent(s.draftData);
       const eventId   = ev.id;
       const eventName = ev.eventName;
 
-      // Flush deferred (ON_SAVE) business card uploads BEFORE resetting the
-      // UI. In Exhibition mode, cardUploadTiming is ON_SAVE, so the evidence
-      // manager holds the asset bytes in _pendingCardUploads. If we reset the
-      // session first, notifySessionReset() clears that map and the deferred
-      // uploads are lost — storage_path never gets written and the processing
-      // job fails evidence resolution. Flushing here starts the uploads
-      // immediately so their promises are tracked and survive the reset.
-      // Flush deferred (ON_SAVE) business card uploads BEFORE resetting the
-      // UI. In Exhibition mode, cardUploadTiming is ON_SAVE, so the evidence
-      // manager holds the asset bytes in _pendingCardUploads. flushPendingUploads
-      // starts the uploads and moves them into _uploadTrackers (which survive
-      // onSessionReset). After flush, notifySessionReset is safe — the pending
-      // map is already empty.
-      evidenceManager.flushPendingUploads(bsid, correlationIdRef.current);
-      if (isConsoleEnabled()) console.log('[EVIDENCE_DIAG] CAPTURE_PAGE_FLUSH_CALLED', {
-        ts: new Date().toISOString(),
-        bsid,
-      });
+      // Keep the capture intact until submission or local queuing succeeds.
+      let result: AdapterResult;
+      try {
+        result = await submitCaptureSession({
+          session: sessionSnapshot, backendSessionId: bsid,
+          eventCode: ev.eventCode, eventId, eventName, plan: null,
+          isOnline, correlationId: correlationIdRef.current,
+          ownerId: authUserId ?? null,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Local save failed';
+        setPromotionToast({ message, isError: true });
+        return { error: message };
+      }
+      if (result.outcome === 'failed') {
+        const message = result.error ?? 'Capture submission failed';
+        setPromotionToast({ message, isError: true });
+        return { error: message };
+      }
+      logOperationEnd(saveOp, { extra: { outcome: result.outcome, jobId: result.jobId } });
+      if (resumeDraftId) await deleteSavedDraft(resumeDraftId, authUserId ?? undefined);
+      if (result.outcome === 'queued') setPendingSyncCount(await getPendingCount(authUserId ?? undefined));
       notifySessionReset(authUserId ?? null);
 
-      // Fire the processing job in the background. Do NOT await.
-      submitCaptureSession({
-        session:          sessionSnapshot,
-        backendSessionId: bsid,
-        eventCode:        ev.eventCode,
-        eventId,
-        eventName,
-        plan:             null,
-        isOnline,
-        correlationId:    correlationIdRef.current,
-        ownerId:          authUserId ?? null,
-      }).then(async (result: AdapterResult) => {
-        logOperationEnd(saveOp, {
-          error: result.outcome === 'failed' ? result.error : null,
-          extra: { outcome: result.outcome, jobId: result.jobId },
-        });
-
-        if (result.outcome === 'failed') {
-          const err = result.error ?? '';
-          addEntryRef.current('Save & Next — background submission failed', err, 'warn');
-          setPromotionToast({ message: `Background save failed: ${err}`, isError: true });
-          setTimeout(() => setPromotionToast(null), 8000);
-          return;
-        }
-
-        if (resumeDraftId) { await deleteSavedDraft(resumeDraftId, authUserId ?? undefined); }
-        if (result.outcome === 'queued') {
-          setPendingSyncCount(n => n + 1);
-          addEntryRef.current('Save & Next — background job queued', { bsid, online: isOnline });
-        } else {
-          addEntryRef.current('Save & Next — background job enqueued', { jobId: result.jobId });
-        }
-      }).catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        logOperationEnd(saveOp, { error: err });
-        addEntryRef.current('Save & Next — background submission threw', msg, 'warn');
-        setPromotionToast({ message: `Background save error: ${msg}`, isError: true });
-        setTimeout(() => setPromotionToast(null), 8000);
-      });
-
-      // ── Reset UI immediately ────────────────────────────────────────────
-      addEntryRef.current('Save & Next — UI released (fire-and-forget)', { bsid });
+      // ── Reset UI after accepted submission ────────────────────────────────────────────
+      addEntryRef.current('Save & Next — submission accepted', { bsid });
       form.handleReset();
       actions.resetSession();
       profileEngine.reset();
@@ -798,6 +763,8 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     const bsid = sessionRef.current.sync.backendSessionId;
     if (!bsid) return;
 
+    if (cardUploadTiming === 'ON_SAVE') registerCardEvidence(bsid, { front, back }, cardUploadTiming);
+
     // Ensure the capture_sessions row exists before syncing assets — the
     // initial routeSessionSync in handleMethodSelect is fire-and-forget, so
     // the row may not exist yet when the user takes a photo. Without this
@@ -843,9 +810,9 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     }
     addEntryRef.current('Assets queued/synced', { frontId: front?.id, backId: back?.id });
 
-    // Register image bytes with the Processing Engine's Evidence Stage.
-    // The engine delegates to evidenceManager, which owns upload decisions.
-    registerCardEvidence(bsid, { front, back }, cardUploadTiming);
+    // Immediate online uploads still start after the parent session upsert.
+    if (cardUploadTiming !== 'ON_SAVE') registerCardEvidence(bsid, { front, back }, cardUploadTiming);
+
   }, [actions, isOnline, makeRoutingCbs, queue, cardUploadTiming, resolveEvent]);
 
   // ── Voice note recorded ───────────────────────────────────────────────────
@@ -1104,7 +1071,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
 
   return (
     <div className="min-h-[calc(100vh-57px)] bg-stone-50 flex flex-col">
-      <OfflineBanner visible={!isOnline} pendingCount={pendingSyncCount} isFlushing={isFlushing} />
+      <OfflineBanner visible={!isOnline || authMode !== 'online'} pendingCount={pendingSyncCount} isFlushing={isFlushing} />
 
       <div className="flex-1 w-full max-w-lg mx-auto px-5 pt-10 pb-10 flex flex-col">
 

@@ -15,7 +15,7 @@
 // All processing occurs inside ALPE when the scheduler picks up the job.
 
 import { getAuthIdentity } from '../capture/captureAuth';
-import { buildCompletedLead, saveCompletedLead } from '../capture/completedLeadsStorage';
+import { buildCompletedLead, saveCompletedLead, getCompletedLead } from '../capture/completedLeadsStorage';
 import { syncUpsertSession } from '../capture/captureBackendSync';
 import { logOperationStart, logOperationEnd, logEvent } from '../capture/assetSyncDiagnostics';
 import { evidenceManager } from '../capture/captureEvidenceManager';
@@ -165,7 +165,9 @@ export async function produceProcessingJob(
     }
   }
 
-  const jobId = crypto.randomUUID();
+  if (!isCloudSyncAllowed()) return { outcome: 'queued', jobId: null, error: null };
+  // Capture session UUID is stable across retries, including lost responses.
+  const jobId = backendSessionId;
 
   logEvent('produceProcessingJob() — enqueueJob', {
     backendSessionId,
@@ -211,7 +213,8 @@ export async function produceProcessingJob(
   );
   lead.status = 'pending_sync';
   alpeLog('produceProcessingJob stage=saveCompletedLead start', { ...stageCtx, jobId, ts: ts() });
-  await saveCompletedLead(lead);
+  const existingLead = await getCompletedLead(backendSessionId);
+  if (existingLead?.status !== 'synced') await saveCompletedLead(lead);
   alpeLog('produceProcessingJob stage=saveCompletedLead done', { ...stageCtx, jobId, ts: ts() });
 
   logOperationEnd(op, { extra: { jobId: result.jobId, outcome: 'queued' } });

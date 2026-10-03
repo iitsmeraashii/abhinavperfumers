@@ -836,6 +836,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
   }, []);
 
   const handleReconnect = useCallback(async () => {
+    if (!ownerId) return;
     setIsFlushing(true);
     try { await flushQueue(ownerId); }
     finally {
@@ -843,7 +844,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
       getPendingCount(ownerId).then(setPendingOps);
       loadQueueItems(ownerId).then(setItems);
     }
-  }, []);
+  }, [ownerId]);
 
   const isOnline = useOnlineStatus({ onReconnect: handleReconnect });
 
@@ -1025,7 +1026,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
               <WifiOff className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
               <div>
                 <p className="text-sm font-semibold text-amber-900 leading-tight">
-                  {pendingOps} lead{pendingOps !== 1 ? 's' : ''} waiting to sync
+                  {counts.pending} lead{counts.pending !== 1 ? 's' : ''} pending
                 </p>
                 <p className="text-xs text-amber-700 mt-0.5">
                   Saved safely offline. Will sync automatically when connected.
