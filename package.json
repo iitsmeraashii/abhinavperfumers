@@ -15,8 +15,10 @@
   },
   "dependencies": {
     "@capacitor/android": "8.5.2",
+    "@capacitor/app": "^8.1.2",
     "@capacitor/core": "8.5.2",
     "@capacitor/ios": "8.5.2",
+    "@capacitor/network": "^8.0.1",
     "@supabase/supabase-js": "^2.57.4",
     "html5-qrcode": "^2.3.8",
     "lucide-react": "^0.344.0",
