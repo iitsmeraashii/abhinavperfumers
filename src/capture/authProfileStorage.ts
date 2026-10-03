@@ -193,3 +193,13 @@ export function cachedProfileToSalesRep(cached: CachedAuthProfile): SalesRep {
     default_capture_profile: cached.defaultCaptureProfile,
   };
 }
+
+/** Confirmed preference update only; never extends offline authentication age. */
+export function updateCachedDefaultEvent(ownerId: string, eventId: string, current: () => boolean): Promise<void> {
+  return mutate(async () => {
+    const cached = await dbGet<CachedAuthProfile>('auth_profile', AUTH_PROFILE_KEY);
+    if (current() && cached?.authUserId === ownerId && cached.schemaVersion === AUTH_PROFILE_SCHEMA_VERSION) {
+      await dbPutStrict('auth_profile', { ...cached, defaultEventId: eventId });
+    }
+  });
+}

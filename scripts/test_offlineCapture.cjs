@@ -16,7 +16,7 @@ const mocks = {
   captureBackendSync: ['syncUpsertSession','syncUpsertAsset','syncUpsertOcrExtraction','syncUpsertQrExtraction','syncUpdateSessionFields','syncUpsertVisionExtraction','syncPromoteSession'].map(n=>`export const ${n} = async ()=>{};`).join(''),
   voiceEvidenceManager: `export const executeVoiceNoteUploadOp=async()=>{}; export const voiceEvidenceManager={register(){},onSessionReset(){},onSaveAndNext(){}};`,
   assetStorageUpload: `export const uploadBusinessCardAsset=async(asset)=>{globalThis.h.uploads.push(asset); if(globalThis.h.throwUpload)throw Error('Network failed'); return globalThis.h.uploadResult;}; export const reconcileAssetStorageMetadata=async()=>true; export const uploadNotesImage=async()=>{};`,
-  jobProducer: `export const produceProcessingJob=async()=>{globalThis.h.jobs++; return globalThis.h.jobResult;};`,
+  jobProducer: `export const produceProcessingJob=async(params)=>{globalThis.h.lastJob=params;globalThis.h.jobs++; return globalThis.h.jobResult;};`,
 };
 (async()=>{
  await esbuild.build({stdin:{contents:`export {connectivityStore} from './src/connectivity/connectivityStore'; export * from './src/capture/captureOfflineQueue'; export * from './src/authModeState'; export {loadQueueItems} from './src/capture/leadQueueStorage'; export * from './src/capture/captureProfile'; export {parseQrPayload} from './src/capture/parseQrPayload'; export * from './src/capture/captureProcessingAdapter'; export {evidenceManager} from './src/capture/captureEvidenceManager';`,resolveDir:process.cwd()},bundle:true,platform:'node',format:'cjs',outfile:path.join(temp,'actual.cjs'),logLevel:'silent',plugins:[{name:'boundaries',setup(b){b.onResolve({filter:/.*/},args=>{const name=path.basename(args.path);if(mocks[name])return {path:name,namespace:'mock'};});b.onLoad({filter:/.*/,namespace:'mock'},args=>({contents:mocks[args.path],loader:'js'}));}}]});
@@ -71,10 +71,12 @@ const mocks = {
  await q.flushQueue('u');assert.equal(h.rows.size,0);assert.equal(h.uploads.length,uploaded,'metadata-only retry must not reupload');
  assert.equal(q.effectiveCaptureProfile('CRM',false),'EXHIBITION');assert.equal(q.effectiveCaptureProfile('CRM',true),'CRM');
  h.rows.clear();h.jobs=0;q.setAuthModeState('offline-restored');
- const manual={session:{draftData:{clientName:'Offline Example',phone:'1234567890',captureEventId:'event'},captureMethod:'MANUAL'},backendSessionId:'manual',ownerId:'u',eventId:'event',isOnline:true};
+ const manual={session:{draftData:{clientName:'Offline Example',phone:'1234567890',captureEventId:'event',previousRepCode:'REP-007'},captureMethod:'MANUAL'},backendSessionId:'manual',ownerId:'u',eventId:'event',isOnline:true};
  assert.equal((await q.submitCaptureSession(manual)).outcome,'queued');assert.equal(h.jobs,0);
  assert.deepEqual([...h.rows.values()][0].payload.draftData,manual.session.draftData);
  assert.equal([...h.rows.values()][0].payload.eventId,'event');
+ // B1.13/23 replay uses the durable association, without consulting today's active list.
+ q.setAuthModeState('online');await q.flushQueue('u');assert.equal(h.lastJob.eventId,'event');assert.equal(h.lastJob.draftData.captureEventId,'event');assert.equal(h.lastJob.draftData.previousRepCode,'REP-007');assert.equal(h.rows.size,0);q.setAuthModeState('offline-restored');
  h.rows.clear();h.jobs=0;
  const raw='BEGIN:VCARD\nVERSION:3.0\nFN:Offline QR Example\nORG:Example Co\nTEL:+919999999999\nEND:VCARD';
  const decoded=q.parseQrPayload(raw);assert.equal(decoded.fields.clientName,'Offline QR Example');

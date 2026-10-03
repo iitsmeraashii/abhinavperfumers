@@ -1,3 +1,5 @@
+import { usePreviousReps } from './capture/usePreviousReps';
+import { resolveCaptureEvent } from './capture/eventCacheStorage';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { useEvent } from './EventContext';
@@ -6,7 +8,7 @@ import { useAuth } from './AuthContext';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
 import { useAutosave } from './capture/useAutosave';
-import { loadDraft, clearDraft, loadSavedDraft, saveSavedDraft, deleteSavedDraft } from './capture/captureDraftStorage';
+import { loadDraft, saveDraftStrict, clearDraft, loadSavedDraft, saveSavedDraft, deleteSavedDraft } from './capture/captureDraftStorage';
 import { isDraftEmpty } from './capture/captureDraftEligibility';
 import { deleteSessionAssets } from './capture/captureAssetStorage';
 import { OfflineBanner } from './capture/OfflineBanner';
@@ -57,24 +59,17 @@ const QrScannerView = lazy(() =>
 export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: string | null }) {
   const { selectedEvent, activeEvents } = useEvent();
   const { salesRep, user, authMode } = useAuth();
+  const previousReps = usePreviousReps();
   const authUserId = user?.authUserId ?? null;
 
   // Resolve the effective event for a capture session: the per-lead override
   // in draftData.captureEventId takes priority, falling back to the My Account
   // default (selectedEvent). Returns { id, code, name } or nulls.
-  const resolveEvent = useCallback((draftData: DraftData) => {
-    const overrideId = draftData.captureEventId;
-    if (overrideId && overrideId !== selectedEvent?.id) {
-      const ev = activeEvents.find(e => e.id === overrideId);
-      if (ev) return { id: ev.id, eventCode: ev.event_code, eventName: ev.name };
-      return { id: overrideId, eventCode: null, eventName: null };
-    }
-    return {
-      id:        selectedEvent?.id         ?? salesRep?.default_event_id ?? null,
-      eventCode: selectedEvent?.event_code ?? null,
-      eventName: selectedEvent?.name       ?? null,
-    };
-  }, [selectedEvent, activeEvents, salesRep?.default_event_id]);
+  const historicalEvent = useRef<{ sessionId: string | null; id: string } | null>(null);
+  const resolveEvent = useCallback((draftData: DraftData) => resolveCaptureEvent(
+    activeEvents, draftData.captureEventId, salesRep?.default_event_id,
+    historicalEvent.current?.id === draftData.captureEventId ? historicalEvent.current?.id : null,
+  ), [activeEvents, salesRep?.default_event_id]);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isFlushing, setIsFlushing] = useState(false);
   const [promotionToast, setPromotionToast] = useState<{ message: string; isError: boolean } | null>(null);
@@ -239,6 +234,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       if (normalised.captureMethod === 'BUSINESS_CARD' && normalised.draftData.cardSessionId) {
         setCardSessionId(normalised.draftData.cardSessionId as string);
       }
+      historicalEvent.current = normalised.draftData.captureEventId ? { sessionId: normalised.sync.backendSessionId, id: normalised.draftData.captureEventId } : null;
       actions.restoreSession(normalised);
       profileEngine.resolve(normalised.captureProfile);
       addEntryRef.current('Resumed saved draft', { draftId: resumeDraftId });
@@ -277,6 +273,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
   const handleRecoveryContinue = useCallback(() => {
     if (!pendingDraft) return;
     const normalised = pendingDraft.session;
+    historicalEvent.current = normalised.draftData.captureEventId ? { sessionId: normalised.sync.backendSessionId, id: normalised.draftData.captureEventId } : null;
 
     if (normalised.captureMethod === 'BUSINESS_CARD' && normalised.draftData.cardSessionId) {
       setCardSessionId(normalised.draftData.cardSessionId as string);
@@ -497,6 +494,18 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       form.handleReset();
       actions.resetSession();
       return;
+    }
+
+    if (historicalEvent.current?.sessionId !== bsid) historicalEvent.current = null;
+    if (!resolveEvent(s.draftData).id) {
+      try { await saveDraftStrict(s, authUserId); } catch {
+        const error = 'Could not save the draft locally. Keep this capture open and retry.';
+        setPromotionToast({ message: error, isError: true });
+        return { error };
+      }
+      const error = 'No active event is available. Your capture is kept as a draft. Select an active event or reconnect to refresh events.';
+      setPromotionToast({ message: error, isError: true });
+      return { error };
     }
 
     logEvent('handleSaveAndNext()', {
@@ -1133,6 +1142,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
         {showManualForm && (
           <div ref={manualSectionRef}>
           <ManualEntryForm
+            previousReps={previousReps}
             session={session}
             isOnline={isOnline}
             saveState={saveState}

@@ -9,7 +9,7 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-reconnect-'));
 const pause = () => new Promise(r => setTimeout(r, 5));
 const deferred = () => { let resolve; const promise = new Promise(r => resolve=r); return {promise, resolve}; };
 const app = fs.readFileSync('src/App.tsx','utf8');
-const replayEffect = app.slice(app.indexOf('  useEffect(() => {', app.indexOf('// Flush the offline pending_ops')), app.indexOf('  const { refreshSelectedEvent', app.indexOf('// Flush the offline pending_ops')));
+const replayEffect = app.slice(app.indexOf('  useEffect(() => {', app.indexOf('// Flush the offline pending_ops')), app.indexOf('  const { clearEvent } = useEvent();', app.indexOf('// Flush the offline pending_ops')));
 assert(replayEffect.includes('startQueueReplay'));
 const mocks = {
  react: `export const createContext=()=>({Provider:'Provider'}); export const useContext=()=>globalThis.authValue; export const useState=x=>globalThis.host.state(x); export const useRef=x=>globalThis.host.ref(x); export const useCallback=f=>f; export const useEffect=(f,d)=>globalThis.host.effect(f,d);`,

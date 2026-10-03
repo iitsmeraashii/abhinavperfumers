@@ -1,3 +1,5 @@
+import { filterPreviousReps, previousRepLabel } from './previousRepCacheStorage';
+import type { usePreviousReps } from './usePreviousReps';
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   ArrowLeft, User, Building2, Mail, Briefcase,
@@ -688,14 +690,15 @@ function LeadTypePicker({ value, onChange }: { value?: LeadType; onChange: (v: L
 function PreviousRepSelect({
   value,
   onChange,
+  source,
 }: {
   value: string;
   onChange: (code: string) => void;
+  source: ReturnType<typeof usePreviousReps>;
 }) {
   const [open, setOpen]   = useState(false);
   const [search, setSearch] = useState('');
-  const [reps, setReps]   = useState<{ rep_code: string; name: string }[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const { reps, refresh } = source;
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -706,30 +709,13 @@ function PreviousRepSelect({
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  async function loadReps() {
-    if (loaded) return;
-    const { data } = await supabase
-      .from('sales_representatives')
-      .select('rep_code, name')
-      .eq('is_active', true)
-      .order('name');
-    if (data) setReps(data);
-    setLoaded(true);
-  }
-
   function handleOpen() {
-    loadReps();
+    void refresh();
     setOpen(true);
     setSearch('');
   }
 
-  const filtered = search
-    ? reps.filter(r =>
-        r.name.toLowerCase().includes(search.toLowerCase()) ||
-        r.rep_code.toLowerCase().includes(search.toLowerCase()))
-    : reps;
-
-  const selectedRep = reps.find(r => r.rep_code === value);
+  const filtered = filterPreviousReps(reps, search);
 
   return (
     <div ref={ref} className="relative">
@@ -742,7 +728,7 @@ function PreviousRepSelect({
           hover:border-stone-300 transition-colors`}
       >
         <span className={value ? 'text-stone-900 font-medium' : 'text-stone-400'}>
-          {selectedRep ? `${selectedRep.name} (${selectedRep.rep_code})` : 'Select rep…'}
+          {previousRepLabel(reps, value)}
         </span>
         <ChevronDown className={`w-4 h-4 text-stone-400 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
@@ -859,6 +845,7 @@ function CollapsibleSection({
 // ─── Main form ────────────────────────────────────────────────────────────────
 
 interface Props {
+  previousReps: ReturnType<typeof usePreviousReps>;
   session:       CaptureSession;
   isOnline:      boolean;
   saveState?:    SaveState;
@@ -877,7 +864,7 @@ interface Props {
   defaultEvent?:  AppEvent | null;
 }
 
-export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional, activeEvents = [], defaultEvent = null }: Props) {
+export function ManualEntryForm({ previousReps, session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional, activeEvents = [], defaultEvent = null }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
@@ -1292,6 +1279,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
             />
             {leadType === 'EXISTING' && (
               <PreviousRepSelect
+                source={previousReps}
                 value={previousRepCode}
                 onChange={code => handleChange('previousRepCode', code)}
               />
@@ -1394,6 +1382,10 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
               onChange={e => handlePatchDraft({ captureEventId: e.target.value || undefined })}
               className={inputCls()}
             >
+              <option value="">{activeEvents.length ? 'Select an active event' : 'No active events available'}</option>
+              {session.draftData.captureEventId && !activeEvents.some(ev => ev.id === session.draftData.captureEventId) && (
+                <option value={session.draftData.captureEventId} disabled>Previously selected event (not currently active)</option>
+              )}
               {activeEvents.map(ev => (
                 <option key={ev.id} value={ev.id}>
                   {ev.name}
