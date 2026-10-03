@@ -1394,6 +1394,10 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
               onChange={e => handlePatchDraft({ captureEventId: e.target.value || undefined })}
               className={inputCls()}
             >
+              <option value="">{activeEvents.length ? 'Select an active event' : 'No active events available'}</option>
+              {session.draftData.captureEventId && !activeEvents.some(ev => ev.id === session.draftData.captureEventId) && (
+                <option value={session.draftData.captureEventId} disabled>Previously selected event (not currently active)</option>
+              )}
               {activeEvents.map(ev => (
                 <option key={ev.id} value={ev.id}>
                   {ev.name}
