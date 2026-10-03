@@ -71,12 +71,12 @@ const mocks = {
  await q.flushQueue('u');assert.equal(h.rows.size,0);assert.equal(h.uploads.length,uploaded,'metadata-only retry must not reupload');
  assert.equal(q.effectiveCaptureProfile('CRM',false),'EXHIBITION');assert.equal(q.effectiveCaptureProfile('CRM',true),'CRM');
  h.rows.clear();h.jobs=0;q.setAuthModeState('offline-restored');
- const manual={session:{draftData:{clientName:'Offline Example',phone:'1234567890',captureEventId:'event'},captureMethod:'MANUAL'},backendSessionId:'manual',ownerId:'u',eventId:'event',isOnline:true};
+ const manual={session:{draftData:{clientName:'Offline Example',phone:'1234567890',captureEventId:'event',previousRepCode:'REP-007'},captureMethod:'MANUAL'},backendSessionId:'manual',ownerId:'u',eventId:'event',isOnline:true};
  assert.equal((await q.submitCaptureSession(manual)).outcome,'queued');assert.equal(h.jobs,0);
  assert.deepEqual([...h.rows.values()][0].payload.draftData,manual.session.draftData);
  assert.equal([...h.rows.values()][0].payload.eventId,'event');
  // B1.13/23 replay uses the durable association, without consulting today's active list.
- q.setAuthModeState('online');await q.flushQueue('u');assert.equal(h.lastJob.eventId,'event');assert.equal(h.lastJob.draftData.captureEventId,'event');assert.equal(h.rows.size,0);q.setAuthModeState('offline-restored');
+ q.setAuthModeState('online');await q.flushQueue('u');assert.equal(h.lastJob.eventId,'event');assert.equal(h.lastJob.draftData.captureEventId,'event');assert.equal(h.lastJob.draftData.previousRepCode,'REP-007');assert.equal(h.rows.size,0);q.setAuthModeState('offline-restored');
  h.rows.clear();h.jobs=0;
  const raw='BEGIN:VCARD\nVERSION:3.0\nFN:Offline QR Example\nORG:Example Co\nTEL:+919999999999\nEND:VCARD';
  const decoded=q.parseQrPayload(raw);assert.equal(decoded.fields.clientName,'Offline QR Example');

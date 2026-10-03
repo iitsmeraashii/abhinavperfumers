@@ -1,3 +1,4 @@
+import { usePreviousReps } from './capture/usePreviousReps';
 import { resolveCaptureEvent } from './capture/eventCacheStorage';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from './capture/useOnlineStatus';
@@ -58,6 +59,7 @@ const QrScannerView = lazy(() =>
 export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: string | null }) {
   const { selectedEvent, activeEvents } = useEvent();
   const { salesRep, user, authMode } = useAuth();
+  const previousReps = usePreviousReps();
   const authUserId = user?.authUserId ?? null;
 
   // Resolve the effective event for a capture session: the per-lead override
@@ -1140,6 +1142,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
         {showManualForm && (
           <div ref={manualSectionRef}>
           <ManualEntryForm
+            previousReps={previousReps}
             session={session}
             isOnline={isOnline}
             saveState={saveState}

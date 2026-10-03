@@ -4,7 +4,7 @@
 
 const DB_NAME = 'capture_app';
 // Keep DB_VERSION centralized here so every store uses the same database version.
-const DB_VERSION = 10;
+const DB_VERSION = 11;
 
 export function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -14,6 +14,9 @@ export function openDB(): Promise<IDBDatabase> {
 
     req.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains('previous_rep_cache')) {
+        db.createObjectStore('previous_rep_cache', { keyPath: 'ownerId' });
+      }
       if (!db.objectStoreNames.contains('event_cache')) {
         db.createObjectStore('event_cache', { keyPath: 'ownerId' });
       }
