@@ -1,3 +1,4 @@
+import { isTransportOnline } from '../connectivity/connectivityStore';
 // Capture Evidence Manager — single owner of the Evidence lifecycle.
 //
 // Responsibilities:
@@ -13,6 +14,7 @@
 // The manager is profile-agnostic. It receives UploadTiming policies from
 // the ExecutionPlan via the Processing Engine and never inspects strategies.
 
+import { getAsset } from './captureAssetStorage';
 import type { BusinessCardAsset } from './types';
 import type { UploadTiming }       from './CaptureExecutionEngine';
 import {
@@ -23,7 +25,8 @@ import {
 import type { BusinessCardUploadResult } from './assetStorageUpload';
 import { voiceEvidenceManager } from './voiceEvidenceManager';
 import { dbPut, dbDelete }     from './db';
-import { enqueueOp }           from './captureOfflineQueue';
+import { isCloudSyncAllowed } from '../authModeState';
+import { enqueueOp, cancelCardUpload }           from './captureOfflineQueue';
 
 let _uploadSeq = 0;
 function _diag(stage: string, payload: Record<string, unknown>): void {
@@ -76,6 +79,7 @@ class CaptureEvidenceManager {
   private _pendingReconciliation: BusinessCardAsset[] = [];
   private _pendingCardUploads: Map<string, BusinessCardAsset[]> = new Map();
   private _uploadTrackers: Map<string, Promise<void>[]> = new Map();
+  private _registeredCards = new Map<string, BusinessCardAsset>();
   private _correlationId: string | null = null;
   /** Asset IDs that have been intentionally discarded by the user.
    *  Uploads for these assets are cancelled before metadata write. */
@@ -88,12 +92,14 @@ class CaptureEvidenceManager {
   /** Mark an asset as intentionally discarded. Any in-flight or deferred
    *  upload for this asset will be cancelled before the metadata write,
    *  preventing an unexpected backend capture_assets record. */
-  abandonAsset(assetId: string): void {
+  async abandonAsset(assetId: string): Promise<void> {
     this._abandonedAssetIds.add(assetId);
     // Also remove from any deferred pending uploads so flush/reset won't dispatch
     for (const [sid, assets] of this._pendingCardUploads) {
       this._pendingCardUploads.set(sid, assets.filter(a => a.id !== assetId));
     }
+    const asset = this._registeredCards.get(assetId);
+    if (asset?.ownerId) await cancelCardUpload(assetId, asset.ownerId);
   }
 
   /** Check whether an asset has been abandoned (used by _uploadBusinessCard). */
@@ -107,6 +113,8 @@ class CaptureEvidenceManager {
     switch (evidence.type) {
       case 'business_card_front':
       case 'business_card_back': {
+        if (this._registeredCards.has(evidence.asset.id)) return;
+        this._registeredCards.set(evidence.asset.id, evidence.asset);
         const sizeBefore = this._pendingCardUploads.get(evidence.sessionId)?.length ?? 0;
         const trackedBefore = this._uploadTrackers.get(evidence.sessionId)?.length ?? 0;
         _diag('REGISTER_START', {
@@ -182,7 +190,7 @@ class CaptureEvidenceManager {
 
   onSaveAndNext(sessionId: string, correlationId?: string | null, ownerId?: string | null): void {
     // Voice evidence is handled by VoiceEvidenceManager — it manages its own
-    // online/offline routing, so it must be called before the navigator.onLine
+    // online/offline routing, so it must be called before the isTransportOnline()
     // gate that applies to notes and reconciliation.
     const _voiceMgrExists = !!voiceEvidenceManager;
     const _onSaveExists = typeof voiceEvidenceManager?.onSaveAndNext === 'function';
@@ -207,7 +215,7 @@ class CaptureEvidenceManager {
       });
     }
 
-    if (!navigator.onLine) return;
+    if (!isTransportOnline()) return;
 
     if (this._pendingNotes?.sessionId === sessionId) {
       const { dataUrl, ownerId, localOpId } = this._pendingNotes;
@@ -221,7 +229,7 @@ class CaptureEvidenceManager {
       this._trackUpload(sessionId, p);
     }
 
-    if (this._pendingReconciliation.length > 0) {
+    if (isCloudSyncAllowed() && this._pendingReconciliation.length > 0) {
       const toReconcile = this._pendingReconciliation.splice(0);
       for (const asset of toReconcile) {
         const p = reconcileAssetStorageMetadata(asset, correlationId).then(ok => {
@@ -273,6 +281,8 @@ class CaptureEvidenceManager {
       return;
     }
 
+    if (!isTransportOnline() || !isCloudSyncAllowed()) return;
+
     this._pendingCardUploads.delete(sessionId);
 
     let uploadInvocations = 0;
@@ -321,9 +331,48 @@ class CaptureEvidenceManager {
       return;
     }
     _diag('WAIT_UPLOADS_RESULT', { result: 'AWAITING', count: trackers.length });
-    await Promise.allSettled(trackers);
+    const results = await Promise.allSettled(trackers);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     _diag('WAIT_UPLOADS_SETTLED', { sessionId, count: trackers.length });
     this._uploadTrackers.delete(sessionId);
+    if (failed) throw failed.reason;
+  }
+
+  /** Persist deferred card intent before acknowledging a saved capture. */
+  async prepareForSubmission(sessionId: string, assetIds: string[] = [], ownerId?: string | null): Promise<void> {
+    for (const id of assetIds) {
+      if (this._registeredCards.has(id)) continue;
+      if (!ownerId) throw new Error('Cannot recover card without its capture owner');
+      const asset = await getAsset(id, ownerId);
+      if (!asset || asset.sessionId !== sessionId) throw new Error('Saved card image is unavailable; capture was not submitted');
+      this.register({ type: asset.side === 'back' ? 'business_card_back' : 'business_card_front',
+        sessionId, asset, uploadTiming: 'ON_SAVE' });
+    }
+    this.flushPendingUploads(sessionId);
+    await this.waitForUploads(sessionId);
+    const pending = this._pendingCardUploads.get(sessionId) ?? [];
+    for (const asset of pending) {
+      if (!this.isAssetAbandoned(asset.id)) await this._queueCard(asset);
+    }
+    this._pendingCardUploads.delete(sessionId);
+  }
+
+  private async _queueCard(asset: BusinessCardAsset, storagePath?: string | null): Promise<void> {
+    if (!asset.ownerId) throw new Error('Cannot queue a card without its capture owner');
+    try {
+      await enqueueOp('upload_business_card', asset.sessionId, {
+        storagePath, assetId: asset.id, sessionId: asset.sessionId, side: asset.side,
+      dataUrl: asset.dataUrl, mimeType: asset.mimeType, sizeBytes: asset.sizeBytes,
+      originalWidth: asset.originalWidth, originalHeight: asset.originalHeight,
+      storedWidth: asset.storedWidth, storedHeight: asset.storedHeight,
+      ownerId: asset.ownerId,
+      }, asset.ownerId);
+    } catch (error) {
+      const pending = this._pendingCardUploads.get(asset.sessionId) ?? [];
+      if (!pending.some(a => a.id === asset.id)) pending.push(asset);
+      this._pendingCardUploads.set(asset.sessionId, pending);
+      throw error;
+    }
   }
 
   onSessionReset(ownerId: string | null = null): void {
@@ -361,6 +410,7 @@ class CaptureEvidenceManager {
     this._pendingNotes = null;
     this._pendingReconciliation = [];
     this._pendingCardUploads.clear();
+    this._registeredCards.clear();
     this._abandonedAssetIds.clear();
     // Do NOT clear _uploadTrackers — produceProcessingJob may still need
     // to await them after the session has been reset.
@@ -370,6 +420,7 @@ class CaptureEvidenceManager {
   // ── Private upload helpers ─────────────────────────────────────────────────
 
   private _trackUpload(sessionId: string, p: Promise<void>): void {
+    void p.catch(() => {}); // Observed by waitForUploads; avoid early unhandled rejection.
     const arr = this._uploadTrackers.get(sessionId) ?? [];
     arr.push(p);
     this._uploadTrackers.set(sessionId, arr);
@@ -377,7 +428,7 @@ class CaptureEvidenceManager {
   }
 
   private async _uploadBusinessCard(asset: BusinessCardAsset, timing: UploadTiming, correlationId?: string | null): Promise<void> {
-    const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : 'unknown';
+    const isOnline = isTransportOnline();
     const storageBucket = 'lead-evidence';
     const storagePath = `${asset.sessionId}/${asset.id}.jpg`;
 
@@ -427,12 +478,13 @@ class CaptureEvidenceManager {
       return;
     }
 
-    if (!navigator.onLine) {
+    if (!isTransportOnline() || !isCloudSyncAllowed()) {
+      await this._queueCard(asset);
       _diag('UPLOAD_BUSINESS_CARD_RETURN', {
         backendSessionId: asset.sessionId,
         localAssetId: asset.id,
         returnPoint: 'OFFLINE',
-        reason: 'navigator.onLine is false — upload skipped',
+        reason: 'isTransportOnline() is false — upload skipped',
         isOnline: false,
       });
       return;
@@ -459,7 +511,7 @@ class CaptureEvidenceManager {
 
     let result: BusinessCardUploadResult | null = null;
     try {
-      result = await uploadBusinessCardAsset(asset, correlationId);
+      result = await uploadBusinessCardAsset(asset, correlationId, () => this.isAssetAbandoned(asset.id));
     } catch (err: unknown) {
       const errObj = err as Record<string, unknown>;
       _diag('UPLOAD_BUSINESS_CARD_ERROR', {
@@ -487,13 +539,8 @@ class CaptureEvidenceManager {
       resultIsNull: result === null,
     });
 
-    if (result?.uploaded && !result.metadataWritten) {
-      _diag('UPLOAD_BUSINESS_CARD_RECONCILE', {
-        backendSessionId: asset.sessionId,
-        localAssetId: asset.id,
-        reason: 'file uploaded to Storage but metadata write failed — queued for reconciliation',
-      });
-      this._pendingReconciliation.push(asset);
+    if (!result?.uploaded || !result.metadataWritten) {
+      if (!this.isAssetAbandoned(asset.id)) await this._queueCard(asset, result?.storagePath);
     }
 
     _diag('UPLOAD_BUSINESS_CARD_RETURN', {

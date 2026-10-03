@@ -1,10 +1,11 @@
+import { isTransportOnline } from '../connectivity/connectivityStore';
 // Fire-and-forget backend sync for the capture lead workflow.
 //
 // Design principles:
 //   - NEVER awaited by UI code — all functions return void
 //   - Failures are swallowed silently; UI always uses local state
 //   - Each operation is idempotent via upsert (stable IDs from frontend)
-//   - Offline detection: skip sync if navigator.onLine is false
+//   - Offline detection: skip sync if isTransportOnline() is false
 //   - No retry queue in this layer — caller re-calls on reconnect
 //
 // The stable IDs (session ID, asset ID, extraction ID) are generated on the
@@ -42,7 +43,7 @@ export interface SyncCallbacks {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function online(): boolean {
-  return typeof navigator !== 'undefined' ? navigator.onLine : true;
+  return isTransportOnline();
 }
 
 // ─── Session upsert ───────────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ export async function syncUpsertAsset(
   logEvent('syncUpsertAsset() — online() evaluated', ctx, { corrId, isOnline });
 
   if (!isOnline) {
-    logEvent('syncUpsertAsset() — returning: offline', ctx, { corrId, returnReason: 'navigator.onLine is false' });
+    logEvent('syncUpsertAsset() — returning: offline', ctx, { corrId, returnReason: 'isTransportOnline() is false' });
     cbs.onOffline();
     return;
   }

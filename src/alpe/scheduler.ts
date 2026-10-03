@@ -1,3 +1,4 @@
+import { isTransportOnline } from '../connectivity/connectivityStore';
 // ALPE Queue Scheduler — singleton that manages the polling lifecycle.
 //
 // Guarantees:
@@ -48,7 +49,6 @@ class AlpeScheduler {
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private inFlightTick = false;
   private userId: string | null = null;
-  private isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
   private lastCleanupAt = 0;
 
   // ── Singleton guard ────────────────────────────────────────────────────────
@@ -114,15 +114,14 @@ class AlpeScheduler {
    * completes — ALPE jobs replayed from the offline queue are picked up.
    */
   notifyReconnect(): void {
-    this.isOnline = true;
     if (this.status === 'running' && !this.inFlightTick) {
       this.tick().catch(() => {});
     }
   }
 
-  /** Mark the scheduler as offline. Called when the browser goes offline. */
+  /** Compatibility callback; ticks read transport state from the shared store. */
   notifyOffline(): void {
-    this.isOnline = false;
+    // No separate scheduler connectivity flag to update.
   }
 
   /** Gracefully stop the scheduler. Waits for in-flight tick to finish. */
@@ -167,8 +166,8 @@ class AlpeScheduler {
   private async tick(): Promise<void> {
     if (this.inFlightTick || this.status !== 'running' || !this.userId) return;
     // Skip polling when offline — Supabase queries would fail and waste cycles.
-    // The scheduler resumes via notifyReconnect() when connectivity returns.
-    if (!this.isOnline) return;
+    // Existing ticks and notifyReconnect() both consult the shared state.
+    if (!isTransportOnline()) return;
     // Authoritative auth gate: even if the browser is online, cloud work
     // must not run until AuthContext has validated the profile. Logout or
     // offline-restoration sets this to false synchronously.
