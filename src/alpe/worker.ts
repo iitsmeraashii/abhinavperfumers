@@ -1,3 +1,4 @@
+import { isTransportOnline } from '../connectivity/connectivityStore';
 // ALPE Worker — reconstructs a CaptureSession from a backend capture_sessions
 // row, builds an ExecutionPlan via the existing CaptureExecutionEngine factory,
 // and runs the existing processCaptureSession pipeline.
@@ -449,7 +450,7 @@ export async function processJob(job: QueueEntry): Promise<WorkerResult> {
   traceStage(backendSessionId, 'EVENT_INFO', { eventCode, eventName });
 
   // 3. Build the execution plan via the existing factory
-  const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  const isOnline = isTransportOnline();
   const plan = executionEngine.buildPlan(profile, strategies, isOnline);
   traceStage(backendSessionId, 'PLAN_BUILT', { isOnline, promotion: plan.promotion, review: plan.review });
 

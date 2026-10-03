@@ -1,3 +1,4 @@
+import { isTransportOnline } from '../connectivity/connectivityStore';
 // Voice Evidence Manager — owns the complete voice note evidence lifecycle.
 //
 // Lifecycle stages:
@@ -12,10 +13,10 @@
 //   FAILED          — upload or transcription error; evidence is NOT lost
 //                     (transcription_status = 'failed' on the asset row)
 //
-// Online path (onSaveAndNext, navigator.onLine):
+// Online path (onSaveAndNext, isTransportOnline()):
 //   upload → transcribe (both fire-and-forget; failures update DB status)
 //
-// Offline path (onSaveAndNext, !navigator.onLine):
+// Offline path (onSaveAndNext, !isTransportOnline()):
 //   enqueue 'upload_voice_note' op → on flush: upload then transcribe inline
 //
 // Design principles:
@@ -102,7 +103,7 @@ class VoiceEvidenceManager {
       lastRegisteredSessionId: this._lastRegisteredSessionId,
       lastClearedBy: this._lastClearedBy,
       lastClearedAt: this._lastClearedAt,
-      isOnline: typeof navigator !== 'undefined' ? navigator.onLine : 'unknown',
+      isOnline: isTransportOnline(),
     });
     if (!audioBlob || audioBlob.size === 0) {
       if (isConsoleEnabled()) console.log('[VOICE_DIAG] VoiceEvidenceManager.register EARLY_RETURN', {
@@ -141,7 +142,7 @@ class VoiceEvidenceManager {
     // ON_SAVE defers to onSaveAndNext(); NEVER suppresses upload entirely.
     // The Blob is already persisted above, so an upload failure or refresh
     // will not lose the evidence — the pending_ops row remains for retry.
-    if (uploadTiming === 'IMMEDIATE' && navigator.onLine) {
+    if (uploadTiming === 'IMMEDIATE' && isTransportOnline()) {
       const pending = this._pending;
       this._pending = null;
       this._lastClearedBy = 'register() IMMEDIATE upload';
@@ -188,7 +189,7 @@ class VoiceEvidenceManager {
       pendingSessionId,
       hasPendingForThisSession: hasPending,
       willCallUploadVoiceNote: hasPending,
-      isOnline: typeof navigator !== 'undefined' ? navigator.onLine : 'unknown',
+      isOnline: isTransportOnline(),
       lastRegisteredSessionId: this._lastRegisteredSessionId,
       lastClearedBy: this._lastClearedBy,
       lastClearedAt: this._lastClearedAt,
@@ -232,7 +233,7 @@ class VoiceEvidenceManager {
     // onSaveAndNext — the user may have switched between recording and Save.
     const effectiveOwnerId = capturedOwnerId ?? ownerId;
     let uploadPromisesCreated = 0;
-    if (navigator.onLine) {
+    if (isTransportOnline()) {
       void this._uploadAndTranscribe(sessionId, audioBlob, mimeType, durationMs, effectiveOwnerId, localOpId);
       uploadPromisesCreated = 1;
     } else {
@@ -284,7 +285,7 @@ class VoiceEvidenceManager {
       this._lastClearedBy = 'onSessionReset() — upload dispatched';
       this._lastClearedAt = new Date().toISOString();
       const effectiveOwnerId = capturedOwnerId ?? ownerId;
-      if (navigator.onLine) {
+      if (isTransportOnline()) {
         void this._uploadAndTranscribe(sessionId, audioBlob, mimeType, durationMs, effectiveOwnerId, localOpId);
       } else if (!localOpId) {
         // Only enqueue if not already persisted at register() time.

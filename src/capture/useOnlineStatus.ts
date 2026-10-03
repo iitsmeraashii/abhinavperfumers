@@ -1,35 +1,26 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { connectivityStore } from '../connectivity/connectivityStore';
 
 interface UseOnlineStatusOptions {
   onReconnect?: () => void;
-  onOffline?:   () => void;
+  onOffline?: () => void;
 }
 
 export function useOnlineStatus(options?: UseOnlineStatusOptions): boolean {
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const onReconnectRef = useRef(options?.onReconnect);
-  const onOfflineRef = useRef(options?.onOffline);
-  onReconnectRef.current = options?.onReconnect;
-  onOfflineRef.current = options?.onOffline;
-
-  const handleOnline = useCallback(() => {
-    setIsOnline(true);
-    onReconnectRef.current?.();
-  }, []);
-
-  const handleOffline = useCallback(() => {
-    setIsOnline(false);
-    onOfflineRef.current?.();
-  }, []);
-
+  const isOnline = useSyncExternalStore(
+    connectivityStore.subscribe, connectivityStore.getSnapshot, connectivityStore.getServerSnapshot,
+  );
+  const callbacks = useRef(options);
+  callbacks.current = options;
   useEffect(() => {
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [handleOnline, handleOffline]);
-
+    let previous = connectivityStore.getSnapshot();
+    return connectivityStore.subscribe(() => {
+      const next = connectivityStore.getSnapshot();
+      if (previous === next) return;
+      previous = next;
+      if (next) callbacks.current?.onReconnect?.();
+      else callbacks.current?.onOffline?.();
+    });
+  }, []);
   return isOnline;
 }

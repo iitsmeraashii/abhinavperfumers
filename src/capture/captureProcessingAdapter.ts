@@ -10,9 +10,10 @@
 // collection, and sync routing. All processing is delegated through this
 // adapter so the UI never branches on the processing mode.
 
-import { produceProcessingJob } from '../alpe';
-import type { ProduceJobResult } from '../alpe';
-import { enqueueOp } from './captureOfflineQueue';
+import { produceProcessingJob } from '../alpe/jobProducer';
+import type { ProduceJobResult } from '../alpe/jobProducer';
+import { evidenceManager } from './captureEvidenceManager';
+import { enqueueProcessingCapture } from './captureOfflineQueue';
 import { isCloudSyncAllowed } from '../authModeState';
 import type { CaptureSession } from './types';
 
@@ -41,17 +42,27 @@ export interface SubmitParams {
   ownerId?:         string | null;
 }
 
+// Only transport failures qualify; validation/authorization errors stay visible.
+function isTransportFailure(message: string | null | undefined): boolean {
+  return /^(?:TypeError:\s*)?(?:Failed to fetch|Load failed|Network request failed|NetworkError when attempting to fetch resource\.?)$/i.test(message ?? '');
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 /**
- * Submit a captured session for processing via ALPE. Never throws — errors
- * are surfaced as outcome 'failed' with an error message.
+ * Submit a captured session for processing via ALPE. Persistence failures reject;
+ * processing failures are surfaced as outcome 'failed' with an error message.
  */
 export async function submitCaptureSession(params: SubmitParams): Promise<AdapterResult> {
   const { session, backendSessionId, eventId, eventName, isOnline, correlationId, ownerId } = params;
 
-  if (!isOnline || !isCloudSyncAllowed()) {
-    await enqueueOp('enqueue_processing_job', backendSessionId, {
+  const cardIds = [session.draftData.cardFrontAssetId, session.draftData.cardBackAssetId]
+    .filter((id): id is string => Boolean(id));
+  await evidenceManager.prepareForSubmission(backendSessionId, cardIds, ownerId);
+
+  const queueProcessing = async (): Promise<AdapterResult> => {
+    if (!ownerId) throw new Error('Cannot queue capture without its owner');
+    await enqueueProcessingCapture(backendSessionId, {
       backendSessionId,
       draftData:     session.draftData,
       captureMethod: session.originalCaptureMethod ?? session.captureMethod,
@@ -60,9 +71,13 @@ export async function submitCaptureSession(params: SubmitParams): Promise<Adapte
       correlationId,
     }, ownerId ?? null);
     return { outcome: 'queued', leadId: null, error: null, jobId: null };
-  }
+  };
 
-  const result: ProduceJobResult = await produceProcessingJob({
+  if (!isOnline || !isCloudSyncAllowed()) return queueProcessing();
+
+  let result: ProduceJobResult;
+  try {
+  result = await produceProcessingJob({
     backendSessionId,
     draftData:     session.draftData,
     captureMethod:  session.originalCaptureMethod ?? session.captureMethod,
@@ -71,6 +86,15 @@ export async function submitCaptureSession(params: SubmitParams): Promise<Adapte
     correlationId,
     ownerId:       ownerId ?? null,
   });
+  } catch (error) {
+    if (error instanceof Error && isTransportFailure(error.message)) return queueProcessing();
+    throw error;
+  }
+
+  if ((result.outcome === 'failed' && (result.error === 'Evidence upload did not complete; processing was not queued' || isTransportFailure(result.error))) ||
+      (result.outcome === 'queued' && !result.jobId)) {
+    return queueProcessing();
+  }
 
   if (result.outcome === 'failed') {
     return {

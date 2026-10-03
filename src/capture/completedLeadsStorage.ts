@@ -117,6 +117,25 @@ async function remove(id: string): Promise<void> {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+/** Atomically commit the visible capture and its processing intent. */
+export async function saveQueuedCapture(lead: CompletedLead, pendingOp: object): Promise<void> {
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction([STORE, 'pending_ops'], 'readwrite');
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+    try {
+      tx.objectStore(STORE).put(lead);
+      tx.objectStore('pending_ops').put(pendingOp);
+    } catch (error) {
+      tx.abort();
+      reject(error);
+    }
+  });
+  notify();
+}
+
 export async function saveCompletedLead(lead: CompletedLead): Promise<void> {
   await put({ ...lead, updatedAt: new Date().toISOString() });
   notify();

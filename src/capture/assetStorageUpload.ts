@@ -1,3 +1,4 @@
+import { isTransportOnline } from '../connectivity/connectivityStore';
 // Evidence storage upload — uploads captured assets to Supabase Storage.
 //
 // Design:
@@ -14,6 +15,7 @@
 //   Notes image   : {userId}/{sessionId}/notes.jpg
 //   Voice note    : {userId}/{sessionId}/voice.{ext}  (planned — path only defined)
 
+import { isCloudSyncAllowed } from '../authModeState';
 import { supabase } from '../supabaseClient';
 import type { BusinessCardAsset } from './types';
 import { logOperationStart, logOperationEnd, logEvent, getCorrelationId } from './assetSyncDiagnostics';
@@ -52,6 +54,7 @@ const UPLOAD_FAIL: BusinessCardUploadResult = {
 export async function uploadBusinessCardAsset(
   asset: BusinessCardAsset,
   correlationId?: string | null,
+  isCancelled: () => boolean = () => false,
 ): Promise<BusinessCardUploadResult> {
   const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
   const ts0 = new Date().toISOString();
@@ -78,7 +81,7 @@ export async function uploadBusinessCardAsset(
   };
   const op = logOperationStart('Storage Upload — uploadBusinessCardAsset()', ctx);
 
-  if (!navigator.onLine) {
+  if (isCancelled() || !isTransportOnline() || !isCloudSyncAllowed()) {
     logOperationEnd(op, { extra: { skipped: 'offline' } });
     return UPLOAD_FAIL;
   }
@@ -101,6 +104,7 @@ export async function uploadBusinessCardAsset(
     return UPLOAD_FAIL;
   }
 
+  if (!isTransportOnline() || !isCloudSyncAllowed() || (asset.ownerId && asset.ownerId !== userId)) return UPLOAD_FAIL;
   const storagePath = `${userId}/${asset.id}.jpg`;
   const blob = dataUrlToBlob(asset.dataUrl);
 
@@ -189,6 +193,7 @@ export async function uploadBusinessCardAsset(
     return UPLOAD_FAIL;
   }
 
+  if (isCancelled()) return { uploaded: true, metadataWritten: false, storagePath };
   const metadataWritten = await _writeAssetStorageMeta(asset, userId, storagePath);
   logOperationEnd(op, { extra: { storagePath, metadataWritten } });
   return { uploaded: true, metadataWritten, storagePath };
@@ -255,6 +260,8 @@ async function _writeAssetStorageMeta(
   const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
   const writeTs = new Date().toISOString();
 
+  if (!isTransportOnline() || !isCloudSyncAllowed() || (asset.ownerId && asset.ownerId !== userId)) return false;
+
   const upsertPayload = {
     capture_session_id: asset.sessionId,
     user_id: userId,
@@ -314,6 +321,8 @@ async function _writeAssetStorageMeta(
     localAssetId: asset.id,
     correlationId: correlationId ?? null,
   }, { corrId, writtenRowId, returnedRows: data?.length ?? 0 });
+
+  if (!isTransportOnline() || !isCloudSyncAllowed()) return Array.isArray(data) ? data.length > 0 : Boolean(data);
 
   // ── Immediate read-back: verify the row has the storage_path we just wrote.
   // This catches races where another flow overwrote the row between our
@@ -392,7 +401,7 @@ export async function reconcileAssetStorageMetadata(
   asset: BusinessCardAsset,
   correlationId?: string | null,
 ): Promise<boolean> {
-  if (!navigator.onLine) return false;
+  if (!isTransportOnline() || !isCloudSyncAllowed()) return false;
   try {
     const userId = await getAuthUserId();
     if (!userId) return false;
@@ -404,7 +413,7 @@ export async function reconcileAssetStorageMetadata(
 }
 
 export async function uploadNotesImage(backendSessionId: string, dataUrl: string, correlationId?: string | null, ownerId?: string | null): Promise<void> {
-  if (!navigator.onLine || !dataUrl?.startsWith('data:')) return;
+  if (!isTransportOnline() || !dataUrl?.startsWith('data:')) return;
   const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
   const ctx = { backendSessionId, correlationId: correlationId ?? null };
   try {
@@ -437,13 +446,13 @@ export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob,
     storageBucket: BUCKET,
     blobSize: audioBlob?.size ?? null,
     mimeType,
-    isOnline: typeof navigator !== 'undefined' ? navigator.onLine : 'unknown',
+    isOnline: isTransportOnline(),
   });
 
-  if (!navigator.onLine || !audioBlob || audioBlob.size === 0) {
+  if (!isTransportOnline() || !audioBlob || audioBlob.size === 0) {
     if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
       backendSessionId,
-      reason: !navigator.onLine ? 'offline' : !audioBlob ? 'null blob' : 'zero-size blob',
+      reason: !isTransportOnline() ? 'offline' : !audioBlob ? 'null blob' : 'zero-size blob',
       storageBucket: BUCKET,
     });
     return;

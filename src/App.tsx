@@ -1,3 +1,4 @@
+import { connectivityStore } from './connectivity/connectivityStore';
 import { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './AuthContext';
 import { useAlpeScheduler } from './alpe/useAlpeScheduler';
@@ -19,7 +20,7 @@ import ConversationsPage from './ConversationsPage';
 import ConversationDetailPage from './ConversationDetailPage';
 import WhatsAppAssetsPage from './WhatsAppAssetsPage';
 import { supabase } from './supabaseClient';
-import { flushQueue } from './capture/captureOfflineQueue';
+import { startQueueReplay } from './capture/captureOfflineQueue';
 import { isConsoleEnabled } from './runtime/runtimeDiagnostics';
 import {
   LogOut, Loader2,
@@ -317,7 +318,7 @@ function Layout() {
   // transition to 'online' and guarantees pending work gets a flush opportunity.
   useEffect(() => {
     if (authMode !== 'online' || !user?.authUserId) return;
-    flushQueue(user.authUserId).catch((err) => {
+    return startQueueReplay(user.authUserId, (err) => {
       if (isConsoleEnabled()) console.error('[POST_AUTH_FLUSH] failed', err);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -695,6 +696,7 @@ function AppRoutes() {
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  useEffect(() => connectivityStore.subscribe(() => {}), []);
   return (
     <AuthProvider>
       <EventProvider>

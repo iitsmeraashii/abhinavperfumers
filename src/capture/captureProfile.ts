@@ -60,3 +60,8 @@ export const CAPTURE_PROFILE_DESCRIPTORS: Record<CaptureProfile, CaptureProfileD
     color:       'amber',
   },
 };
+
+/** Offline capture uses Exhibition policies without changing the saved preference. */
+export function effectiveCaptureProfile(preferred: CaptureProfile, cloudAvailable: boolean): CaptureProfile {
+  return cloudAvailable ? preferred : 'EXHIBITION';
+}

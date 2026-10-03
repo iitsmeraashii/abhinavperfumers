@@ -75,6 +75,17 @@ export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult>
     count: count ?? null,
   });
 
+  if (error?.code === '23505') {
+    // An earlier attempt may have committed before its response was lost.
+    // Recognize only the exact same owner/session job; never reset its state.
+    const { data: existing, error: lookupError } = await supabase.from(TABLE)
+      .select('id').eq('id', jobId).eq('capture_session_id', captureSessionId)
+      .eq('user_id', userId).maybeSingle();
+    if (!lookupError && existing?.id === jobId) {
+      return { success: true, jobId, error: null, queued: true };
+    }
+  }
+
   if (error) {
     logEvent('enqueueJob() — insert returned error', ctx, {
       corrId,
