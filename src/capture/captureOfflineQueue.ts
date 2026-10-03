@@ -9,7 +9,7 @@
 //   - The queue is per-device (not shared across tabs — that's fine)
 
 import { isCloudSyncAllowed } from '../authModeState';
-import { dbPut, dbDelete, dbGetAllInStore } from './db';
+import { dbPutStrict as dbPut, dbDeleteStrict as dbDelete, dbGetAllInStoreStrict as dbGetAllInStore } from './db';
 import {
   syncUpsertSession,
   syncUpsertAsset,
@@ -29,8 +29,9 @@ import type {
   SyncCallbacks,
 } from './captureBackendSync';
 import { executeVoiceNoteUploadOp } from './voiceEvidenceManager';
-import { uploadNotesImage as uploadNotesImageFn, uploadBusinessCardAsset as uploadBusinessCardAssetFn } from './assetStorageUpload';
-import type { DraftData } from './types';
+import { uploadNotesImage as uploadNotesImageFn, uploadBusinessCardAsset as uploadBusinessCardAssetFn, reconcileAssetStorageMetadata } from './assetStorageUpload';
+import { buildCompletedLead, saveQueuedCapture } from './completedLeadsStorage';
+import type { CaptureMethod, DraftData } from './types';
 
 // ─── Op types ─────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,10 @@ export async function enqueueOp(
   payload: unknown,
   ownerId?: string | null,
 ): Promise<string> {
-  const id = `op_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const id = type === 'upload_business_card'
+    ? `card_${ownerId}_${(payload as { assetId: string }).assetId}`
+    : type === 'enqueue_processing_job' ? `processing_${ownerId}_${sessionId}`
+    : `op_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const op: PendingOp = {
     id,
     ownerId: ownerId ?? null,
@@ -79,6 +83,27 @@ export async function enqueueOp(
   };
   await dbPut(STORE, op);
   return id;
+}
+
+/** Existing stores, one transaction: queued work must also be visible locally. */
+export async function enqueueProcessingCapture(
+  sessionId: string,
+  payload: { backendSessionId: string; draftData: DraftData; captureMethod: CaptureMethod | null;
+    eventId: string | null; eventName: string | null; correlationId?: string | null },
+  ownerId: string,
+): Promise<void> {
+  const lead = buildCompletedLead(sessionId, payload.captureMethod, payload.draftData,
+    sessionId, payload.eventId, payload.eventName, ownerId);
+  lead.status = 'pending_sync';
+  await saveQueuedCapture(lead, {
+    id: `processing_${ownerId}_${sessionId}`, ownerId, type: 'enqueue_processing_job',
+    sessionId, createdAt: new Date().toISOString(), retries: 0, payload,
+  });
+}
+
+/** Cancel only this owner's pending card intent when the user discards it. */
+export async function cancelCardUpload(assetId: string, ownerId: string): Promise<void> {
+  await dbDelete(STORE, `card_${ownerId}_${assetId}`);
 }
 
 // ─── Flush ────────────────────────────────────────────────────────────────────
@@ -114,8 +139,10 @@ export async function flushQueue(
     const ops = ownerId ? allOps.filter(op => op.ownerId === ownerId) : allOps;
     if (ops.length === 0) return { flushed: 0, remaining: allOps.length };
 
-    // Sort by creation order
-    ops.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    // Preserve creation order within stages, but never let processing precede
+    // session/evidence work (including operations created in the same millisecond).
+    const stage = (op: PendingOp) => op.type === 'enqueue_processing_job' ? 2 : op.type === 'upsert_session' ? 0 : 1;
+    ops.sort((a, b) => stage(a) - stage(b) || a.createdAt.localeCompare(b.createdAt));
 
     let flushed = 0;
 
@@ -123,6 +150,11 @@ export async function flushQueue(
       if (!navigator.onLine) break;
       if (!isCloudSyncAllowed()) break;
 
+      if (op.type === 'enqueue_processing_job') {
+        const pending = await dbGetAllInStore<PendingOp>(STORE);
+        if (pending.some(other => other.ownerId === op.ownerId && other.sessionId === op.sessionId &&
+            other.type !== 'enqueue_processing_job')) continue;
+      }
       try {
         await executeOp(op);
         await dbDelete(STORE, op.id);
@@ -130,8 +162,10 @@ export async function flushQueue(
         onProgress?.(flushed, ops.length);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        // Auth errors are not retryable — drop the op
-        if (msg.includes('Not authenticated') || msg.includes('JWT')) {
+        // Preserve capture intents even when auth is temporarily unavailable.
+        // Legacy operation behavior is unchanged.
+        if (op.type !== 'upload_business_card' && op.type !== 'enqueue_processing_job' &&
+            (msg.includes('Not authenticated') || msg.includes('JWT'))) {
           await dbDelete(STORE, op.id);
           flushed++;
         } else {
@@ -148,6 +182,14 @@ export async function flushQueue(
   } finally {
     flushLocks.delete(lockKey);
   }
+}
+
+/** Foreground replay also retries backend-only outages with no browser online event. */
+export function startQueueReplay(ownerId: string, onError: (error: unknown) => void): () => void {
+  const tick = () => flushQueue(ownerId).catch(onError);
+  void tick();
+  const timer = setInterval(() => { void tick(); }, 15_000);
+  return () => clearInterval(timer);
 }
 
 // ─── Execute a single op ──────────────────────────────────────────────────────
@@ -214,6 +256,7 @@ async function executeOp(op: PendingOp): Promise<void> {
     }
     case 'upload_business_card': {
       const p = op.payload as {
+        storagePath?:   string | null;
         assetId:        string;
         sessionId:      string;
         side:           string;
@@ -240,28 +283,14 @@ async function executeOp(op: PendingOp): Promise<void> {
         createdAt:      new Date().toISOString(),
         ownerId:        p.ownerId ?? null,
       } as import('./types').BusinessCardAsset;
+      if (p.storagePath) {
+        if (!await reconcileAssetStorageMetadata(asset)) throw new Error('Card metadata still pending');
+        break;
+      }
       const result = await uploadBusinessCardAssetFn(asset);
-      if (!result?.uploaded) {
-        // Distinguish auth failure (drop) from recoverable failure (retry).
-        // uploadBusinessCardAsset returns UPLOAD_FAIL for both offline and
-        // not-authenticated, but also for storage upload errors. The existing
-        // queue-wide convention is: auth errors contain "Not authenticated"
-        // or "JWT" and are dropped; everything else is retried.
-        //
-        // uploadBusinessCardAsset returns {uploaded:false} without throwing,
-        // so we must throw here to signal failure to flushQueue's retry loop.
-        // A dedicated error message lets us distinguish recoverable upload
-        // failures (network/server) from intentional non-upload conditions.
-        //
-        // If the asset was intentionally abandoned (abandonAsset was called),
-        // the upload is skipped entirely — we must NOT throw, otherwise the
-        // op would retry forever. The abandonment check is handled in
-        // _uploadBusinessCard in the evidence manager, but the offline queue
-        // executor calls uploadBusinessCardAsset directly. We rely on the fact
-        // that abandoned assets are removed from _pendingCardUploads before
-        // onSessionReset enqueues them, so no abandoned asset should ever
-        // reach this executor. If one does (defensive), treat it as success
-        // (delete the op) rather than retrying forever.
+      if (result?.uploaded && result.storagePath) op.payload = { ...p, storagePath: result.storagePath };
+      if (!result?.uploaded || !result.metadataWritten) {
+        // Keep the retry until both Storage and metadata are complete.
         throw new Error('upload_business_card failed: storage upload or metadata write did not succeed');
       }
       break;
@@ -277,7 +306,7 @@ async function executeOp(op: PendingOp): Promise<void> {
         eventName:        string | null;
         correlationId?:   string | null;
       };
-      await produceProcessingJob({
+      const result = await produceProcessingJob({
         backendSessionId: p.backendSessionId,
         draftData:        p.draftData,
         captureMethod:    p.captureMethod as import('./types').CaptureMethod | null,
@@ -286,6 +315,9 @@ async function executeOp(op: PendingOp): Promise<void> {
         correlationId:    p.correlationId ?? null,
         ownerId:          op.ownerId,
       });
+      if (result.outcome !== 'queued' || !result.jobId) {
+        throw new Error(result.error ?? 'Processing deferred until cloud work is allowed');
+      }
       break;
     }
     default:

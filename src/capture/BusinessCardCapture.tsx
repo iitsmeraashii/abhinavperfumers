@@ -755,7 +755,7 @@ export function BusinessCardCapture({
 
     const existing = side === 'front' ? front.asset : back.asset;
     if (existing) {
-      evidenceManager.abandonAsset(existing.id);
+      await evidenceManager.abandonAsset(existing.id);
       await deleteAsset(existing.id, ownerId ?? undefined);
     }
 
@@ -793,7 +793,7 @@ export function BusinessCardCapture({
     const target = side === 'front' ? front : back;
     if (!target.asset) return;
     if (side === 'front') { cancelExtraction(); resetExtraction(); }
-    evidenceManager.abandonAsset(target.asset.id);
+    await evidenceManager.abandonAsset(target.asset.id);
     await deleteAsset(target.asset.id, ownerId ?? undefined);
     const newState: CardState = { asset: null, status: 'empty' };
     if (side === 'front') {

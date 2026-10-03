@@ -9,7 +9,7 @@
 // can only be accessed via the unscoped (no ownerId) path, reserved for
 // diagnostic/recovery tooling.
 
-import { dbGet, dbGetAll, dbPut, dbDelete } from './db';
+import { dbGet, dbGetAll, dbPutStrict as dbPut, dbDelete } from './db';
 import type { BusinessCardAsset, CardSide } from './types';
 
 const STORE = 'assets';

@@ -14,6 +14,7 @@
 //   Notes image   : {userId}/{sessionId}/notes.jpg
 //   Voice note    : {userId}/{sessionId}/voice.{ext}  (planned — path only defined)
 
+import { isCloudSyncAllowed } from '../authModeState';
 import { supabase } from '../supabaseClient';
 import type { BusinessCardAsset } from './types';
 import { logOperationStart, logOperationEnd, logEvent, getCorrelationId } from './assetSyncDiagnostics';
@@ -52,6 +53,7 @@ const UPLOAD_FAIL: BusinessCardUploadResult = {
 export async function uploadBusinessCardAsset(
   asset: BusinessCardAsset,
   correlationId?: string | null,
+  isCancelled: () => boolean = () => false,
 ): Promise<BusinessCardUploadResult> {
   const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
   const ts0 = new Date().toISOString();
@@ -78,7 +80,7 @@ export async function uploadBusinessCardAsset(
   };
   const op = logOperationStart('Storage Upload — uploadBusinessCardAsset()', ctx);
 
-  if (!navigator.onLine) {
+  if (isCancelled() || !navigator.onLine || !isCloudSyncAllowed()) {
     logOperationEnd(op, { extra: { skipped: 'offline' } });
     return UPLOAD_FAIL;
   }
@@ -101,6 +103,7 @@ export async function uploadBusinessCardAsset(
     return UPLOAD_FAIL;
   }
 
+  if (!navigator.onLine || !isCloudSyncAllowed() || (asset.ownerId && asset.ownerId !== userId)) return UPLOAD_FAIL;
   const storagePath = `${userId}/${asset.id}.jpg`;
   const blob = dataUrlToBlob(asset.dataUrl);
 
@@ -189,6 +192,7 @@ export async function uploadBusinessCardAsset(
     return UPLOAD_FAIL;
   }
 
+  if (isCancelled()) return { uploaded: true, metadataWritten: false, storagePath };
   const metadataWritten = await _writeAssetStorageMeta(asset, userId, storagePath);
   logOperationEnd(op, { extra: { storagePath, metadataWritten } });
   return { uploaded: true, metadataWritten, storagePath };
@@ -255,6 +259,8 @@ async function _writeAssetStorageMeta(
   const corrId = correlationId ?? getCorrelationId() ?? 'no_correlation';
   const writeTs = new Date().toISOString();
 
+  if (!navigator.onLine || !isCloudSyncAllowed() || (asset.ownerId && asset.ownerId !== userId)) return false;
+
   const upsertPayload = {
     capture_session_id: asset.sessionId,
     user_id: userId,
@@ -314,6 +320,8 @@ async function _writeAssetStorageMeta(
     localAssetId: asset.id,
     correlationId: correlationId ?? null,
   }, { corrId, writtenRowId, returnedRows: data?.length ?? 0 });
+
+  if (!navigator.onLine || !isCloudSyncAllowed()) return Array.isArray(data) ? data.length > 0 : Boolean(data);
 
   // ── Immediate read-back: verify the row has the storage_path we just wrote.
   // This catches races where another flow overwrote the row between our
@@ -392,7 +400,7 @@ export async function reconcileAssetStorageMetadata(
   asset: BusinessCardAsset,
   correlationId?: string | null,
 ): Promise<boolean> {
-  if (!navigator.onLine) return false;
+  if (!navigator.onLine || !isCloudSyncAllowed()) return false;
   try {
     const userId = await getAuthUserId();
     if (!userId) return false;
