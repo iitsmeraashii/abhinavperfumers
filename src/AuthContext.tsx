@@ -1,3 +1,4 @@
+import { connectivityStore, isTransportOnline } from './connectivity/connectivityStore';
 import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import type { Session, User as SupabaseUser } from '@supabase/supabase-js';
@@ -12,6 +13,7 @@ import {
 } from './capture/authProfileStorage';
 import {
   setAuthModeState as publishAuthMode,
+  getAuthMode,
 } from './authModeState';
 import type { AuthMode } from './authModeState';
 
@@ -118,14 +120,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (rep === null) transitionAuthMode('unauthenticated');
   }, []);
 
-  // Guard: prevents loadRepProfile from running concurrently when both
-  // getSession() and onAuthStateChange fire on mount with the same session.
-  const profileLoadingRef = useRef(false);
+  // One effective attempt per generation/identity, shared by auth and reconnect triggers.
+  const validationRef = useRef<{ generation: number; identity: string | null; promise: Promise<void> } | null>(null);
+  const expectedIdentityRef = useRef<string | null>(null);
+  const loggedOutRef = useRef(false);
+  const mountedRef = useRef(true);
+  const reconnectRequiredRef = useRef(false);
+  const logoutRef = useRef<Promise<void> | null>(null);
 
-  // Generation guard: incremented on explicit logout. loadRepProfile captures
-  // the value at start; if it changes mid-flight, the invocation is stale and
-  // must perform no side effects. This prevents an in-flight profile load from
-  // restoring salesRep or rewriting auth_profile after the user logs out.
+  // Logout, identity/transport changes and cleanup invalidate prior async work.
   const authGenerationRef = useRef(0);
 
   // Track whether we have already attempted offline restoration for the current
@@ -146,6 +149,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const cached = await loadCachedAuthProfile();
     if (generation !== authGenerationRef.current) return false;
 
+    if (loggedOutRef.current || !mountedRef.current) return false;
+    if (expectedIdentityRef.current && cached?.authUserId !== expectedIdentityRef.current) return false;
     const result = checkOfflineEligibility(cached);
     if (!result.eligible || !result.profile) {
       console.warn('[AuthContext] offline profile rejected:', result.reason);
@@ -155,7 +160,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const restoredRep = cachedProfileToSalesRep(result.profile);
     if (generation !== authGenerationRef.current) return false;
 
+    expectedIdentityRef.current = restoredRep.auth_user_id;
     setSalesRepSafe(restoredRep);
+    reconnectRequiredRef.current = true;
     transitionAuthMode('offline-restored');
     console.log('[AuthContext] offline profile restored', {
       repCode: restoredRep.rep_code,
@@ -165,6 +172,117 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Only successful server validation may refresh the 15-day window.
     return true;
   }
+
+  function currentAttempt(generation: number, identity: string | null): boolean {
+    return mountedRef.current && !loggedOutRef.current &&
+      generation === authGenerationRef.current && identity === expectedIdentityRef.current;
+  }
+
+  async function retainOffline(generation: number): Promise<void> {
+    if (generation !== authGenerationRef.current || !mountedRef.current || loggedOutRef.current) return;
+    transitionAuthMode('unauthenticated'); // Close the cloud gate before local IO.
+    let restored = false;
+    try { restored = await tryOfflineRestore(generation); } catch { /* Fail closed. */ }
+    if (generation !== authGenerationRef.current || !mountedRef.current || loggedOutRef.current) return;
+    if (!restored) setSalesRepSafe(null);
+    setLoading(false);
+  }
+
+  // Only explicit server auth codes revoke on reconnect. HTTP status alone is
+  // insufficient: e.g. 429 and API/configuration errors are non-authoritative.
+  function isDefinitiveAuthError(error: unknown): boolean {
+    const code = (error as { code?: string } | null)?.code;
+    return !!code && ['session_not_found', 'session_expired', 'refresh_token_not_found',
+      'refresh_token_already_used', 'user_not_found', 'user_banned', 'bad_jwt'].includes(code);
+  }
+
+  function loadRepProfile(s: Session): Promise<void> {
+    return validateCurrentIdentity(reconnectRequiredRef.current, s);
+  }
+
+  function validateCurrentIdentity(reconnect: boolean, suppliedSession?: Session): Promise<void> {
+    const generation = authGenerationRef.current;
+    const identity = expectedIdentityRef.current;
+    if (!currentAttempt(generation, identity)) return Promise.resolve();
+    if (!isTransportOnline()) return retainOffline(generation);
+    const existing = validationRef.current;
+    if (existing?.generation === generation && existing.identity === identity) return existing.promise;
+    const attempt = { generation, identity, promise: Promise.resolve() };
+    // Defer all SDK calls out of the synchronous auth-state callback.
+    attempt.promise = new Promise<void>(resolve => setTimeout(resolve, 0)).then(async () => {
+      const current = () => currentAttempt(generation, identity) && isTransportOnline();
+      try {
+        if (!current()) return;
+        let candidate = suppliedSession;
+        if (reconnect) {
+          const recovered = await supabase.auth.getSession();
+          if (!current()) return;
+          if (recovered.error) {
+            if (isDefinitiveAuthError(recovered.error)) await logout();
+            else await retainOffline(generation);
+            return;
+          }
+          candidate = recovered.data.session ?? undefined;
+          // Absence of local session evidence is not server-confirmed revocation.
+          if (!candidate || candidate.user.id !== identity) {
+            await retainOffline(generation);
+            return;
+          }
+          const verified = await supabase.auth.getUser(candidate.access_token);
+          if (!current()) return;
+          if (verified.error || !verified.data.user || verified.data.user.id !== identity) {
+            if (isDefinitiveAuthError(verified.error)) await logout();
+            else await retainOffline(generation);
+            return;
+          }
+          setSession(candidate);
+          setAuthUser(verified.data.user);
+        }
+        if (candidate && current()) await validateRepProfile(candidate, generation, reconnect);
+      } catch {
+        if (current()) await retainOffline(generation);
+      } finally {
+        if (validationRef.current === attempt) validationRef.current = null;
+        if (currentAttempt(generation, identity)) setLoading(false);
+      }
+    });
+    validationRef.current = attempt;
+    return attempt.promise;
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    let previous = connectivityStore.getSnapshot();
+    const onTransport = () => {
+      const online = connectivityStore.getSnapshot();
+      if (online === previous) return;
+      previous = online;
+      if (loggedOutRef.current || !expectedIdentityRef.current) return;
+      ++authGenerationRef.current;
+      reconnectRequiredRef.current = true;
+      transitionAuthMode('unauthenticated');
+      if (online) void validateCurrentIdentity(true);
+      else void retainOffline(authGenerationRef.current);
+    };
+    const unsubscribe = connectivityStore.subscribe(onTransport);
+    const onForeground = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (reconnectRequiredRef.current && isTransportOnline() && getAuthMode() !== 'online' &&
+          expectedIdentityRef.current && !loggedOutRef.current) void validateCurrentIdentity(true);
+    };
+    if (typeof window !== 'undefined') window.addEventListener('focus', onForeground);
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onForeground);
+    return () => {
+      mountedRef.current = false;
+      ++authGenerationRef.current;
+      publishAuthMode('unauthenticated');
+      unsubscribe();
+      if (typeof window !== 'undefined') window.removeEventListener('focus', onForeground);
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onForeground);
+    };
+    // Lifecycle callbacks read refs, never captured user/session state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Resolve null INITIAL_SESSION ──────────────────────────────────────────
   // When onAuthStateChange fires INITIAL_SESSION with session=null, the cause
@@ -188,6 +306,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // validation.
       if (data.session?.user) {
         console.log('[AuthContext] null INITIAL_SESSION resolved: real session found via getSession()');
+        expectedIdentityRef.current = data.session.user.id;
         await loadRepProfile(data.session);
         return;
       }
@@ -215,11 +334,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
         // Authoritative auth failure — clear cached profile so it can't be used
         // for future offline restoration.
-        try { await clearCachedAuthProfile(); } catch { /* best-effort */ }
+        try { await clearCachedAuthProfile(() => generation === authGenerationRef.current && mountedRef.current); } catch { /* best-effort */ }
       } else {
         console.log('[AuthContext] null INITIAL_SESSION resolved: no session, no error — unauthenticated');
       }
 
+      if (generation !== authGenerationRef.current || !mountedRef.current) return;
       setSalesRepSafe(null);
       setLoading(false);
       localStorage.removeItem('session_token');
@@ -241,9 +361,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // onAuthStateChange fires immediately with the current session state,
     // which handles both "already logged in" and "not logged in" cases.
     // We do NOT call getSession() separately to avoid the double-load race.
+    let subscribed = true;
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
+      if (!subscribed) return;
       console.log('[AuthContext] auth event:', event, 'session:', !!s, 'salesRep:', !!salesRepRef.current);
 
+      if (!mountedRef.current || loggedOutRef.current) return;
+      if (s?.user && s.user.id !== expectedIdentityRef.current) {
+        ++authGenerationRef.current;
+        if (expectedIdentityRef.current) setSalesRepSafe(null);
+        expectedIdentityRef.current = s.user.id;
+      }
       setSession(s);
       setAuthUser(s?.user ?? null);
 
@@ -284,7 +412,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => { subscribed = false; subscription.unsubscribe(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -293,14 +421,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // belonging to a DIFFERENT authUserId is invalidated. This prevents
   // a future offline restoration from restoring Rep A's profile for Rep B.
   // Returns true if the session user matches the cache (or no cache exists).
-  async function ensureCacheMatchesUser(authUserId: string): Promise<void> {
+  async function ensureCacheMatchesUser(authUserId: string, generation: number): Promise<void> {
     const cached = await loadCachedAuthProfile();
+    if (!currentAttempt(generation, authUserId)) return;
     if (cached && cached.authUserId !== authUserId) {
       console.warn('[AuthContext] cached profile belongs to different user — clearing', {
         cachedAuthUserId: cached.authUserId,
         newAuthUserId: authUserId,
       });
-      await clearCachedAuthProfile();
+      await clearCachedAuthProfile(() => currentAttempt(generation, authUserId));
     }
   }
 
@@ -308,27 +437,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Reads the authenticated rep's row via my_rep_profile view (RLS-filtered
   // to auth.uid()). Calls link_auth_user_to_rep() first in case this is a
   // first login before the linking migration ran for this specific user.
-  async function loadRepProfile(s: Session): Promise<void> {
-    // Deduplicate concurrent calls (mount fires getSession + onAuthStateChange)
-    if (profileLoadingRef.current) return;
-    profileLoadingRef.current = true;
-
-    // Capture the generation at start. If logout() increments it while this
-    // invocation is awaiting an async operation, the invocation is stale.
-    const generation = authGenerationRef.current;
-
-    // Invalidate any cached profile belonging to a different auth user before
-    // proceeding. This runs before any network profile query so that even if
-    // the profile query fails transiently, a stale cross-user cache is gone.
-    await ensureCacheMatchesUser(s.user.id);
-    if (generation !== authGenerationRef.current) return;
-
+  async function validateRepProfile(s: Session, generation: number, reconnect: boolean): Promise<void> {
+    const current = () => currentAttempt(generation, s.user.id) && isTransportOnline();
     try {
+      await ensureCacheMatchesUser(s.user.id, generation);
+      if (!current()) return;
       // Link auth_user_id if not yet done (idempotent — safe to call every time)
       // A failure here is non-fatal — the profile query below is the
       // authoritative check. We continue regardless of the error type.
       const linkResult = await supabase.rpc('link_auth_user_to_rep');
-      if (generation !== authGenerationRef.current) return;
+      if (!current()) return;
       if (linkResult.error) {
         const linkClass = classifyResponseError(linkResult.status, linkResult.error);
         console.warn('[AuthContext] link_auth_user_to_rep failed', {
@@ -343,12 +461,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .select('id, rep_code, name, role, email, phone, auth_user_id, login_enabled, is_active, default_event_id, default_capture_profile')
         .maybeSingle();
 
-      if (generation !== authGenerationRef.current) return;
+      if (!current()) return;
 
       const { data, error, status } = profileResult;
       const errorClass = classifyResponseError(status, error);
 
       if (error) {
+        if (reconnect) {
+          if (isDefinitiveAuthError(error)) await logout();
+          else await retainOffline(generation);
+          return;
+        }
         if (errorClass === 'transient') {
           // Transient network/backend failure — Supabase unreachable or 5xx.
           if (salesRepRef.current) {
@@ -365,7 +488,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               code: (error as unknown as Record<string, unknown>)?.code ?? null,
             });
             const restored = await tryOfflineRestore(generation);
-            if (generation !== authGenerationRef.current) return;
+            if (!current()) return;
             if (!restored) {
               console.warn('[AuthContext] offline restore failed — staying unauthenticated');
             }
@@ -378,9 +501,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           code: (error as unknown as Record<string, unknown>)?.code ?? null,
         });
         console.log('[AuthContext] signOut reason: profile_http_' + status);
-        await clearCachedAuthProfile();
-        await supabase.auth.signOut();
-        setSalesRepSafe(null);
+        if (current()) await logout(reconnect ? 'local' : 'global');
         return;
       }
 
@@ -388,9 +509,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Server confirmed: valid auth user but no matching sales_rep row.
         console.warn('[AuthContext] No sales_rep row for auth user', s.user.email);
         console.log('[AuthContext] signOut reason: profile_missing');
-        await clearCachedAuthProfile();
-        await supabase.auth.signOut();
-        setSalesRepSafe(null);
+        if (current()) await logout(reconnect ? 'local' : 'global');
         return;
       }
 
@@ -398,9 +517,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Server confirmed: representative login is disabled.
         console.warn('[AuthContext] Rep account login disabled', data.rep_code);
         console.log('[AuthContext] signOut reason: profile_disabled');
-        await clearCachedAuthProfile();
-        await supabase.auth.signOut();
-        setSalesRepSafe(null);
+        if (current()) await logout(reconnect ? 'local' : 'global');
         return;
       }
 
@@ -408,13 +525,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Server confirmed: representative is inactive.
         console.warn('[AuthContext] Rep account inactive', data.rep_code);
         console.log('[AuthContext] signOut reason: profile_inactive');
-        await clearCachedAuthProfile();
-        await supabase.auth.signOut();
-        setSalesRepSafe(null);
+        if (current()) await logout(reconnect ? 'local' : 'global');
         return;
       }
 
-      if (generation !== authGenerationRef.current) return;
+      if (!current()) return;
+      if (reconnect && data.auth_user_id && data.auth_user_id !== s.user.id) {
+        await retainOffline(generation);
+        return;
+      }
 
       const validatedRep: SalesRep = {
         id:                      data.id,
@@ -430,16 +549,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         default_capture_profile: (data.default_capture_profile as CaptureProfile) ?? 'CRM',
       };
       setSalesRepSafe(validatedRep);
+      reconnectRequiredRef.current = false;
       transitionAuthMode('online');
 
       // Persist the server-validated profile to IndexedDB for future offline
       // restoration. Fire-and-forget: a cache-write failure must not break the
       // online session. This runs ONLY after a confirmed authoritative success
       // — never on transient failures, missing profiles, or disabled accounts.
-      saveCachedAuthProfile(validatedRep)
+      saveCachedAuthProfile(validatedRep, current)
         .then(() => console.log('[AuthContext] validated auth profile cached', { repCode: validatedRep.rep_code, validatedAt: Date.now() }))
         .catch((cacheErr) => console.warn('[AuthContext] auth profile cache write failed (non-fatal)', cacheErr));
     } catch (err) {
+      if (!current()) return;
+      if (reconnect) { await retainOffline(generation); return; }
       // A thrown error from the Supabase client itself is a transport failure.
       if (salesRepRef.current) {
         // Warm session: preserve existing profile.
@@ -448,14 +570,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Cold start: try offline restoration.
         console.warn('[AuthContext] loadRepProfile threw (transient) — attempting offline restore', err);
         const restored = await tryOfflineRestore(generation);
-        if (generation !== authGenerationRef.current) return;
+        if (!current()) return;
         if (!restored) {
           console.warn('[AuthContext] offline restore failed — staying unauthenticated');
         }
       }
     } finally {
-      profileLoadingRef.current = false;
-      setLoading(false);
+      if (currentAttempt(generation, s.user.id)) setLoading(false);
     }
   }
 
@@ -464,6 +585,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // STEP 2: signInWithPassword(email, password)
   // STEP 3: onAuthStateChange fires → loadRepProfile → setSalesRep
   async function login(rep_code: string, password: string): Promise<string | null> {
+    if (logoutRef.current) await logoutRef.current;
+    ++authGenerationRef.current;
+    loggedOutRef.current = false;
+    expectedIdentityRef.current = null;
+    reconnectRequiredRef.current = false;
     const normalised = rep_code.trim().toUpperCase();
 
     // Step 1: Check rep status and retrieve email
@@ -523,11 +649,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   //
   // Local invalidation is DETERMINISTIC — it does not depend on the Supabase
   // server being reachable. The remote signOut is best-effort.
-  async function logout(): Promise<void> {
+  function logout(scope: 'local' | 'global' = 'local'): Promise<void> {
+    if (logoutRef.current) return logoutRef.current;
+    const pending = performLogout(scope).finally(() => {
+      if (logoutRef.current === pending) logoutRef.current = null;
+    });
+    logoutRef.current = pending;
+    return pending;
+  }
+
+  async function performLogout(scope: 'local' | 'global'): Promise<void> {
     console.log('[AuthContext] signOut reason: explicit_user_logout');
     // 0. Invalidate any in-flight loadRepProfile / offline restoration so they
     //    cannot restore salesRep or rewrite auth_profile after logout completes.
     authGenerationRef.current++;
+    const generation = authGenerationRef.current;
+    loggedOutRef.current = true;
+    expectedIdentityRef.current = null;
+    reconnectRequiredRef.current = false;
+    setSession(null);
+    setAuthUser(null);
     // 1. Clear in-memory app access immediately.
     setSalesRepSafe(null);
     transitionAuthMode('unauthenticated');
@@ -537,10 +678,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       console.warn('[AuthContext] auth profile cache clear failed (non-fatal)', err);
     }
+    if (generation !== authGenerationRef.current) return;
     // 3. Attempt Supabase signOut (best-effort, may fail offline).
     //    Use scope:'local' so it does not revoke sessions on other devices.
     try {
-      await supabase.auth.signOut({ scope: 'local' });
+      await supabase.auth.signOut({ scope });
     } catch {
       // Network failure — handled by deterministic local cleanup below.
     }
@@ -548,7 +690,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     //    When Supabase is unreachable, signOut's network call fails before
     //    _removeSession runs, leaving the session in localStorage. This
     //    ensures it is gone.
-    clearLocalSupabaseAuthSession();
+    if (generation === authGenerationRef.current) clearLocalSupabaseAuthSession();
   }
 
   // ── Legacy user shape (backward-compat for all existing consumers) ─────────

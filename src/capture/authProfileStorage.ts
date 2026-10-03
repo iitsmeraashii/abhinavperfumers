@@ -3,7 +3,15 @@
 // It does NOT perform authentication and is NOT yet wired into
 // AuthContext for offline restoration.
 
-import { dbGet, dbPut, dbDelete } from './db';
+import { dbGet, dbPutStrict, dbDeleteStrict } from './db';
+
+// Serialize writes and clears so logout cannot be overtaken by an earlier write.
+let mutations: Promise<void> = Promise.resolve();
+function mutate(action: () => Promise<void>): Promise<void> {
+  const next = mutations.then(action);
+  mutations = next.catch(() => {});
+  return next;
+}
 import type { CaptureProfile } from './captureProfile';
 import type { SalesRep } from '../AuthContext';
 import { hasPersistedSupabaseSessionForUser } from '../supabaseClient';
@@ -42,7 +50,7 @@ export interface CachedAuthProfile {
  * Call this ONLY after my_rep_profile returns a valid, active, enabled profile.
  * Cache-write failures are non-fatal — the caller should keep the online session.
  */
-export async function saveCachedAuthProfile(rep: SalesRep): Promise<void> {
+export async function saveCachedAuthProfile(rep: SalesRep, isCurrent: () => boolean = () => true): Promise<void> {
   const record: CachedAuthProfile = {
     key:                   AUTH_PROFILE_KEY,
     schemaVersion:         AUTH_PROFILE_SCHEMA_VERSION,
@@ -59,7 +67,9 @@ export async function saveCachedAuthProfile(rep: SalesRep): Promise<void> {
     defaultCaptureProfile: rep.default_capture_profile,
     validatedAt:           Date.now(),
   };
-  await dbPut('auth_profile', record);
+  await mutate(async () => {
+    if (isCurrent()) await dbPutStrict('auth_profile', record);
+  });
 }
 
 /**
@@ -67,6 +77,7 @@ export async function saveCachedAuthProfile(rep: SalesRep): Promise<void> {
  * NOT yet used for authentication/restoration — available for future use.
  */
 export async function loadCachedAuthProfile(): Promise<CachedAuthProfile | null> {
+  await mutations;
   const record = await dbGet<CachedAuthProfile>('auth_profile', AUTH_PROFILE_KEY);
   if (!record) return null;
   if (record.schemaVersion !== AUTH_PROFILE_SCHEMA_VERSION) return null;
@@ -76,8 +87,10 @@ export async function loadCachedAuthProfile(): Promise<CachedAuthProfile | null>
 /**
  * Remove the persisted profile. Infrastructure only — not yet wired into logout.
  */
-export async function clearCachedAuthProfile(): Promise<void> {
-  await dbDelete('auth_profile', AUTH_PROFILE_KEY);
+export async function clearCachedAuthProfile(isCurrent: () => boolean = () => true): Promise<void> {
+  await mutate(async () => {
+    if (isCurrent()) await dbDeleteStrict('auth_profile', AUTH_PROFILE_KEY);
+  });
 }
 
 // ─── Offline restoration support ────────────────────────────────────────────
