@@ -1,3 +1,4 @@
+import { usePriceRangeQuickValues } from './capture/usePriceRangeQuickValues';
 import { usePreviousReps } from './capture/usePreviousReps';
 import { resolveCaptureEvent } from './capture/eventCacheStorage';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
@@ -60,6 +61,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
   const { selectedEvent, activeEvents } = useEvent();
   const { salesRep, user, authMode } = useAuth();
   const previousReps = usePreviousReps();
+  const priceRangeConfig = usePriceRangeQuickValues();
   const authUserId = user?.authUserId ?? null;
 
   // Resolve the effective event for a capture session: the per-lead override
@@ -1143,6 +1145,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
           <div ref={manualSectionRef}>
           <ManualEntryForm
             previousReps={previousReps}
+            priceRangeQuickValues={priceRangeConfig.quickValues}
             session={session}
             isOnline={isOnline}
             saveState={saveState}

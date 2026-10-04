@@ -21,8 +21,6 @@ import { splitInternationalPhone } from './splitInternationalPhone';
 import { Toast, DiscardDialog, DraftSaveIndicator } from './CaptureUI';
 import type { SaveState } from './useAutosave';
 import { TagInput } from '../components/TagInput';
-import { getPriceRangeQuickValues } from '../runtime/runtimeDiagnostics';
-import { BUILTIN_PRICE_RANGE_VALUES } from '../runtime/runtimeConfiguration';
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
@@ -588,12 +586,14 @@ const PRICE_RANGE_OPERATORS = ['<', '>', '=', '-'] as const;
 function PriceRangeInput({
   value,
   onChange,
+  quickValues: configuredValues,
 }: {
+  quickValues: string[];
   value: string;
   onChange: (v: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const quickValues = getPriceRangeQuickValues()
+  const quickValues = configuredValues
     .filter(value => !(PRICE_RANGE_OPERATORS as readonly string[]).includes(value));
 
   function insert(char: string) {
@@ -845,6 +845,7 @@ function CollapsibleSection({
 // ─── Main form ────────────────────────────────────────────────────────────────
 
 interface Props {
+  priceRangeQuickValues: string[];
   previousReps: ReturnType<typeof usePreviousReps>;
   session:       CaptureSession;
   isOnline:      boolean;
@@ -864,7 +865,7 @@ interface Props {
   defaultEvent?:  AppEvent | null;
 }
 
-export function ManualEntryForm({ previousReps, session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional, activeEvents = [], defaultEvent = null }: Props) {
+export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional, activeEvents = [], defaultEvent = null }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
@@ -1344,6 +1345,7 @@ export function ManualEntryForm({ previousReps, session, isOnline, saveState = '
           />
 
           <PriceRangeInput
+            quickValues={priceRangeQuickValues}
             value={priceRange}
             onChange={v => handleChange('priceRange', v)}
           />

@@ -31,6 +31,8 @@ const migrationSrc = readFileSync(
   'utf-8',
 );
 const runtimeConfigSrc = readFileSync('src/runtime/runtimeConfiguration.ts', 'utf-8');
+const priceServiceSrc = readFileSync('src/runtime/priceRangeConfiguration.ts', 'utf-8');
+const priceStorageSrc = readFileSync('src/capture/priceRangeCacheStorage.ts', 'utf-8');
 const runtimeDiagSrc   = readFileSync('src/runtime/runtimeDiagnostics.ts', 'utf-8');
 const formSrc          = readFileSync('src/capture/ManualEntryForm.tsx', 'utf-8');
 const accountSrc       = readFileSync('src/MyAccountPage.tsx', 'utf-8');
@@ -104,15 +106,15 @@ assert(
 // ── 5. runtimeConfiguration.ts: RPC fetch + cache ────────────────────────────
 
 assert(
-  runtimeConfigSrc.includes('fetchPriceRangeQuickValues'),
-  'C1: fetchPriceRangeQuickValues function exists',
+  runtimeConfigSrc.includes('refreshPriceRange'),
+  'C1: runtime compatibility delegates to shared price refresh',
 );
 assert(
-  runtimeConfigSrc.includes("supabase.rpc('get_price_range_quick_values')"),
+  priceServiceSrc.includes("supabase.rpc('get_price_range_quick_values')"),
   'C2: fetches via RPC (not direct table SELECT)',
 );
 assert(
-  runtimeConfigSrc.includes('_priceRangeCache'),
+  priceServiceSrc.includes('getPriceRangeSnapshot'),
   'C3: price range cache variable exists',
 );
 assert(
@@ -124,13 +126,13 @@ assert(
   'C5: BUILTIN_PRICE_RANGE_VALUES exported',
 );
 assert(
-  runtimeConfigSrc.includes("'INR'") && runtimeConfigSrc.includes("'USD'") &&
-  runtimeConfigSrc.includes("'<'") && runtimeConfigSrc.includes("'>'") &&
-  runtimeConfigSrc.includes("'='") && runtimeConfigSrc.includes("'-'"),
+  priceStorageSrc.includes("'INR'") && priceStorageSrc.includes("'USD'") &&
+  priceStorageSrc.includes("'<'") && priceStorageSrc.includes("'>'") &&
+  priceStorageSrc.includes("'='") && priceStorageSrc.includes("'-'"),
   'C6: built-in defaults include INR, USD, <, >, =, and -',
 );
 assert(
-  runtimeConfigSrc.includes('DEFAULT_PRICE_RANGE_VALUES: string[] = []'),
+  priceServiceSrc.includes('values: [] as string[]'),
   'C7: configured-values default is empty array',
 );
 
@@ -156,7 +158,7 @@ assert(
   'F1: operators are a separate constant (not mixed with values)',
 );
 assert(
-  formSrc.includes("getPriceRangeQuickValues()"),
+  formSrc.includes('quickValues={priceRangeQuickValues}') && formSrc.includes('quickValues: configuredValues'),
   'F2: PriceRangeInput reads quick values from runtime config',
 );
 assert(
@@ -191,15 +193,15 @@ assert(
   'A3: reuses TagInput for adding/removing values',
 );
 assert(
-  accountSrc.includes('set_price_range_quick_values'),
+  accountSrc.includes('saveConfirmedPriceRange') && priceServiceSrc.includes('set_price_range_quick_values'),
   'A4: saves via RPC (not direct table update)',
 );
 assert(
-  accountSrc.includes('get_price_range_quick_values'),
+  accountSrc.includes('usePriceRangeQuickValues') && priceServiceSrc.includes('get_price_range_quick_values'),
   'A5: loads via RPC (not direct table SELECT)',
 );
 assert(
-  accountSrc.includes('reloadRuntimeConfig'),
+  priceServiceSrc.includes('savePriceRangeCache(confirmed') && priceServiceSrc.includes('publish({ values: confirmed'),
   'A6: refreshes runtime cache after saving',
 );
 assert(

@@ -14,26 +14,9 @@ import { supabase } from './supabaseClient';
 import {
   BUILTIN_PRICE_RANGE_VALUES,
   normalizePriceRangeQuickValues,
-  setCachedPriceRangeQuickValues,
 } from './runtime/runtimeConfiguration';
-import { reload as reloadRuntimeConfig } from './runtime/runtimeConfiguration';
-
-const PRICE_RANGE_LS_KEY = 'price_range_quick_values';
-
-function loadPriceRangeFromLS(): string[] {
-  try {
-    const raw = localStorage.getItem(PRICE_RANGE_LS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? normalizePriceRangeQuickValues(parsed.filter((v): v is string => typeof v === 'string'))
-      : [];
-  } catch { return []; }
-}
-
-function savePriceRangeToLS(values: string[]): void {
-  try { localStorage.setItem(PRICE_RANGE_LS_KEY, JSON.stringify(values)); } catch { /* ignore */ }
-}
+import { getPriceRangeSnapshot, saveConfirmedPriceRange } from './runtime/priceRangeConfiguration';
+import { usePriceRangeQuickValues } from './capture/usePriceRangeQuickValues';
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
 
@@ -325,7 +308,9 @@ export default function MyAccountPage({ onBack }: { onBack: () => void }) {
   const toastTimer                = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isAdmin                   = user?.role === 'admin';
   const [priceRangeValues, setPriceRangeValues] = useState<string[]>([]);
-  const [priceRangeLoading, setPriceRangeLoading] = useState(true);
+  const priceRangeConfig = usePriceRangeQuickValues();
+  const priceRangeLoading = priceRangeConfig.loading;
+  const priceRangeDirty = useRef(false);
   const [priceRangeSaving, setPriceRangeSaving] = useState(false);
 
   // Refresh event validation on mount
@@ -335,46 +320,24 @@ export default function MyAccountPage({ onBack }: { onBack: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load admin Price Range Quick Values if the user is an admin.
-  // Tries the database RPC first; falls back to localStorage if the
-  // migration hasn't been applied yet.
+  // Confirmed refreshes update the editor only while there are no unsaved edits.
   useEffect(() => {
-    if (!isAdmin) return;
-    (async () => {
-      const { data, error } = await supabase.rpc('get_price_range_quick_values');
-      if (!error && Array.isArray(data)) {
-        setPriceRangeValues(normalizePriceRangeQuickValues(data as string[]));
-      } else {
-        setPriceRangeValues(loadPriceRangeFromLS());
-      }
-      setPriceRangeLoading(false);
-    })();
-  }, [isAdmin]);
+    if (!priceRangeDirty.current) setPriceRangeValues(priceRangeConfig.values);
+  }, [priceRangeConfig.values]);
+  useEffect(() => {
+    priceRangeDirty.current = false;
+    setPriceRangeValues(priceRangeConfig.values);
+  }, [user?.authUserId]);
 
   async function savePriceRangeValues() {
     setPriceRangeSaving(true);
     try {
-      const { data, error } = await supabase.rpc('set_price_range_quick_values', {
-        p_values: normalizePriceRangeQuickValues(priceRangeValues),
-      });
-      if (error) throw error;
-      const result = data as { success: boolean; values?: string[]; error?: string } | null;
-      if (result?.success && result.values) {
-        const normalizedValues = normalizePriceRangeQuickValues(result.values);
-        setPriceRangeValues(normalizedValues);
-        setCachedPriceRangeQuickValues(normalizedValues);
-        await reloadRuntimeConfig();
-        showToast('Price Range Quick Values saved', 'success');
-      } else {
-        throw new Error(result?.error ?? 'Save failed');
-      }
-    } catch {
-      // RPC not available (migration not applied yet) — fall back to localStorage
-      const normalizedValues = normalizePriceRangeQuickValues(priceRangeValues);
-      setPriceRangeValues(normalizedValues);
-      savePriceRangeToLS(normalizedValues);
-      setCachedPriceRangeQuickValues(normalizedValues);
-      showToast('Price Range Quick Values saved locally', 'success');
+      await saveConfirmedPriceRange(normalizePriceRangeQuickValues(priceRangeValues));
+      priceRangeDirty.current = false;
+      setPriceRangeValues(getPriceRangeSnapshot().values);
+      showToast('Price Range Quick Values saved', 'success');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Save failed. Your edits remain in this form.', 'error');
     } finally {
       setPriceRangeSaving(false);
     }
@@ -586,7 +549,7 @@ export default function MyAccountPage({ onBack }: { onBack: () => void }) {
                 <>
                   <TagInput
                     value={priceRangeValues}
-                    onChange={setPriceRangeValues}
+                    onChange={values => { priceRangeDirty.current = true; setPriceRangeValues(values); }}
                     placeholder="Add value (e.g. AED, GBP, %)…"
                     forbiddenValues={BUILTIN_PRICE_RANGE_VALUES}
                     onForbidden={() => showToast('That value is a built-in default and can\'t be added', 'error')}

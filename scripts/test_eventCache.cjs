@@ -66,8 +66,8 @@ function host(){return {memo(f,d){let i=this.i++,old=this.slots[i];if(!old||d.so
  const dbOut=path.join(dir,'db.cjs');await esbuild.build({entryPoints:['src/capture/db.ts'],bundle:true,platform:'node',format:'cjs',outfile:dbOut});
  const stores=new Set(['drafts','assets','pending_ops','lead_queue','completed_leads','auth_profile']);const created=[];let request,closed=0;
  const database={objectStoreNames:{contains:n=>stores.has(n)},createObjectStore(n,options){created.push([n,options]);stores.add(n);return {createIndex(){}};},close(){closed++;}};
- global.indexedDB={open(name,version){assert.equal(name,'capture_app');assert.equal(version,11);request={result:database,transaction:{objectStore:()=>({indexNames:{contains:()=>true}})}};return request;}};
- const dbApi=require(dbOut);const opened=dbApi.openDB();request.onupgradeneeded({oldVersion:9,target:request});request.onsuccess();assert.equal(await opened,database);assert.deepEqual(created,[['previous_rep_cache',{keyPath:'ownerId'}],['event_cache',{keyPath:'ownerId'}]]);assert.equal(stores.size,8);database.onversionchange();assert.equal(closed,1);
+ global.indexedDB={open(name,version){assert.equal(name,'capture_app');assert.equal(version,12);request={result:database,transaction:{objectStore:()=>({indexNames:{contains:()=>true}})}};return request;}};
+ const dbApi=require(dbOut);const opened=dbApi.openDB();request.onupgradeneeded({oldVersion:9,target:request});request.onsuccess();assert.equal(await opened,database);assert.deepEqual(created,[['capture_config_cache',{keyPath:'key'}],['previous_rep_cache',{keyPath:'ownerId'}],['event_cache',{keyPath:'ownerId'}]]);assert.equal(stores.size,9);database.onversionchange();assert.equal(closed,1);
  const blocked=dbApi.openDB();request.onblocked();await assert.rejects(blocked,/blocked/);request.onsuccess();assert.equal(closed,2);passed++;console.log('PASS: B1.20 additive v9 migration, versionchange close and blocked-open recovery');
  console.log(`${passed} B1 checks passed`);
 })().catch(e=>{console.error(e);process.exitCode=1;});

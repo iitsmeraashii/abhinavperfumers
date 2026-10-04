@@ -124,7 +124,7 @@ export function getReviewMinimumConfidence(): number {
 /**
  * Synchronously return the full list of Price Range quick-input values:
  * built-in defaults (INR, USD) followed by the admin-configured additional
- * values. Reads from the in-memory cache — O(1), never hits the database.
+ * values. Compatibility read of the confirmed price service; never fetches.
  * If the cache has not been loaded, returns only the built-in defaults.
  */
 export function getPriceRangeQuickValues(): string[] {
