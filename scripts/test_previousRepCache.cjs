@@ -68,10 +68,10 @@ const mocks = {
   const stores = new Set(['drafts', 'assets', 'pending_ops', 'lead_queue', 'completed_leads', 'auth_profile', 'event_cache']);
   const created = []; let request;
   const database = { objectStoreNames: { contains: n => stores.has(n) }, createObjectStore(n, options) { created.push([n, options]); stores.add(n); return { createIndex() {} }; }, close() {} };
-  global.indexedDB = { open(name, version) { assert.equal(name, 'capture_app'); assert.equal(version, 11); request = { result: database, transaction: { objectStore: () => ({ indexNames: { contains: () => true } }) } }; return request; } };
+  global.indexedDB = { open(name, version) { assert.equal(name, 'capture_app'); assert.equal(version, 12); request = { result: database, transaction: { objectStore: () => ({ indexNames: { contains: () => true } }) } }; return request; } };
   const opened = require(dbOut).openDB(); request.onupgradeneeded({ oldVersion: 10, target: request }); request.onsuccess(); await opened;
-  assert.deepEqual(created, [['previous_rep_cache', { keyPath: 'ownerId' }]]); assert.equal(stores.size, 8);
-  passed++; console.log('PASS: v10 to v11 migration only adds previous_rep_cache');
+  assert.deepEqual(created, [['capture_config_cache', { keyPath: 'key' }], ['previous_rep_cache', { keyPath: 'ownerId' }]]); assert.equal(stores.size, 9);
+  passed++; console.log('PASS: v10 to v12 migration adds only B2/B3 cache stores');
   // Exercise the real backend/promotion payload builders with an isolated SDK.
   const flowOut = path.join(temp, 'flow.cjs');
   const flowMocks = {

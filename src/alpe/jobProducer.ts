@@ -1,3 +1,4 @@
+import { voiceEvidenceManager } from '../capture/voiceEvidenceManager';
 // ALPE Job Producer — the single integration point where the Capture Engine
 // submits a captured session into the ALPE processing queue.
 //
@@ -112,6 +113,15 @@ export async function produceProcessingJob(
     alpeError('produceProcessingJob stage=syncUpsertSession failed', { ...stageCtx, eventId, error: syncSessionError, ts: ts() });
   } else {
     alpeLog('produceProcessingJob stage=syncUpsertSession done', { ...stageCtx, eventId, ts: ts() });
+  }
+
+  if (draftData.voiceNoteRecordingId || Number(draftData.voiceNoteDurationMs) > 0) {
+    try {
+      if (syncSessionError) throw new Error(syncSessionError);
+      await voiceEvidenceManager.ensureRemote(backendSessionId, identity.userId, draftData);
+    } catch {
+      return { outcome: 'failed', jobId: null, error: 'Evidence upload did not complete; processing was not queued' };
+    }
   }
 
   // ── Evidence Readiness Gate ──────────────────────────────────────────────

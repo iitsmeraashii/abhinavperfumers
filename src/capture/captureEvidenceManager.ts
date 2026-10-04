@@ -109,7 +109,7 @@ class CaptureEvidenceManager {
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
-  register(evidence: CaptureEvidence): void {
+  register(evidence: CaptureEvidence): void | Promise<string> {
     switch (evidence.type) {
       case 'business_card_front':
       case 'business_card_back': {
@@ -176,7 +176,7 @@ class CaptureEvidenceManager {
         // transcription lifecycle including offline queueing.
         // Pass uploadTiming and ownerId so the manager can respect IMMEDIATE
         // vs ON_SAVE and capture the original owner at registration time.
-        voiceEvidenceManager.register(
+        return voiceEvidenceManager.register(
           evidence.sessionId,
           evidence.audioBlob,
           evidence.durationMs,
@@ -184,7 +184,6 @@ class CaptureEvidenceManager {
           evidence.uploadTiming,
           evidence.ownerId ?? null,
         );
-        break;
     }
   }
 

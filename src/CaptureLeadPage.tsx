@@ -1,3 +1,5 @@
+import { voiceEvidenceManager } from './capture/voiceEvidenceManager';
+import { usePriceRangeQuickValues } from './capture/usePriceRangeQuickValues';
 import { usePreviousReps } from './capture/usePreviousReps';
 import { resolveCaptureEvent } from './capture/eventCacheStorage';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
@@ -60,6 +62,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
   const { selectedEvent, activeEvents } = useEvent();
   const { salesRep, user, authMode } = useAuth();
   const previousReps = usePreviousReps();
+  const priceRangeConfig = usePriceRangeQuickValues();
   const authUserId = user?.authUserId ?? null;
 
   // Resolve the effective event for a capture session: the per-lead override
@@ -825,11 +828,16 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
   }, [actions, isOnline, makeRoutingCbs, queue, cardUploadTiming, resolveEvent]);
 
   // ── Voice note recorded ───────────────────────────────────────────────────
-  const handleVoiceNoteRecorded = useCallback((blob: Blob, durationMs: number, mimeType: string) => {
-    const bsid = sessionRef.current.sync.backendSessionId;
-    if (!bsid) return;
-    registerVoiceNoteEvidence(bsid, blob, durationMs, mimeType, voiceUploadTiming, authUserId ?? null);
-  }, [voiceUploadTiming, authUserId]);
+  const voiceSessionId = session.sync.backendSessionId;
+  const handleVoiceNoteRecorded = useCallback(async (blob: Blob, durationMs: number, mimeType: string) => {
+    if (!voiceSessionId) throw new Error('Start a capture before recording');
+    const recordingId = await registerVoiceNoteEvidence(voiceSessionId, blob, durationMs, mimeType, voiceUploadTiming, authUserId ?? null);
+    if (sessionRef.current.sync.backendSessionId === voiceSessionId) actions.patchDraft({ voiceNoteRecordingId: recordingId });
+  }, [voiceSessionId, voiceUploadTiming, authUserId, actions]);
+  const handleVoiceNoteRemove = useCallback(async () => {
+    if (!voiceSessionId || !authUserId) throw new Error('Voice capture owner is unavailable');
+    await voiceEvidenceManager.remove(voiceSessionId, authUserId);
+  }, [voiceSessionId, authUserId]);
 
   // ── OCR result received ───────────────────────────────────────────────────
   const handleOcrResult = useCallback(async (result: OcrResult) => {
@@ -1143,6 +1151,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
           <div ref={manualSectionRef}>
           <ManualEntryForm
             previousReps={previousReps}
+            priceRangeQuickValues={priceRangeConfig.quickValues}
             session={session}
             isOnline={isOnline}
             saveState={saveState}
@@ -1152,6 +1161,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
             onSaveAndNext={handleSaveAndNext}
             onSaveAsDraft={handleSaveAsDraft}
             onVoiceNoteRecorded={handleVoiceNoteRecorded}
+            onVoiceNoteRemove={handleVoiceNoteRemove}
             contactDetailsOptional={session.captureProfile === 'EXHIBITION'}
             activeEvents={activeEvents}
             defaultEvent={selectedEvent}
