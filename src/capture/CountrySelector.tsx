@@ -37,6 +37,7 @@ export function CountrySelector({
   const [dropdownPos, setDropdownPos] = useState<DropdownPosition | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const dropdownRef  = useRef<HTMLDivElement>(null);
   const inputRef     = useRef<HTMLInputElement>(null);
 
   // Recompute dropdown position on open, scroll, and resize.
@@ -65,7 +66,10 @@ export function CountrySelector({
   // Close dropdown when clicking outside
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const insideContainer = containerRef.current?.contains(target);
+      const insideDropdown  = dropdownRef.current?.contains(target);
+      if (!insideContainer && !insideDropdown) {
         setOpen(false);
         setQuery('');
         setHighlighted(0);
@@ -169,6 +173,7 @@ export function CountrySelector({
       {/* Dropdown results — rendered via portal to avoid clipping */}
       {open && dropdownPos && createPortal(
         <div
+          ref={dropdownRef}
           style={{
             position: 'absolute',
             left:  dropdownPos.left,
