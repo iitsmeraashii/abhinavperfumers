@@ -324,7 +324,7 @@ function Layout() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authMode, user?.authUserId]);
 
-  const { refreshSelectedEvent, clearEvent } = useEvent();
+  const { clearEvent } = useEvent();
   const isAdmin = user?.role === 'admin';
 
   const params          = new URLSearchParams(window.location.search);
@@ -347,12 +347,6 @@ function Layout() {
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
   const [moreDrawerOpen,     setMoreDrawerOpen]     = useState(false);
   const [resumeDraftId,      setResumeDraftId]      = useState<string | null>(null);
-
-  // Kick off event validation once on mount (auth is already resolved at this point)
-  useEffect(() => {
-    refreshSelectedEvent();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     function onPopState() {

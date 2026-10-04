@@ -4,14 +4,25 @@
 
 const DB_NAME = 'capture_app';
 // Keep DB_VERSION centralized here so every store uses the same database version.
-const DB_VERSION = 9;
+const DB_VERSION = 12;
 
 export function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+    let blocked = false;
+    req.onblocked = () => { blocked = true; reject(new Error('Database upgrade blocked by another open tab')); };
 
     req.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains('capture_config_cache')) {
+        db.createObjectStore('capture_config_cache', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('previous_rep_cache')) {
+        db.createObjectStore('previous_rep_cache', { keyPath: 'ownerId' });
+      }
+      if (!db.objectStoreNames.contains('event_cache')) {
+        db.createObjectStore('event_cache', { keyPath: 'ownerId' });
+      }
       if (!db.objectStoreNames.contains('drafts')) {
         db.createObjectStore('drafts', { keyPath: 'id' });
       }
@@ -56,7 +67,11 @@ export function openDB(): Promise<IDBDatabase> {
       }
     };
 
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      if (blocked) { req.result.close(); return; }
+      req.result.onversionchange = () => req.result.close();
+      resolve(req.result);
+    };
     req.onerror = () => reject(req.error);
   });
 }
