@@ -1413,7 +1413,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                     <CountrySelector
                       value={draft.country && draft.country !== UNSURE_COUNTRY ? draft.country : null}
                       onChange={c => patchDraft('country', c ?? '')}
-                      placeholder="Select country (auto-derived from address if left blank)…"
+                      placeholder="Select country"
                     />
                   </div>
                 </div>
