@@ -22,6 +22,7 @@ interface Lead {
   application: string;
   system_status: string;
   created_at: string;
+  country: string | null;
 }
 
 interface Event {
@@ -40,6 +41,7 @@ interface AdvancedFilters {
   leadType: string;
   temperature: string;
   state: string;
+  country: string;
   application: string;
   leadStatus: string;
   systemStatus: string;
@@ -51,6 +53,7 @@ const EMPTY_ADVANCED: AdvancedFilters = {
   leadType: '',
   temperature: '',
   state: '',
+  country: '',
   application: '',
   leadStatus: '',
   systemStatus: '',
@@ -120,7 +123,7 @@ function getDateFilterStart(filter: DateFilter): string | null {
 }
 
 function countActiveAdvanced(f: AdvancedFilters): number {
-  return [f.leadType, f.temperature, f.state, f.application, f.systemStatus, f.dateFrom, f.dateTo]
+  return [f.leadType, f.temperature, f.state, f.country, f.application, f.systemStatus, f.dateFrom, f.dateTo]
     .filter(Boolean).length;
 }
 
@@ -178,6 +181,7 @@ function readParams(): {
       leadType: p.get('leadType') ?? '',
       temperature: p.get('temperature') ?? '',
       state: p.get('state') ?? '',
+      country: p.get('country') ?? '',
       application: p.get('application') ?? '',
       leadStatus: p.get('leadStatus') ?? '',
       systemStatus: p.get('systemStatus') ?? '',
@@ -210,6 +214,7 @@ function buildParams(
   set('leadType', adv.leadType);
   set('temperature', adv.temperature);
   set('state', adv.state);
+  set('country', adv.country);
   set('application', adv.application);
   set('leadStatus', adv.leadStatus);
   set('systemStatus', adv.systemStatus);
@@ -282,6 +287,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   const [events, setEvents] = useState<Event[]>([]);
   const [salesReps, setSalesReps] = useState<SalesRep[]>([]);
   const [stateOptions, setStateOptions] = useState<string[]>([]);
+  const [countryOptions, setCountryOptions] = useState<string[]>([]);
   const [applicationOptions, setApplicationOptions] = useState<string[]>([]);
 
   const [exporting, setExporting] = useState(false);
@@ -323,6 +329,15 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     supabase.from('leads_list_view').select('state').then(({ data }) => {
       const unique = [...new Set((data ?? []).map((r: { state: string }) => r.state).filter(Boolean))].sort();
       setStateOptions(unique as string[]);
+    });
+
+    supabase.from('leads_list_view').select('country').then(({ data }) => {
+      const rows = (data ?? []) as { country: string | null }[];
+      const hasUnassigned = rows.some(r => !r.country || !r.country.trim());
+      const unique = [...new Set(
+        rows.map(r => r.country).filter((c): c is string => Boolean(c && c.trim()))
+      )].sort();
+      setCountryOptions(hasUnassigned ? ['__unassigned__', ...unique] : unique);
     });
 
     supabase.from('leads_list_view').select('application').then(({ data }) => {
@@ -404,6 +419,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     else if (adv.temperature) query = query.eq('lead_temperature', adv.temperature);
     if (adv.state === '__unassigned__') query = query.or('state.is.null,state.eq.');
     else if (adv.state) query = query.eq('state', adv.state);
+    if (adv.country === '__unassigned__') query = query.or('country.is.null,country.eq.');
+    else if (adv.country) query = query.eq('country', adv.country);
     if (adv.application) query = query.ilike('application', `%${adv.application}%`);
     if (adv.systemStatus) query = query.eq('system_status', adv.systemStatus);
     const effectiveStatus = statusFilt || adv.leadStatus;
@@ -475,6 +492,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     else if (applied.temperature) query = query.eq('lead_temperature', applied.temperature);
     if (applied.state === '__unassigned__') query = query.or('state.is.null,state.eq.');
     else if (applied.state) query = query.eq('state', applied.state);
+    if (applied.country === '__unassigned__') query = query.or('country.is.null,country.eq.');
+    else if (applied.country) query = query.eq('country', applied.country);
     if (applied.application) query = query.ilike('application', `%${applied.application}%`);
     if (applied.dateFrom) query = query.gte('created_at', new Date(applied.dateFrom).toISOString());
     if (applied.dateTo) {
@@ -498,6 +517,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (applied.leadType) filterLines.push(`Lead Type: ${applied.leadType}`);
     if (applied.temperature) filterLines.push(`Temperature: ${applied.temperature === '__unassigned__' ? 'UNASSIGNED' : applied.temperature}`);
     if (applied.state) filterLines.push(`State: ${applied.state === '__unassigned__' ? 'UNASSIGNED' : applied.state}`);
+    if (applied.country) filterLines.push(`Country: ${applied.country === '__unassigned__' ? 'UNASSIGNED' : applied.country}`);
     if (applied.application) filterLines.push(`Application: ${applied.application}`);
     if (applied.dateFrom) filterLines.push(`Date From: ${applied.dateFrom}`);
     if (applied.dateTo) filterLines.push(`Date To: ${applied.dateTo}`);
@@ -619,6 +639,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     applied.leadType ? { label: `Type: ${applied.leadType}`, key: 'leadType' } : null,
     applied.temperature ? { label: `Temp: ${applied.temperature === '__unassigned__' ? 'UNASSIGNED' : applied.temperature}`, key: 'temperature' } : null,
     applied.state ? { label: `State: ${applied.state === '__unassigned__' ? 'UNASSIGNED' : applied.state}`, key: 'state' } : null,
+    applied.country ? { label: `Country: ${applied.country === '__unassigned__' ? 'UNASSIGNED' : applied.country}`, key: 'country' } : null,
     applied.application ? { label: `App: ${applied.application}`, key: 'application' } : null,
     applied.systemStatus ? { label: `System: ${applied.systemStatus.replace(/_/g, ' ')}`, key: 'systemStatus' } : null,
     applied.dateFrom ? { label: `From: ${applied.dateFrom}`, key: 'dateFrom' } : null,
@@ -1195,6 +1216,13 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
                   { label: 'UNASSIGNED', value: '__unassigned__' },
                   ...stateOptions.map(s => ({ label: s, value: s })),
                 ]}
+              />
+
+              <SelectField
+                label="Country"
+                value={draft.country}
+                onChange={v => patchDraft('country', v)}
+                options={countryOptions.map(c => ({ label: c === '__unassigned__' ? 'UNASSIGNED' : c, value: c }))}
               />
 
               <SelectField
