@@ -35,7 +35,8 @@ export interface VisionState {
 
 export interface UseVisionExtractionReturn {
   visionState:  VisionState;
-  runExtraction: (assetId: string, dataUrl: string) => Promise<VisionResult | null>;
+  runExtraction: (assetId: string, dataUrl: string, applyResult?: (result: VisionResult) => void) => Promise<VisionResult | null>;
+  isExtractionPending: () => boolean;
   cancelExtraction: () => void;
   resetExtraction: () => void;
 }
@@ -204,9 +205,10 @@ interface EdgeResponse {
   error?:     string;
 }
 
-async function callEdgeFunction(imageBlob: Blob): Promise<EdgeResponse> {
+async function callEdgeFunction(imageBlob: Blob, signal?: AbortSignal): Promise<EdgeResponse> {
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token;
+  if (signal?.aborted) throw new Error('Extraction cancelled');
   if (!token) throw new Error('Not authenticated');
 
   const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/${EDGE_FUNCTION}`;
@@ -216,6 +218,7 @@ async function callEdgeFunction(imageBlob: Blob): Promise<EdgeResponse> {
 
   const response = await fetch(url, {
     method: 'POST',
+    signal,
     headers: {
       'Authorization': `Bearer ${token}`,
       'Apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
@@ -233,24 +236,47 @@ async function callEdgeFunction(imageBlob: Blob): Promise<EdgeResponse> {
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
-export function useVisionExtraction(): UseVisionExtractionReturn {
+// CRM opts into a deadline and request identity; Exhibition keeps its existing flow.
+export function useVisionExtraction(crmMode = false): UseVisionExtractionReturn {
   const [visionState, setVisionState] = useState<VisionState>(IDLE_STATE);
   const cancelledRef = useRef(false);
+  const generation = useRef(0);
+  const active = useRef<{ controller: AbortController; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const invalidate = useCallback(() => {
+    generation.current++;
+    if (active.current) { clearTimeout(active.current.timer); active.current.controller.abort(); }
+    active.current = null;
+  }, []);
+  const isExtractionPending = useCallback(() => active.current !== null, []);
 
   const cancelExtraction = useCallback(() => {
+    if (crmMode) invalidate();
     cancelledRef.current = true;
     setVisionState(IDLE_STATE);
-  }, []);
+  }, [crmMode, invalidate]);
 
   const resetExtraction = useCallback(() => {
+    if (crmMode) invalidate();
     cancelledRef.current = false;
     setVisionState(IDLE_STATE);
-  }, []);
+  }, [crmMode, invalidate]);
 
   const runExtraction = useCallback(async (
     assetId: string,
     dataUrl: string,
+    applyResult?: (result: VisionResult) => void,
   ): Promise<VisionResult | null> => {
+    if (crmMode) invalidate();
+    const requestId = generation.current;
+    const stale = () => crmMode ? requestId !== generation.current : cancelledRef.current;
+    const controller = crmMode ? new AbortController() : undefined;
+    const timer = crmMode ? setTimeout(() => {
+      if (stale()) return;
+      invalidate();
+      setVisionState({ status: 'error', progress: 0, progressLabel: '', result: null,
+        error: 'Extraction timed out after 30 seconds. Continue manually or retry.' });
+    }, REQUEST_TIMEOUT) : undefined;
+    if (controller && timer !== undefined) active.current = { controller, timer };
     cancelledRef.current = false;
     const startMs = Date.now();
 
@@ -264,7 +290,7 @@ export function useVisionExtraction(): UseVisionExtractionReturn {
     try {
       // ── 1. Preprocess ──────────────────────────────────────────────────────
       const processed = await preprocessImage(dataUrl);
-      if (cancelledRef.current) return null;
+      if (stale()) return null;
 
       setVisionState(s => ({
         ...s,
@@ -278,7 +304,8 @@ export function useVisionExtraction(): UseVisionExtractionReturn {
       let source: VisionResult['source'] = 'openai_vision';
 
       try {
-        edgeResponse = await withTimeout(callEdgeFunction(processed.blob), REQUEST_TIMEOUT);
+        edgeResponse = await withTimeout(callEdgeFunction(processed.blob, controller?.signal), REQUEST_TIMEOUT);
+        if (stale()) return null;
         // DIAGNOSTIC — temporary, unconditional. Shows the raw parsed edge-function response.
         console.log('[EXTRACTION_RESPONSE_RAW_OBJECT]', edgeResponse.data);
         console.log('[EXTRACTION_RESPONSE_RAW_JSON]', JSON.stringify(edgeResponse.data, null, 2));
@@ -292,7 +319,7 @@ export function useVisionExtraction(): UseVisionExtractionReturn {
           throw new Error(edgeResponse.error ?? 'Extraction returned no data');
         }
       } catch (visionErr) {
-        if (cancelledRef.current) return null;
+        if (stale()) return null;
         console.warn('[useVisionExtraction] OpenAI Vision failed, falling back to Tesseract:', visionErr);
 
         // ── 3. Tesseract fallback ──────────────────────────────────────────
@@ -304,7 +331,7 @@ export function useVisionExtraction(): UseVisionExtractionReturn {
         }));
 
         const fallbackResult = await runTesseractFallback(assetId, dataUrl);
-        if (cancelledRef.current) return null;
+        if (stale()) return null;
 
         const result: VisionResult = {
           assetId,
@@ -316,11 +343,13 @@ export function useVisionExtraction(): UseVisionExtractionReturn {
           fieldConfidence: deriveFieldConfidence(fallbackResult),
         };
 
+        if (crmMode) applyResult?.(result);
+        if (stale()) return null;
         setVisionState({ status: 'done', progress: 1, progressLabel: 'Extracted (OCR fallback)', result, error: null });
         return result;
       }
 
-      if (cancelledRef.current) return null;
+      if (stale()) return null;
 
       setVisionState(s => ({
         ...s,
@@ -348,19 +377,25 @@ export function useVisionExtraction(): UseVisionExtractionReturn {
           : deriveFieldConfidence(fields),
       };
 
+      // Dispatch the shared draft patch before publishing the terminal UI state.
+      if (crmMode) applyResult?.(result);
+      if (stale()) return null;
       setVisionState({ status: 'done', progress: 1, progressLabel: 'Extracted successfully', result, error: null });
       return result;
 
     } catch (err) {
-      if (cancelledRef.current) return null;
+      if (stale()) return null;
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[useVisionExtraction] extraction failed:', msg);
       setVisionState({ status: 'error', progress: 0, progressLabel: '', result: null, error: msg });
       return null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (crmMode && !stale()) active.current = null;
     }
-  }, []);
+  }, [crmMode, invalidate]);
 
-  return { visionState, runExtraction, cancelExtraction, resetExtraction };
+  return { visionState, runExtraction, cancelExtraction, resetExtraction, isExtractionPending };
 }
 
 // ─── Tesseract fallback ───────────────────────────────────────────────────────
