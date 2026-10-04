@@ -2,16 +2,33 @@
 // All methods return Promises and fail gracefully.
 // Replace this module (e.g. with Capacitor SQLite) without touching callers.
 
+const pendingOpsListeners = new Set<() => void>();
+export function subscribePendingOps(listener: () => void): () => void {
+  pendingOpsListeners.add(listener);
+  return () => { pendingOpsListeners.delete(listener); };
+}
+
 const DB_NAME = 'capture_app';
 // Keep DB_VERSION centralized here so every store uses the same database version.
-const DB_VERSION = 9;
+const DB_VERSION = 12;
 
 export function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+    let blocked = false;
+    req.onblocked = () => { blocked = true; reject(new Error('Database upgrade blocked by another open tab')); };
 
     req.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains('capture_config_cache')) {
+        db.createObjectStore('capture_config_cache', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('previous_rep_cache')) {
+        db.createObjectStore('previous_rep_cache', { keyPath: 'ownerId' });
+      }
+      if (!db.objectStoreNames.contains('event_cache')) {
+        db.createObjectStore('event_cache', { keyPath: 'ownerId' });
+      }
       if (!db.objectStoreNames.contains('drafts')) {
         db.createObjectStore('drafts', { keyPath: 'id' });
       }
@@ -56,7 +73,21 @@ export function openDB(): Promise<IDBDatabase> {
       }
     };
 
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      if (blocked) { req.result.close(); return; }
+      // Capture transaction completion (including non-bubbling complete events).
+      // Observe committed writes only; no changes to transactions or queue execution.
+      req.result.addEventListener?.('complete', (event) => {
+        const tx = event.target as IDBTransaction;
+        if (tx.mode === 'readwrite' && tx.objectStoreNames.contains('pending_ops')) {
+          for (const listener of pendingOpsListeners) {
+            try { listener(); } catch { /* UI observers must not affect storage */ }
+          }
+        }
+      }, true);
+      req.result.onversionchange = () => req.result.close();
+      resolve(req.result);
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -169,4 +200,16 @@ export async function dbDelete(store: string, key: string): Promise<void> {
   } catch {
     // Ignore
   }
+}
+
+/** Strict indexed read for UI snapshots: preserve the previous snapshot on failure. */
+export async function dbGetAllByIndexStrict<T>(store: string, index: string, value: string): Promise<T[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).index(index).getAll(value);
+    req.onsuccess = () => resolve(req.result ?? []);
+    req.onerror = () => reject(req.error);
+    tx.onabort = () => reject(tx.error);
+  });
 }

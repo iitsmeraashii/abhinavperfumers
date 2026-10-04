@@ -12,11 +12,11 @@ const mocks = {
   completedLeadsStorage: `export const buildCompletedLead=(id,captureMethod,draftData,backendSessionId,eventId,eventName,ownerId)=>({id,captureMethod,draftData,backendSessionId,eventId,eventName,ownerId,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()}); export const saveQueuedCapture=async(lead,op)=>{if(globalThis.h.failWrite)throw Error('Disk failure');globalThis.h.rows.set(op.id,structuredClone(op));globalThis.h.leads.set(lead.id,structuredClone(lead));}; export const loadCompletedLeads=async(owner)=>[...globalThis.h.leads.values()].filter(l=>l.ownerId===owner); export const deleteCompletedLead=async()=>{}; export const getCompletedLead=async()=>null;`,
   captureDraftStorage: `export const loadAllSavedDrafts=async()=>[]; export const deleteSavedDraft=async()=>{};`,
   captureEventHandlers: ['registerCardEvidence','registerVoiceNoteEvidence','notifySessionReset','handleVisionExtraction','handleOcrExtraction','handleQrExtraction'].map(n=>`export const ${n}=()=>{};`).join(''),
-  db: `export const dbGet=async()=>null; export const dbPutStrict = async (store, row) => { if(globalThis.h.failWrite) throw Error('Disk failure'); globalThis.h.rows.set(row.id, structuredClone(row)); }; export const dbPut = dbPutStrict; export const dbDelete = async (s,id)=>globalThis.h.rows.delete(id); export const dbGetAllInStore = async ()=>[...globalThis.h.rows.values()]; export const dbGetAllInStoreStrict=dbGetAllInStore; export const dbDeleteStrict=dbDelete;`,
+  db: `export const openDB=async()=>{throw Error('Unexpected voice IDB transaction in non-voice fixture');}; export const dbGet=async()=>null; export const dbPutStrict = async (store, row) => { if(globalThis.h.failWrite) throw Error('Disk failure'); globalThis.h.rows.set(row.id, structuredClone(row)); }; export const dbPut = dbPutStrict; export const dbDelete = async (s,id)=>globalThis.h.rows.delete(id); export const dbGetAllInStore = async ()=>[...globalThis.h.rows.values()]; export const dbGetAllInStoreStrict=dbGetAllInStore; export const dbDeleteStrict=dbDelete;`,
   captureBackendSync: ['syncUpsertSession','syncUpsertAsset','syncUpsertOcrExtraction','syncUpsertQrExtraction','syncUpdateSessionFields','syncUpsertVisionExtraction','syncPromoteSession'].map(n=>`export const ${n} = async ()=>{};`).join(''),
   voiceEvidenceManager: `export const executeVoiceNoteUploadOp=async()=>{}; export const voiceEvidenceManager={register(){},onSessionReset(){},onSaveAndNext(){}};`,
   assetStorageUpload: `export const uploadBusinessCardAsset=async(asset)=>{globalThis.h.uploads.push(asset); if(globalThis.h.throwUpload)throw Error('Network failed'); return globalThis.h.uploadResult;}; export const reconcileAssetStorageMetadata=async()=>true; export const uploadNotesImage=async()=>{};`,
-  jobProducer: `export const produceProcessingJob=async()=>{globalThis.h.jobs++; return globalThis.h.jobResult;};`,
+  jobProducer: `export const produceProcessingJob=async(params)=>{globalThis.h.lastJob=params;globalThis.h.jobParams=(globalThis.h.jobParams||[]).concat([params]);globalThis.h.jobs++; return globalThis.h.jobResult;};`,
 };
 (async()=>{
  await esbuild.build({stdin:{contents:`export {connectivityStore} from './src/connectivity/connectivityStore'; export * from './src/capture/captureOfflineQueue'; export * from './src/authModeState'; export {loadQueueItems} from './src/capture/leadQueueStorage'; export * from './src/capture/captureProfile'; export {parseQrPayload} from './src/capture/parseQrPayload'; export * from './src/capture/captureProcessingAdapter'; export {evidenceManager} from './src/capture/captureEvidenceManager';`,resolveDir:process.cwd()},bundle:true,platform:'node',format:'cjs',outfile:path.join(temp,'actual.cjs'),logLevel:'silent',plugins:[{name:'boundaries',setup(b){b.onResolve({filter:/.*/},args=>{const name=path.basename(args.path);if(mocks[name])return {path:name,namespace:'mock'};});b.onLoad({filter:/.*/,namespace:'mock'},args=>({contents:mocks[args.path],loader:'js'}));}}]});
@@ -71,10 +71,12 @@ const mocks = {
  await q.flushQueue('u');assert.equal(h.rows.size,0);assert.equal(h.uploads.length,uploaded,'metadata-only retry must not reupload');
  assert.equal(q.effectiveCaptureProfile('CRM',false),'EXHIBITION');assert.equal(q.effectiveCaptureProfile('CRM',true),'CRM');
  h.rows.clear();h.jobs=0;q.setAuthModeState('offline-restored');
- const manual={session:{draftData:{clientName:'Offline Example',phone:'1234567890',captureEventId:'event'},captureMethod:'MANUAL'},backendSessionId:'manual',ownerId:'u',eventId:'event',isOnline:true};
+ const manual={session:{draftData:{clientName:'Offline Example',phone:'1234567890',captureEventId:'event',previousRepCode:'REP-007',priceRange:'Historical INR < 500 / kg'},captureMethod:'MANUAL'},backendSessionId:'manual',ownerId:'u',eventId:'event',isOnline:true};
  assert.equal((await q.submitCaptureSession(manual)).outcome,'queued');assert.equal(h.jobs,0);
  assert.deepEqual([...h.rows.values()][0].payload.draftData,manual.session.draftData);
  assert.equal([...h.rows.values()][0].payload.eventId,'event');
+ // B1.13/23 replay uses the durable association, without consulting today's active list.
+ q.setAuthModeState('online');await q.flushQueue('u');assert.equal(h.lastJob.eventId,'event');assert.equal(h.lastJob.draftData.captureEventId,'event');assert.equal(h.lastJob.draftData.previousRepCode,'REP-007');assert.equal(h.lastJob.draftData.priceRange,'Historical INR < 500 / kg');assert.equal(h.rows.size,0);q.setAuthModeState('offline-restored');
  h.rows.clear();h.jobs=0;
  const raw='BEGIN:VCARD\nVERSION:3.0\nFN:Offline QR Example\nORG:Example Co\nTEL:+919999999999\nEND:VCARD';
  const decoded=q.parseQrPayload(raw);assert.equal(decoded.fields.clientName,'Offline QR Example');
@@ -89,13 +91,13 @@ const mocks = {
  await q.submitCaptureSession({...manual,backendSessionId:'restart',session:{draftData:{cardFrontAssetId:'restart-card'},captureMethod:'BUSINESS_CARD'}});
  await q.submitCaptureSession({...manual,backendSessionId:'restart-manual'});
  await q.submitCaptureSession({...manual,backendSessionId:'restart-qr',session:{draftData:qrDraft,captureMethod:'MANUAL',originalCaptureMethod:'QR'}});
- assert.equal(h.rows.size,4);assert.equal((await q.loadQueueItems('u')).length,3);
+ assert.equal(h.rows.size,4);assert.equal((await q.loadQueueItems('u')).length,3);assert.equal([...h.rows.values()].find(op=>op.sessionId==='restart-manual').payload.draftData.priceRange,'Historical INR < 500 / kg');
  delete require.cache[require.resolve(path.join(temp,'actual.cjs'))];const restored=require(path.join(temp,'actual.cjs'));restored.connectivityStore.subscribe(()=>{});
  const before=h.uploads.length;await restored.flushQueue('u');assert.equal(h.uploads.length,before,'new runtime starts unauthorized');assert.equal(h.rows.size,4);
  restored.setAuthModeState('online');h.uploadResult={uploaded:true,metadataWritten:true};h.jobResult={outcome:'queued',jobId:'replayed',error:null};
  let tick,cleared=false;const oldSet=global.setInterval,oldClear=global.clearInterval;
  global.setInterval=(fn)=>{tick=fn;return 1};global.clearInterval=()=>{cleared=true};
- const stop=restored.startQueueReplay('u',e=>{throw e});await new Promise(r=>setImmediate(r));assert.equal(h.rows.size,0);assert.equal(h.uploads.at(-1).dataUrl,asset.dataUrl);
+ const stop=restored.startQueueReplay('u',e=>{throw e});await new Promise(r=>setImmediate(r));assert.equal(h.rows.size,0);assert.equal(h.uploads.at(-1).dataUrl,asset.dataUrl);assert.equal(h.jobParams.find(p=>p.backendSessionId==='restart-manual').draftData.priceRange,'Historical INR < 500 / kg');
  await restored.enqueueOp('upload_business_card','retry',{...card,assetId:'retry'},'u');h.uploadResult={uploaded:false,metadataWritten:false};tick();await new Promise(r=>setImmediate(r));assert.equal(h.rows.size,1);
  h.uploadResult={uploaded:true,metadataWritten:true};tick();await new Promise(r=>setImmediate(r));assert.equal(h.rows.size,0,'backend recovery retries without a new online event');
  stop();assert(cleared);global.setInterval=oldSet;global.clearInterval=oldClear;

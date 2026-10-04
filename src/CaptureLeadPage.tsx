@@ -1,3 +1,8 @@
+import { useSyncDisplay } from './capture/useSyncDisplay';
+import { voiceEvidenceManager } from './capture/voiceEvidenceManager';
+import { usePriceRangeQuickValues } from './capture/usePriceRangeQuickValues';
+import { usePreviousReps } from './capture/usePreviousReps';
+import { resolveCaptureEvent } from './capture/eventCacheStorage';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { useEvent } from './EventContext';
@@ -6,7 +11,7 @@ import { useAuth } from './AuthContext';
 import { useCaptureSession } from './capture/useCaptureSession';
 import { useManualEntryForm } from './capture/useManualEntryForm';
 import { useAutosave } from './capture/useAutosave';
-import { loadDraft, clearDraft, loadSavedDraft, saveSavedDraft, deleteSavedDraft } from './capture/captureDraftStorage';
+import { loadDraft, saveDraftStrict, clearDraft, loadSavedDraft, saveSavedDraft, deleteSavedDraft } from './capture/captureDraftStorage';
 import { isDraftEmpty } from './capture/captureDraftEligibility';
 import { deleteSessionAssets } from './capture/captureAssetStorage';
 import { OfflineBanner } from './capture/OfflineBanner';
@@ -20,7 +25,6 @@ import type { SaveState } from './capture/useAutosave';
 import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
 import {
   flushQueue,
-  getPendingCount,
 } from './capture/captureOfflineQueue';
 import { saveCompletedLead, buildCompletedLead } from './capture/completedLeadsStorage';
 import {
@@ -57,29 +61,21 @@ const QrScannerView = lazy(() =>
 export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: string | null }) {
   const { selectedEvent, activeEvents } = useEvent();
   const { salesRep, user, authMode } = useAuth();
+  const previousReps = usePreviousReps();
+  const priceRangeConfig = usePriceRangeQuickValues();
   const authUserId = user?.authUserId ?? null;
 
   // Resolve the effective event for a capture session: the per-lead override
   // in draftData.captureEventId takes priority, falling back to the My Account
   // default (selectedEvent). Returns { id, code, name } or nulls.
-  const resolveEvent = useCallback((draftData: DraftData) => {
-    const overrideId = draftData.captureEventId;
-    if (overrideId && overrideId !== selectedEvent?.id) {
-      const ev = activeEvents.find(e => e.id === overrideId);
-      if (ev) return { id: ev.id, eventCode: ev.event_code, eventName: ev.name };
-      return { id: overrideId, eventCode: null, eventName: null };
-    }
-    return {
-      id:        selectedEvent?.id         ?? salesRep?.default_event_id ?? null,
-      eventCode: selectedEvent?.event_code ?? null,
-      eventName: selectedEvent?.name       ?? null,
-    };
-  }, [selectedEvent, activeEvents, salesRep?.default_event_id]);
-  const [pendingSyncCount, setPendingSyncCount] = useState(0);
-  const [isFlushing, setIsFlushing] = useState(false);
+  const historicalEvent = useRef<{ sessionId: string | null; id: string } | null>(null);
+  const resolveEvent = useCallback((draftData: DraftData) => resolveCaptureEvent(
+    activeEvents, draftData.captureEventId, salesRep?.default_event_id,
+    historicalEvent.current?.id === draftData.captureEventId ? historicalEvent.current?.id : null,
+  ), [activeEvents, salesRep?.default_event_id]);
   const [promotionToast, setPromotionToast] = useState<{ message: string; isError: boolean } | null>(null);
 
-  // Flush the offline queue and update pending count badge.
+  // Flush the offline queue using the existing reconnect path.
   // After the offline queue drains, notify ALPE so it polls immediately —
   // jobs replayed from the offline queue are now in processing_queue and
   // ready to be processed.
@@ -91,12 +87,9 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       // lifecycle fires, or on the next explicit flushQueue(authUserId).
       return;
     }
-    setIsFlushing(true);
     try {
       await flushQueue(authUserId);
     } finally {
-      setIsFlushing(false);
-      getPendingCount(authUserId).then(setPendingSyncCount);
       notifyAlpeReconnect();
     }
   }, [authUserId]);
@@ -105,6 +98,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     onReconnect: handleReconnect,
     onOffline: notifyAlpeOffline,
   });
+  const syncDisplay = useSyncDisplay(authUserId, isOnline, authMode);
   const [session, actions] = useCaptureSession();
   const form = useManualEntryForm(actions);
   const [saveState, setSaveState] = useState<SaveState>('idle');
@@ -164,11 +158,6 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     executionEngine.setOwnerId(authUserId);
   }, [authUserId]);
 
-  // Poll pending count on mount and after flush
-  useEffect(() => {
-    getPendingCount(authUserId ?? undefined).then(setPendingSyncCount);
-  }, [isFlushing, authUserId]);
-
   // Seed the session's capture profile from the rep's persisted default.
   // Fires on mount and whenever the session returns to IDLE, so leaving and
   // reopening Capture (or backing out of a session) restores the persisted
@@ -209,7 +198,6 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     },
     onOfflineQueued: () => {
       actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
     },
     correlationId:   correlationIdRef.current,
   }), [actions]);
@@ -239,6 +227,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       if (normalised.captureMethod === 'BUSINESS_CARD' && normalised.draftData.cardSessionId) {
         setCardSessionId(normalised.draftData.cardSessionId as string);
       }
+      historicalEvent.current = normalised.draftData.captureEventId ? { sessionId: normalised.sync.backendSessionId, id: normalised.draftData.captureEventId } : null;
       actions.restoreSession(normalised);
       profileEngine.resolve(normalised.captureProfile);
       addEntryRef.current('Resumed saved draft', { draftId: resumeDraftId });
@@ -277,6 +266,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
   const handleRecoveryContinue = useCallback(() => {
     if (!pendingDraft) return;
     const normalised = pendingDraft.session;
+    historicalEvent.current = normalised.draftData.captureEventId ? { sessionId: normalised.sync.backendSessionId, id: normalised.draftData.captureEventId } : null;
 
     if (normalised.captureMethod === 'BUSINESS_CARD' && normalised.draftData.cardSessionId) {
       setCardSessionId(normalised.draftData.cardSessionId as string);
@@ -499,6 +489,18 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       return;
     }
 
+    if (historicalEvent.current?.sessionId !== bsid) historicalEvent.current = null;
+    if (!resolveEvent(s.draftData).id) {
+      try { await saveDraftStrict(s, authUserId); } catch {
+        const error = 'Could not save the draft locally. Keep this capture open and retry.';
+        setPromotionToast({ message: error, isError: true });
+        return { error };
+      }
+      const error = 'No active event is available. Your capture is kept as a draft. Select an active event or reconnect to refresh events.';
+      setPromotionToast({ message: error, isError: true });
+      return { error };
+    }
+
     logEvent('handleSaveAndNext()', {
       backendSessionId: bsid,
       captureMethod: s.captureMethod,
@@ -554,7 +556,6 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       }
       logOperationEnd(saveOp, { extra: { outcome: result.outcome, jobId: result.jobId } });
       if (resumeDraftId) await deleteSavedDraft(resumeDraftId, authUserId ?? undefined);
-      if (result.outcome === 'queued') setPendingSyncCount(await getPendingCount(authUserId ?? undefined));
       notifySessionReset(authUserId ?? null);
 
       // ── Reset UI after accepted submission ────────────────────────────────────────────
@@ -606,7 +607,6 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
 
     if (result.outcome === 'queued') {
       if (!isOnline) actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
       const msg = isOnline
         ? 'Lead saved — will sync when reconnected'
         : 'Lead saved — will sync when back online';
@@ -816,11 +816,16 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
   }, [actions, isOnline, makeRoutingCbs, queue, cardUploadTiming, resolveEvent]);
 
   // ── Voice note recorded ───────────────────────────────────────────────────
-  const handleVoiceNoteRecorded = useCallback((blob: Blob, durationMs: number, mimeType: string) => {
-    const bsid = sessionRef.current.sync.backendSessionId;
-    if (!bsid) return;
-    registerVoiceNoteEvidence(bsid, blob, durationMs, mimeType, voiceUploadTiming, authUserId ?? null);
-  }, [voiceUploadTiming, authUserId]);
+  const voiceSessionId = session.sync.backendSessionId;
+  const handleVoiceNoteRecorded = useCallback(async (blob: Blob, durationMs: number, mimeType: string) => {
+    if (!voiceSessionId) throw new Error('Start a capture before recording');
+    const recordingId = await registerVoiceNoteEvidence(voiceSessionId, blob, durationMs, mimeType, voiceUploadTiming, authUserId ?? null);
+    if (sessionRef.current.sync.backendSessionId === voiceSessionId) actions.patchDraft({ voiceNoteRecordingId: recordingId });
+  }, [voiceSessionId, voiceUploadTiming, authUserId, actions]);
+  const handleVoiceNoteRemove = useCallback(async () => {
+    if (!voiceSessionId || !authUserId) throw new Error('Voice capture owner is unavailable');
+    await voiceEvidenceManager.remove(voiceSessionId, authUserId);
+  }, [voiceSessionId, authUserId]);
 
   // ── OCR result received ───────────────────────────────────────────────────
   const handleOcrResult = useCallback(async (result: OcrResult) => {
@@ -1071,7 +1076,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
 
   return (
     <div className="min-h-[calc(100vh-57px)] bg-stone-50 flex flex-col">
-      <OfflineBanner visible={!isOnline || authMode !== 'online'} pendingCount={pendingSyncCount} isFlushing={isFlushing} />
+      <OfflineBanner visible={!isOnline || authMode !== 'online'} summary={syncDisplay.summary} />
 
       <div className="flex-1 w-full max-w-lg mx-auto px-5 pt-10 pb-10 flex flex-col">
 
@@ -1133,6 +1138,8 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
         {showManualForm && (
           <div ref={manualSectionRef}>
           <ManualEntryForm
+            previousReps={previousReps}
+            priceRangeQuickValues={priceRangeConfig.quickValues}
             session={session}
             isOnline={isOnline}
             saveState={saveState}
@@ -1142,6 +1149,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
             onSaveAndNext={handleSaveAndNext}
             onSaveAsDraft={handleSaveAsDraft}
             onVoiceNoteRecorded={handleVoiceNoteRecorded}
+            onVoiceNoteRemove={handleVoiceNoteRemove}
             contactDetailsOptional={session.captureProfile === 'EXHIBITION'}
             activeEvents={activeEvents}
             defaultEvent={selectedEvent}

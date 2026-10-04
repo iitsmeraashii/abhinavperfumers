@@ -628,6 +628,7 @@ export function BusinessCardCapture({
   // lastVisionResult is display-only (confidence badge colours); not part of shared state
   const [lastVisionResult, setLastVisionResult] = useState<VisionResult | null>(null);
   const autoCompletedRef = useRef(false);
+  const captureGeneration = useRef(0);
 
   // ── All extracted / edited field values are derived from session.draftData ──
   // Writes go through onDraftPatch → actions.patchDraft (same pattern as ManualEntryForm).
@@ -645,7 +646,7 @@ export function BusinessCardCapture({
   const editedAddress = String(d.address  ?? '');
   const editedNotes   = String(d.notes    ?? '');
 
-  const { visionState, runExtraction, cancelExtraction, resetExtraction } = useVisionExtraction();
+  const { visionState, runExtraction, cancelExtraction, resetExtraction, isExtractionPending } = useVisionExtraction(!exhibitionMode);
 
   useEffect(() => {
     const statusMap: Record<string, string> = {
@@ -685,7 +686,7 @@ export function BusinessCardCapture({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => () => { cancelExtraction(); }, [cancelExtraction]);
+  useEffect(() => () => { captureGeneration.current++; cancelExtraction(); }, [cancelExtraction]);
 
   const notifyChange = useCallback((f: CardState, b: CardState) => {
     onAssetsChanged?.(f.asset, b.asset);
@@ -740,14 +741,15 @@ export function BusinessCardCapture({
 
   const handleRetry = useCallback(async () => {
     const asset = front.asset;
-    if (!asset) return;
+    if (!asset || (!exhibitionMode && !isOnline)) return;
     resetExtraction();
-    const result = await runExtraction(asset.id, asset.dataUrl);
-    if (result) applyVisionResult(result);
+    const result = await runExtraction(asset.id, asset.dataUrl, exhibitionMode ? undefined : applyVisionResult);
+    if (result && exhibitionMode) applyVisionResult(result);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [front.asset, resetExtraction, runExtraction]);
+  }, [front.asset, resetExtraction, runExtraction, exhibitionMode, isOnline]);
 
   async function handleCapture(side: CardSide, rawDataUrl: string) {
+    const captureId = !exhibitionMode && side === 'front' ? ++captureGeneration.current : captureGeneration.current;
     const setState = side === 'front' ? setFront : setBack;
     const otherState = side === 'front' ? back : front;
 
@@ -759,11 +761,13 @@ export function BusinessCardCapture({
       await deleteAsset(existing.id, ownerId ?? undefined);
     }
 
+    if (!exhibitionMode && side === 'front' && captureId !== captureGeneration.current) return;
     setState({ asset: null, status: 'saving' });
     setActiveCapture(null);
 
     try {
       const asset = await saveAsset(sessionId, side, rawDataUrl, ownerId);
+      if (!exhibitionMode && side === 'front' && captureId !== captureGeneration.current) return;
       const newState: CardState = { asset, status: 'previewing' };
       setState(newState);
       showToast(side === 'front' ? 'Front captured' : 'Back captured');
@@ -778,11 +782,12 @@ export function BusinessCardCapture({
           onDebugLog?.('Front captured — extraction deferred', { assetId: asset.id });
         } else {
           onDebugLog?.('Front captured — starting vision extraction', { assetId: asset.id });
-          const result = await runExtraction(asset.id, asset.dataUrl);
-          if (result) applyVisionResult(result);
+          const result = await runExtraction(asset.id, asset.dataUrl, exhibitionMode ? undefined : applyVisionResult);
+          if (result && exhibitionMode) applyVisionResult(result);
         }
       }
     } catch (err) {
+      if (!exhibitionMode && side === 'front' && captureId !== captureGeneration.current) return;
       const msg = err instanceof Error ? err.message : 'Failed to save image';
       setState({ asset: null, status: 'error', errorMsg: msg });
       showToast(msg, true);
@@ -790,6 +795,7 @@ export function BusinessCardCapture({
   }
 
   async function handleDelete(side: CardSide) {
+    if (!exhibitionMode && side === 'front') captureGeneration.current++;
     const target = side === 'front' ? front : back;
     if (!target.asset) return;
     if (side === 'front') { cancelExtraction(); resetExtraction(); }
@@ -820,7 +826,7 @@ export function BusinessCardCapture({
   }, [exhibitionMode, front.asset, back.asset, onComplete]);
 
   function handleContinue() {
-    if (!front.asset) return;
+    if (!front.asset || (!exhibitionMode && (isBusy || isRunning || isExtractionPending()))) return;
     const legacyOcr = visionState.result
       ? ({
           assetId:     visionState.result.assetId,
@@ -1017,7 +1023,7 @@ export function BusinessCardCapture({
         <div className="space-y-2 animate-in fade-in duration-200">
           <button
             onClick={handleContinue}
-            disabled={isBusy}
+            disabled={isBusy || (!exhibitionMode && isRunning)}
             className="w-full flex items-center justify-center gap-2
               bg-stone-900 hover:bg-stone-800 active:bg-stone-950 active:scale-[0.98]
               text-white font-bold rounded-2xl py-4 text-base

@@ -35,30 +35,13 @@ export function registerCardEvidence(
   if (back)  evidenceManager.register({ type: 'business_card_back',  sessionId, asset: back,  uploadTiming });
 }
 
-export function registerVoiceNoteEvidence(
-  sessionId: string,
-  audioBlob: Blob,
-  durationMs: number,
-  mimeType: string,
-  uploadTiming: UploadTiming,
-  ownerId?: string | null,
-): void {
-  console.log('[VOICE_DIAG] registerVoiceNoteEvidence ENTRY', {
-    ts: new Date().toISOString(),
-    backendSessionId: sessionId,
-    localSessionId: null,
-    uploadTiming,
-    blobSize: audioBlob?.size ?? null,
-    mimeType,
-    durationMs,
-    ownerId,
-  });
-  evidenceManager.register({ type: 'voice_note', sessionId, audioBlob, durationMs, mimeType, uploadTiming, ownerId: ownerId ?? null });
-  console.log('[VOICE_DIAG] registerVoiceNoteEvidence EXIT', {
-    ts: new Date().toISOString(),
-    backendSessionId: sessionId,
-    uploadTiming,
-  });
+export async function registerVoiceNoteEvidence(
+  sessionId: string, audioBlob: Blob, durationMs: number, mimeType: string,
+  uploadTiming: UploadTiming, ownerId?: string | null,
+): Promise<string> {
+  const id = await evidenceManager.register({ type: 'voice_note', sessionId, audioBlob, durationMs, mimeType, uploadTiming, ownerId: ownerId ?? null });
+  if (!id) throw new Error('Voice recording was not persisted');
+  return id;
 }
 
 export function notifySessionReset(ownerId?: string | null): void {

@@ -1,3 +1,8 @@
+import { useAuth } from '../AuthContext';
+import { isCloudSyncAllowed } from '../authModeState';
+import { isTransportOnline } from '../connectivity/connectivityStore';
+import { filterPreviousReps, previousRepLabel } from './previousRepCacheStorage';
+import type { usePreviousReps } from './usePreviousReps';
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   ArrowLeft, User, Building2, Mail, Briefcase,
@@ -19,8 +24,6 @@ import { splitInternationalPhone } from './splitInternationalPhone';
 import { Toast, DiscardDialog, DraftSaveIndicator } from './CaptureUI';
 import type { SaveState } from './useAutosave';
 import { TagInput } from '../components/TagInput';
-import { getPriceRangeQuickValues } from '../runtime/runtimeDiagnostics';
-import { BUILTIN_PRICE_RANGE_VALUES } from '../runtime/runtimeConfiguration';
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
@@ -241,14 +244,42 @@ function VoiceNoteRecorder({
   onUpdate,
   onBlobReady,
   onRetryTranscription,
+  onRemove,
+  onPersistenceState,
 }: {
   durationMs?: number;
   transcript?: string;
   transcriptionStatus?: VoiceTranscriptionStatus;
   onUpdate: (patch: Partial<DraftData>) => void;
-  onBlobReady?: (blob: Blob, durationMs: number, mimeType: string) => void;
+  onBlobReady?: (blob: Blob, durationMs: number, mimeType: string) => Promise<void>;
+  onRemove?: () => Promise<void>;
+  onPersistenceState: (state: 'idle' | 'saving' | 'saved' | 'error') => void;
   onRetryTranscription?: () => void;
 }) {
+  const [localError, setLocalError] = useState<string | null>(null);
+  const retained = useRef<{ blob: Blob; ms: number; mime: string } | null>(null);
+  const accepting = useRef(false);
+  const mountedRef = useRef(true);
+  async function persistRecording() {
+    const record = retained.current;
+    if (!record || accepting.current) return;
+    accepting.current = true;
+    if (mountedRef.current) { onPersistenceState('saving'); setLocalError(null); }
+    try {
+      if (!onBlobReady) throw new Error('Voice storage is unavailable');
+      await onBlobReady(record.blob, record.ms, record.mime);
+      if (mountedRef.current) {
+        onUpdate({ voiceNoteDurationMs: record.ms, voiceNoteTranscript: '' });
+        onPersistenceState('saved');
+      }
+      retained.current = null;
+    } catch {
+      if (mountedRef.current) {
+        setLocalError('Voice note could not be saved on this device. Retry, remove, or re-record before saving the lead.');
+        onPersistenceState('error');
+      }
+    } finally { accepting.current = false; }
+  }
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed]     = useState(durationMs ?? 0);
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -258,14 +289,18 @@ function VoiceNoteRecorder({
   const elapsedRef  = useRef(0);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (timerRef.current) clearInterval(timerRef.current);
-      recorderRef.current?.stop();
+      if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop();
       streamRef.current?.getTracks().forEach(t => t.stop());
     };
   }, []);
 
   async function handleStart() {
+    if (accepting.current) return;
+    onPersistenceState('saving');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -287,8 +322,8 @@ function VoiceNoteRecorder({
         streamRef.current?.getTracks().forEach(t => t.stop());
         streamRef.current = null;
         const ms = elapsedRef.current;
-        onUpdate({ voiceNoteDurationMs: ms, voiceNoteTranscript: '' });
-        onBlobReady?.(blob, ms, mimeType);
+        retained.current = { blob, ms, mime: mimeType };
+        void persistRecording();
       };
 
       recorder.start();
@@ -299,7 +334,8 @@ function VoiceNoteRecorder({
         setElapsed(prev => prev + 1000);
       }, 1000);
     } catch {
-      // microphone permission denied or unavailable — silently ignore
+      onPersistenceState(retained.current ? 'error' : durationMs ? 'saved' : 'idle');
+      setLocalError('Microphone is unavailable. Check permission and try again.');
     }
   }
 
@@ -310,7 +346,16 @@ function VoiceNoteRecorder({
     setRecording(false);
   }
 
-  function handleClear() {
+  async function handleClear() {
+    if (accepting.current) return;
+    onPersistenceState('saving');
+    try {
+      await onRemove?.();
+    } catch { setLocalError('Could not remove the saved recording. Please retry.'); onPersistenceState('error'); return; }
+    if (recorderRef.current) recorderRef.current.onstop = null;
+    retained.current = null;
+    setLocalError(null);
+    onPersistenceState('idle');
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     recorderRef.current?.stop();
     recorderRef.current = null;
@@ -319,7 +364,7 @@ function VoiceNoteRecorder({
     setRecording(false);
     setElapsed(0);
     elapsedRef.current = 0;
-    onUpdate({ voiceNoteDurationMs: undefined, voiceNoteTranscript: undefined });
+    onUpdate({ voiceNoteRecordingId: undefined, voiceNoteDurationMs: undefined, voiceNoteTranscript: undefined });
   }
 
   function formatTime(ms: number) {
@@ -339,6 +384,11 @@ function VoiceNoteRecorder({
   return (
     <div>
       <FieldLabel label="Voice Note" optional />
+      {localError && <div role="alert" className="text-sm text-red-600">
+        {localError}
+        {retained.current && <button type="button" onClick={() => void persistRecording()} className="ml-2 underline">Retry saving</button>}
+        <button type="button" onClick={() => void handleClear()} className="ml-2 underline">Remove</button>
+      </div>}
       <div className="flex items-center gap-3">
         {recording ? (
           <>
@@ -586,12 +636,14 @@ const PRICE_RANGE_OPERATORS = ['<', '>', '=', '-'] as const;
 function PriceRangeInput({
   value,
   onChange,
+  quickValues: configuredValues,
 }: {
+  quickValues: string[];
   value: string;
   onChange: (v: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const quickValues = getPriceRangeQuickValues()
+  const quickValues = configuredValues
     .filter(value => !(PRICE_RANGE_OPERATORS as readonly string[]).includes(value));
 
   function insert(char: string) {
@@ -688,14 +740,15 @@ function LeadTypePicker({ value, onChange }: { value?: LeadType; onChange: (v: L
 function PreviousRepSelect({
   value,
   onChange,
+  source,
 }: {
   value: string;
   onChange: (code: string) => void;
+  source: ReturnType<typeof usePreviousReps>;
 }) {
   const [open, setOpen]   = useState(false);
   const [search, setSearch] = useState('');
-  const [reps, setReps]   = useState<{ rep_code: string; name: string }[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const { reps, refresh } = source;
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -706,30 +759,13 @@ function PreviousRepSelect({
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  async function loadReps() {
-    if (loaded) return;
-    const { data } = await supabase
-      .from('sales_representatives')
-      .select('rep_code, name')
-      .eq('is_active', true)
-      .order('name');
-    if (data) setReps(data);
-    setLoaded(true);
-  }
-
   function handleOpen() {
-    loadReps();
+    void refresh();
     setOpen(true);
     setSearch('');
   }
 
-  const filtered = search
-    ? reps.filter(r =>
-        r.name.toLowerCase().includes(search.toLowerCase()) ||
-        r.rep_code.toLowerCase().includes(search.toLowerCase()))
-    : reps;
-
-  const selectedRep = reps.find(r => r.rep_code === value);
+  const filtered = filterPreviousReps(reps, search);
 
   return (
     <div ref={ref} className="relative">
@@ -742,7 +778,7 @@ function PreviousRepSelect({
           hover:border-stone-300 transition-colors`}
       >
         <span className={value ? 'text-stone-900 font-medium' : 'text-stone-400'}>
-          {selectedRep ? `${selectedRep.name} (${selectedRep.rep_code})` : 'Select rep…'}
+          {previousRepLabel(reps, value)}
         </span>
         <ChevronDown className={`w-4 h-4 text-stone-400 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
@@ -859,6 +895,8 @@ function CollapsibleSection({
 // ─── Main form ────────────────────────────────────────────────────────────────
 
 interface Props {
+  priceRangeQuickValues: string[];
+  previousReps: ReturnType<typeof usePreviousReps>;
   session:       CaptureSession;
   isOnline:      boolean;
   saveState?:    SaveState;
@@ -867,7 +905,8 @@ interface Props {
   onDiscard:     () => Promise<void>;
   onSaveAndNext?: () => Promise<{ error?: string } | void>;
   onSaveAsDraft?: () => Promise<void>;
-  onVoiceNoteRecorded?: (blob: Blob, durationMs: number, mimeType: string) => void;
+  onVoiceNoteRecorded?: (blob: Blob, durationMs: number, mimeType: string) => Promise<void>;
+  onVoiceNoteRemove?: () => Promise<void>;
   /** When true, contact fields are optional because evidence (card/QR)
    *  satisfies the minimum save requirement. Used in Exhibition mode. */
   contactDetailsOptional?: boolean;
@@ -877,12 +916,15 @@ interface Props {
   defaultEvent?:  AppEvent | null;
 }
 
-export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional, activeEvents = [], defaultEvent = null }: Props) {
+export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, onVoiceNoteRemove, contactDetailsOptional, activeEvents = [], defaultEvent = null }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
   } = form;
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
+  const { authMode } = useAuth();
+  const [voicePersistence, setVoicePersistence] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const voiceBlocked = voicePersistence === 'saving' || voicePersistence === 'error';
   const [saving, setSaving] = useState(false);
 
   // Ref to the Lead Classification section for post-extraction auto-scroll.
@@ -981,6 +1023,8 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   const hasEvidence = !!(d.cardFrontAssetId || d.rawQr);
   const canSave = contactDetailsOptional ? (hasIdentifier || hasEvidence) : hasIdentifier;
   const backendSessionId = session.sync.backendSessionId;
+  const voiceRecordingId = d.voiceNoteRecordingId;
+  useEffect(() => { setVoicePersistence('idle'); }, [backendSessionId]);
 
   // Authoritative transcription state derived solely from capture_assets.transcription_status.
   // Uses 'none' as initial value so the transcript block is hidden until we
@@ -1000,8 +1044,8 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
 
   // Reset to 'none' whenever the recording is cleared.
   useEffect(() => {
-    if (!voiceDuration) setPolledTranscriptionStatus('none');
-  }, [voiceDuration]);
+    setPolledTranscriptionStatus(voiceDuration ? 'pending' : 'none');
+  }, [voiceDuration, voiceRecordingId, backendSessionId]);
 
   // Poll capture_assets.transcription_status — the sole source of truth.
   // Uses recursive setTimeout (not setInterval) so concurrent polls cannot
@@ -1009,13 +1053,13 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
   // Does NOT include polledTranscriptionStatus in deps — uses polledStatusRef
   // instead to avoid tearing down the effect on every state change.
   useEffect(() => {
-    if (!backendSessionId || (voiceDuration ?? 0) <= 0) return;
+    if (!backendSessionId || (voiceDuration ?? 0) <= 0 || !isOnline || authMode !== 'online') return;
 
     let mounted = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     async function poll() {
-      if (!mounted) return;
+      if (!mounted || !isTransportOnline() || !isCloudSyncAllowed()) return;
 
       // Stop once a terminal state is confirmed.
       const current = polledStatusRef.current;
@@ -1028,7 +1072,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
         .eq('asset_type', 'voice_note')
         .maybeSingle();
 
-      if (!mounted) return;
+      if (!mounted || !isTransportOnline() || !isCloudSyncAllowed()) return;
 
       const dbStatus = (asset as { transcription_status?: string | null } | null)
         ?.transcription_status ?? null;
@@ -1041,7 +1085,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
           .eq('id', backendSessionId)
           .maybeSingle();
 
-        if (!mounted) return;
+        if (!mounted || !isTransportOnline() || !isCloudSyncAllowed()) return;
 
         const transcript = (sessionRow as { voice_note_transcript?: string | null } | null)
           ?.voice_note_transcript ?? null;
@@ -1068,17 +1112,22 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
         setPolledTranscriptionStatus('pending');
       }
 
-      timer = setTimeout(() => { void poll(); }, 3000);
+      timer = setTimeout(runPoll, 3000);
     }
 
+    function runPoll() {
+      void poll().catch(() => {
+        if (mounted && isTransportOnline() && isCloudSyncAllowed()) timer = setTimeout(runPoll, 3000);
+      });
+    }
     // Small initial delay to allow the upload to begin before the first query.
-    timer = setTimeout(() => { void poll(); }, 800);
+    timer = setTimeout(runPoll, 800);
 
     return () => {
       mounted = false;
       if (timer) clearTimeout(timer);
     };
-  }, [backendSessionId, voiceDuration]);
+  }, [backendSessionId, voiceDuration, voiceRecordingId, isOnline, authMode]);
 
   // Derive the status shown in the UI directly from the polled DB state.
   // Never infer status from the transcript draft field.
@@ -1086,6 +1135,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
     (voiceDuration ?? 0) <= 0 ? 'none' : polledTranscriptionStatus;
 
   const handleSaveAndNext = useCallback(async () => {
+    if (voiceBlocked) return;
     setSaving(true);
     const ok = await handleSaveDraft(session);
     if (!ok) { setSaving(false); return; }
@@ -1099,7 +1149,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
       setPromotionActive(false);
       setSaving(false);
     }
-  }, [handleSaveDraft, session, onSaveAndNext]);
+  }, [handleSaveDraft, session, onSaveAndNext, voiceBlocked]);
 
   const handleContinueEnrich = useCallback(async () => {
     setSaving(true);
@@ -1292,6 +1342,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
             />
             {leadType === 'EXISTING' && (
               <PreviousRepSelect
+                source={previousReps}
                 value={previousRepCode}
                 onChange={code => handleChange('previousRepCode', code)}
               />
@@ -1323,11 +1374,14 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
 
             {/* Voice note */}
             <VoiceNoteRecorder
+              key={backendSessionId}
               durationMs={voiceDuration}
               transcript={voiceTranscript}
               transcriptionStatus={computedTranscriptionStatus}
               onUpdate={handlePatchDraft}
               onBlobReady={onVoiceNoteRecorded}
+              onRemove={onVoiceNoteRemove}
+              onPersistenceState={setVoicePersistence}
               onRetryTranscription={
                 backendSessionId && polledTranscriptionStatus === 'failed'
                   ? () => setPolledTranscriptionStatus(null)
@@ -1356,6 +1410,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
           />
 
           <PriceRangeInput
+            quickValues={priceRangeQuickValues}
             value={priceRange}
             onChange={v => handleChange('priceRange', v)}
           />
@@ -1394,6 +1449,10 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
               onChange={e => handlePatchDraft({ captureEventId: e.target.value || undefined })}
               className={inputCls()}
             >
+              <option value="">{activeEvents.length ? 'Select an active event' : 'No active events available'}</option>
+              {session.draftData.captureEventId && !activeEvents.some(ev => ev.id === session.draftData.captureEventId) && (
+                <option value={session.draftData.captureEventId} disabled>Previously selected event (not currently active)</option>
+              )}
               {activeEvents.map(ev => (
                 <option key={ev.id} value={ev.id}>
                   {ev.name}
@@ -1438,7 +1497,7 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
           <button
             type="button"
             onClick={onSaveAsDraft ? handleSaveAsDraftClick : handleContinueEnrich}
-            disabled={saving || (onSaveAsDraft && !hasDraftData)}
+            disabled={voiceBlocked || saving || (onSaveAsDraft && !hasDraftData)}
             className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl
               border border-stone-200 bg-white text-stone-700 text-sm font-semibold
               hover:bg-stone-50 active:bg-stone-100 active:scale-[0.98]
@@ -1450,13 +1509,13 @@ export function ManualEntryForm({ session, isOnline, saveState = 'idle', form, o
           <button
             type="button"
             onClick={handleSaveAndNext}
-            disabled={saving || !canSave}
+            disabled={voiceBlocked || saving || !canSave}
             className="flex-[2] flex items-center justify-center gap-2 py-3.5 rounded-xl
               bg-stone-900 text-white text-sm font-semibold shadow-sm
               hover:bg-stone-800 active:bg-stone-950 active:scale-[0.98]
               transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {saving ? (
+            {voiceBlocked ? (voicePersistence === 'saving' ? 'Saving voice note…' : 'Save voice note first') : saving ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Saving…
