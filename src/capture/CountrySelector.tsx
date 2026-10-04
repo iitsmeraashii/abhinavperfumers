@@ -16,6 +16,7 @@ interface CountrySelectorProps {
   value: string | null | undefined;
   onChange: (country: string | null) => void;
   placeholder?: string;
+  showDialCode?: boolean;
 }
 
 interface DropdownPosition {
@@ -24,7 +25,12 @@ interface DropdownPosition {
   width: number;
 }
 
-export function CountrySelector({ value, onChange, placeholder = 'Select country…' }: CountrySelectorProps) {
+export function CountrySelector({
+  value,
+  onChange,
+  placeholder = 'Select country…',
+  showDialCode = true,
+}: CountrySelectorProps) {
   const [query, setQuery]           = useState('');
   const [open, setOpen]             = useState(false);
   const [highlighted, setHighlighted] = useState(0);
@@ -189,7 +195,7 @@ export function CountrySelector({ value, onChange, placeholder = 'Select country
               >
                 <span>{country.name}</span>
                 <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-stone-400">{country.dialCode}</span>
+                  {showDialCode && <span className="text-xs text-stone-400">{country.dialCode}</span>}
                   {value === country.name && (
                     <Check className="w-3.5 h-3.5 text-amber-600" />
                   )}

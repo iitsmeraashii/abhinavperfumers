@@ -1414,6 +1414,7 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                       value={draft.country && draft.country !== UNSURE_COUNTRY ? draft.country : null}
                       onChange={c => patchDraft('country', c ?? '')}
                       placeholder="Select country"
+                      showDialCode={false}
                     />
                   </div>
                 </div>
