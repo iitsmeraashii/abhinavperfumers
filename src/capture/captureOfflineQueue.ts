@@ -1,3 +1,4 @@
+import { changeVoiceOp, type VoiceOp } from './voiceOpStorage';
 import { isTransportOnline } from '../connectivity/connectivityStore';
 // Offline sync queue — persists pending backend operations to IndexedDB.
 // On reconnect, all queued ops are flushed in creation order.
@@ -158,21 +159,22 @@ export async function flushQueue(
       }
       try {
         await executeOp(op);
-        await dbDelete(STORE, op.id);
+        if (op.type !== 'upload_voice_note') await dbDelete(STORE, op.id);
         flushed++;
         onProgress?.(flushed, ops.length);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         // Preserve capture intents even when auth is temporarily unavailable.
         // Legacy operation behavior is unchanged.
-        if (op.type !== 'upload_business_card' && op.type !== 'enqueue_processing_job' &&
+        if (op.type !== 'upload_voice_note' && op.type !== 'upload_business_card' && op.type !== 'enqueue_processing_job' &&
             (msg.includes('Not authenticated') || msg.includes('JWT'))) {
           await dbDelete(STORE, op.id);
           flushed++;
         } else {
           // Network / server error — increment retry and keep
           const updated: PendingOp = { ...op, retries: op.retries + 1 };
-          await dbPut(STORE, updated);
+          if (op.type === 'upload_voice_note') await changeVoiceOp(op as VoiceOp, undefined, true);
+          else await dbPut(STORE, updated);
         }
       }
     }
@@ -236,15 +238,9 @@ async function executeOp(op: PendingOp): Promise<void> {
       await syncPromoteSession(op.payload as PromoteSessionPayload, cbs);
       break;
     case 'upload_voice_note':
-      // Upload audio blob then chain transcription inline.
-      // Both steps are idempotent, so retrying the whole op on partial failure is safe.
-      await executeVoiceNoteUploadOp(op.payload as {
-        sessionId:  string;
-        audioBlob:  Blob;
-        mimeType:   string;
-        durationMs: number;
-        ownerId?:   string | null;
-      });
+      // Voice executor owns conditional deletion after audio + metadata durability.
+      // Transcription is best effort and does not hold queue completion.
+      await executeVoiceNoteUploadOp((op as VoiceOp).payload, op as VoiceOp);
       break;
     case 'upload_notes_image': {
       const p = op.payload as {

@@ -13,7 +13,7 @@ import { isTransportOnline } from '../connectivity/connectivityStore';
 // Path convention:
 //   Business card : {userId}/{assetId}.jpg
 //   Notes image   : {userId}/{sessionId}/notes.jpg
-//   Voice note    : {userId}/{sessionId}/voice.{ext}  (planned — path only defined)
+//   Voice note    : {userId}/{sessionId}/voice/{recordingId}.{ext}
 
 import { isCloudSyncAllowed } from '../authModeState';
 import { supabase } from '../supabaseClient';
@@ -439,125 +439,55 @@ export async function uploadNotesImage(backendSessionId: string, dataUrl: string
   }
 }
 
-export async function uploadVoiceNote(backendSessionId: string, audioBlob: Blob, mimeType: string, ownerId?: string | null): Promise<void> {
-  if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote ENTRY', {
-    ts: new Date().toISOString(),
-    backendSessionId,
-    storageBucket: BUCKET,
-    blobSize: audioBlob?.size ?? null,
-    mimeType,
-    isOnline: isTransportOnline(),
-  });
-
-  if (!isTransportOnline() || !audioBlob || audioBlob.size === 0) {
-    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
-      backendSessionId,
-      reason: !isTransportOnline() ? 'offline' : !audioBlob ? 'null blob' : 'zero-size blob',
-      storageBucket: BUCKET,
-    });
-    return;
+/** Voice completion requires both Storage bytes and a confirmed metadata row. */
+export async function uploadVoiceNote(
+  backendSessionId: string, audioBlob: Blob, mimeType: string, ownerId?: string | null,
+  options: { recordingId?: string; storagePath?: string; isCurrent?: () => Promise<boolean>;
+    onUploaded?: (path: string) => Promise<void> } = {},
+): Promise<{ storagePath: string }> {
+  // Keep the existing lead-detail caller compatible while pinning its owner
+  // once; queued capture callers always supply the durable operation's owner.
+  if (!isTransportOnline() || !isCloudSyncAllowed()) throw new Error('Voice upload requires authorized connectivity');
+  ownerId = ownerId ?? await getAuthUserId();
+  const check = async () => {
+    if (!ownerId || !isTransportOnline() || !isCloudSyncAllowed()) throw new Error('Voice upload requires authorized connectivity');
+    const userId = await getAuthUserId();
+    if (userId !== ownerId || !isTransportOnline() || !isCloudSyncAllowed() ||
+      (options.isCurrent && !await options.isCurrent())) throw new Error('Voice owner or recording changed');
+  };
+  await check();
+  if (!(audioBlob instanceof Blob) || audioBlob.size === 0) throw new Error('Voice audio is missing');
+  const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm';
+  const storagePath = options.recordingId
+    ? `${ownerId}/${backendSessionId}/voice/${options.recordingId}.${ext}`
+    : `${ownerId}/${backendSessionId}/voice.${ext}`;
+  if (options.storagePath && options.storagePath !== storagePath) throw new Error('Voice storage path mismatch');
+  const { data: session, error: sessionError } = await supabase.from('capture_sessions')
+    .select('id').eq('id', backendSessionId).eq('user_id', ownerId).maybeSingle();
+  if (sessionError || !session) throw new Error('Voice capture session is not synchronized');
+  await check();
+  if (!options.storagePath) {
+    const { error } = await supabase.storage.from(BUCKET).upload(storagePath, audioBlob, { contentType: mimeType, upsert: true });
+    if (error) throw error;
+    await check();
+    await options.onUploaded?.(storagePath);
   }
-
-  try {
-    const userId = ownerId ?? await getAuthUserId();
-    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote AUTH_USER', {
-      backendSessionId,
-      userId: userId ?? null,
-      ownerIdProvided: ownerId != null,
-    });
-    if (!userId) {
-      if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
-        backendSessionId,
-        reason: 'no authenticated user',
-        storageBucket: BUCKET,
-      });
-      return;
-    }
-    const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm';
-    const storagePath = `${userId}/${backendSessionId}/voice.${ext}`;
-    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote STORAGE_PATH', {
-      backendSessionId,
-      storageBucket: BUCKET,
-      storagePath,
-      blobSize: audioBlob.size,
-      mimeType,
-    });
-
-    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote UPLOAD_BEGIN', {
-      backendSessionId,
-      storageBucket: BUCKET,
-      storagePath,
-      blobSize: audioBlob.size,
-      mimeType,
-      uploadOptions: { contentType: mimeType, upsert: true },
-    });
-    const uploadStartMs = Date.now();
-    const { error: uploadError } = await supabase.storage.from(BUCKET).upload(storagePath, audioBlob, { contentType: mimeType, upsert: true });
-    const uploadDurationMs = Date.now() - uploadStartMs;
-    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote UPLOAD_RESULT', {
-      backendSessionId,
-      storageBucket: BUCKET,
-      storagePath,
-      uploadDurationMs,
-      uploadError: uploadError
-        ? { message: (uploadError as { message?: string }).message ?? null, name: (uploadError as { name?: string }).name ?? null, statusCode: (uploadError as Record<string, unknown>).statusCode ?? null, raw: uploadError }
-        : null,
-    });
-    if (uploadError) {
-      if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote EARLY_RETURN', {
-        backendSessionId,
-        reason: 'storage upload error',
-        storageBucket: BUCKET,
-        storagePath,
-        uploadErrorMessage: (uploadError as { message?: string }).message ?? null,
-      });
-      return;
-    }
-    const { data: existing } = await supabase.from('capture_assets').select('id').eq('capture_session_id', backendSessionId).eq('asset_type', 'voice_note').maybeSingle();
-    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote METADATA_WRITE_BEGIN', {
-      backendSessionId,
-      storageBucket: BUCKET,
-      storagePath,
-      existingAssetId: existing?.id ?? null,
-      upsertConflictTarget: 'capture_session_id,local_asset_id',
-    });
-    const { error: assetError } = await supabase.from('capture_assets').upsert({
-      id: existing?.id ?? crypto.randomUUID(), capture_session_id: backendSessionId, user_id: userId,
-      asset_type: 'voice_note', side: null, asset_side: null, local_asset_id: `${backendSessionId}_voice`,
-      mime_type: mimeType, size_bytes: audioBlob.size, file_size: audioBlob.size, original_width: 0, original_height: 0,
-      stored_width: 0, stored_height: 0, width: 0, height: 0, processing_status: 'done',
-      storage_provider: 'SUPABASE', storage_bucket: BUCKET, storage_path: storagePath,
-      storage_upload_status: 'uploaded', storage_uploaded_at: new Date().toISOString(), transcription_status: 'uploaded',
-    }, { onConflict: 'capture_session_id,local_asset_id' });
-    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote METADATA_WRITE_RESULT', {
-      backendSessionId,
-      storageBucket: BUCKET,
-      storagePath,
-      assetError: assetError
-        ? { message: assetError.message ?? null, code: assetError.code ?? null, constraint: assetError.constraint ?? null, raw: assetError }
-        : null,
-    });
-    if (assetError) {
-      console.warn('[assetStorageUpload] uploadVoiceNote asset upsert error:', assetError.message);
-    }
-    if (isConsoleEnabled()) console.log('[VOICE_DIAG] uploadVoiceNote EXIT', {
-      backendSessionId,
-      storageBucket: BUCKET,
-      storagePath,
-      success: !assetError,
-    });
-  } catch (err) {
-    const errObj = err as Record<string, unknown>;
-    if (isConsoleEnabled()) console.error('[VOICE_DIAG] uploadVoiceNote EXCEPTION', {
-      backendSessionId,
-      storageBucket: BUCKET,
-      storagePath: null,
-      errorMessage: err instanceof Error ? err.message : String(err),
-      errorStack: err instanceof Error ? err.stack ?? null : null,
-      errorName: err instanceof Error ? err.name : null,
-      supabaseError: errObj ?? null,
-      httpStatus: errObj?.statusCode ?? errObj?.status ?? null,
-    });
-    console.warn('[assetStorageUpload] uploadVoiceNote error:', err);
-  }
+  await check();
+  const { data: existing, error: readError } = await supabase.from('capture_assets').select('id, storage_path, transcription_status')
+    .eq('capture_session_id', backendSessionId).eq('user_id', ownerId).eq('asset_type', 'voice_note').maybeSingle();
+  if (readError) throw readError;
+  await check();
+  const { data: confirmed, error: assetError } = await supabase.from('capture_assets').upsert({
+    id: existing?.id ?? crypto.randomUUID(), capture_session_id: backendSessionId, user_id: ownerId,
+    asset_type: 'voice_note', side: null, asset_side: null, local_asset_id: `${backendSessionId}_voice`,
+    mime_type: mimeType, size_bytes: audioBlob.size, file_size: audioBlob.size, original_width: 0, original_height: 0,
+    stored_width: 0, stored_height: 0, width: 0, height: 0, processing_status: 'done',
+    storage_provider: 'SUPABASE', storage_bucket: BUCKET, storage_path: storagePath,
+    storage_upload_status: 'uploaded', storage_uploaded_at: new Date().toISOString(),
+    transcription_status: existing?.storage_path === storagePath ? existing.transcription_status ?? 'uploaded' : 'uploaded',
+  }, { onConflict: 'capture_session_id,local_asset_id' }).select('id, storage_path').single();
+  if (assetError) throw assetError;
+  if (!confirmed?.id || confirmed.storage_path !== storagePath) throw new Error('Voice metadata was not confirmed');
+  await check();
+  return { storagePath };
 }

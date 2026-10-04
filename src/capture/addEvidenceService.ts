@@ -77,7 +77,11 @@ export async function addVoiceMemo(
   } catch { /* non-critical */ }
 
   // Upload through the existing pipeline (identical to capture journey)
-  await uploadVoiceNote(sessionId, audioBlob, mimeType);
+  try {
+    await uploadVoiceNote(sessionId, audioBlob, mimeType);
+  } catch (error) {
+    return { sessionId, error: error instanceof Error ? error.message : 'Voice upload failed.' };
+  }
 
   // Fire transcription (fire-and-forget from UI perspective)
   transcribeVoiceNote(sessionId).catch(err =>

@@ -60,6 +60,7 @@ export interface UpsertSessionPayload {
 export async function syncUpsertSession(
   payload: UpsertSessionPayload,
   cbs: SyncCallbacks,
+  expectedOwnerId?: string,
 ): Promise<void> {
   if (!online()) { cbs.onOffline(); return; }
 
@@ -75,6 +76,7 @@ export async function syncUpsertSession(
     const identity = await getAuthIdentity();
     if (!identity) { cbs.onSyncError('Not authenticated'); logOperationEnd(op, { error: new Error('Not authenticated') }); return; }
 
+    if (expectedOwnerId && identity.userId !== expectedOwnerId) throw new Error('Capture session owner changed');
     const { userId, repCode } = identity;
     const {
       sessionId, captureMethod, draftData, sessionStatus, localDraftKey, eventId,

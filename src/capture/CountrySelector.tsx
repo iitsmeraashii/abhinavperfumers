@@ -16,6 +16,7 @@ interface CountrySelectorProps {
   value: string | null | undefined;
   onChange: (country: string | null) => void;
   placeholder?: string;
+  showDialCode?: boolean;
 }
 
 interface DropdownPosition {
@@ -24,13 +25,19 @@ interface DropdownPosition {
   width: number;
 }
 
-export function CountrySelector({ value, onChange, placeholder = 'Select country…' }: CountrySelectorProps) {
+export function CountrySelector({
+  value,
+  onChange,
+  placeholder = 'Select country…',
+  showDialCode = true,
+}: CountrySelectorProps) {
   const [query, setQuery]           = useState('');
   const [open, setOpen]             = useState(false);
   const [highlighted, setHighlighted] = useState(0);
   const [dropdownPos, setDropdownPos] = useState<DropdownPosition | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const dropdownRef  = useRef<HTMLDivElement>(null);
   const inputRef     = useRef<HTMLInputElement>(null);
 
   // Recompute dropdown position on open, scroll, and resize.
@@ -59,7 +66,10 @@ export function CountrySelector({ value, onChange, placeholder = 'Select country
   // Close dropdown when clicking outside
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const insideContainer = containerRef.current?.contains(target);
+      const insideDropdown  = dropdownRef.current?.contains(target);
+      if (!insideContainer && !insideDropdown) {
         setOpen(false);
         setQuery('');
         setHighlighted(0);
@@ -163,6 +173,7 @@ export function CountrySelector({ value, onChange, placeholder = 'Select country
       {/* Dropdown results — rendered via portal to avoid clipping */}
       {open && dropdownPos && createPortal(
         <div
+          ref={dropdownRef}
           style={{
             position: 'absolute',
             left:  dropdownPos.left,
@@ -189,7 +200,7 @@ export function CountrySelector({ value, onChange, placeholder = 'Select country
               >
                 <span>{country.name}</span>
                 <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-stone-400">{country.dialCode}</span>
+                  {showDialCode && <span className="text-xs text-stone-400">{country.dialCode}</span>}
                   {value === country.name && (
                     <Check className="w-3.5 h-3.5 text-amber-600" />
                   )}

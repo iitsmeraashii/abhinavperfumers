@@ -4,9 +4,15 @@ import {
   useState,
   useCallback,
   useRef,
+  useEffect,
   type ReactNode,
 } from 'react';
 import { supabase } from './supabaseClient';
+import { useAuth } from './AuthContext';
+import { isCloudSyncAllowed } from './authModeState';
+import { isTransportOnline } from './connectivity/connectivityStore';
+import { activeEventSnapshot, isActiveEvent, loadEventCache, saveEventCache } from './capture/eventCacheStorage';
+import { updateCachedDefaultEvent } from './capture/authProfileStorage';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -37,165 +43,108 @@ export interface EventContextState {
 
 const EventContext = createContext<EventContextState | null>(null);
 
-// ─── ensureValidDefaultEvent ──────────────────────────────────────────────────
-// Validates the rep's stored default_event_id is still active.
-// Falls back to is_default=true, then any active event.
-// Persists fix to DB if the stored value was stale.
-
-async function ensureValidDefaultEvent(repId: string): Promise<AppEvent | null> {
-  // 1. Read rep's current default_event_id
-  const { data: repRow } = await supabase
-    .from('sales_representatives')
-    .select('default_event_id')
-    .eq('id', repId)
-    .maybeSingle();
-
-  const currentEventId: string | null = repRow?.default_event_id ?? null;
-
-  // 2. Validate currently stored event is still active
-  if (currentEventId) {
-    const { data: ev } = await supabase
-      .from('events')
-      .select('id, event_code, name, description, location, start_date, end_date, status, is_active, is_default')
-      .eq('id', currentEventId)
-      .maybeSingle();
-
-    if (ev && ev.is_active) {
-      return ev as AppEvent;
-    }
-    // Event found but inactive — fall through to pick a valid one
-  }
-
-  // 3. Try the system default event
-  const { data: defaultEv } = await supabase
-    .from('events')
-    .select('id, event_code, name, description, location, start_date, end_date, status, is_active, is_default')
-    .eq('is_default', true)
-    .eq('is_active', true)
-    .maybeSingle();
-
-  const fallback = defaultEv ?? await (async () => {
-    // 4. Last resort: any active event
-    const { data: anyActive } = await supabase
-      .from('events')
-      .select('id, event_code, name, description, location, start_date, end_date, status, is_active, is_default')
-      .eq('is_active', true)
-      .order('start_date', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    return anyActive;
-  })();
-
-  if (!fallback) return null;
-
-  // 5. Persist the resolved event to the rep's row if it changed
-  if (currentEventId !== fallback.id) {
-    await supabase
-      .from('sales_representatives')
-      .update({ default_event_id: fallback.id })
-      .eq('id', repId);
-  }
-
-  return fallback as AppEvent;
-}
-
-// ─── Provider ─────────────────────────────────────────────────────────────────
+const EVENT_FIELDS = 'id, event_code, name, description, location, start_date, end_date, status, is_active, is_default';
 
 export function EventProvider({ children }: { children: ReactNode }) {
-  const [selectedEvent, setSelectedEventState] = useState<AppEvent | null>(null);
-  const [activeEvents, setActiveEvents]        = useState<AppEvent[]>([]);
-  const [loadingEvent, setLoadingEvent]        = useState(false);
+  const { user, salesRep, authMode, updateSalesRep } = useAuth();
+  const owner = user?.authUserId ?? null;
+  const [state, setState] = useState<{ owner: string | null; events: AppEvent[] }>({ owner: null, events: [] });
+  const [loadingEvent, setLoadingEvent] = useState(false);
+  const epoch = useRef(0);
+  const live = useRef({ owner, authMode, salesRep, updateSalesRep });
+  live.current = { owner, authMode, salesRep, updateSalesRep };
+  const pending = useRef<{ owner: string; epoch: number; promise: Promise<void> } | null>(null);
+  const activeEvents = state.owner === owner && authMode !== 'unauthenticated' ? state.events : [];
+  const selectedEvent = activeEvents.find(e => e.id === salesRep?.default_event_id) ?? null;
 
-  // Guard against concurrent refresh calls
-  const refreshingRef = useRef(false);
-
-  const loadActiveEvents = useCallback(async () => {
-    const { data } = await supabase
-      .from('events')
-      .select('id, event_code, name, description, location, start_date, end_date, status, is_active, is_default')
-      .eq('is_active', true)
-      .order('start_date', { ascending: false });
-
-    if (data) setActiveEvents(data as AppEvent[]);
+  const refreshSelectedEvent = useCallback((_repId?: string): Promise<void> => {
+    const identity = live.current.owner;
+    if (!identity || !isCloudSyncAllowed() || !isTransportOnline()) return Promise.resolve();
+    if (pending.current?.owner === identity && pending.current.epoch === epoch.current) return pending.current.promise;
+    const token = ++epoch.current;
+    const current = () => token === epoch.current && live.current.owner === identity &&
+      live.current.authMode === 'online' && isCloudSyncAllowed() && isTransportOnline();
+    setLoadingEvent(true);
+    const attempt = { owner: identity, epoch: token, promise: Promise.resolve() };
+    attempt.promise = (async () => {
+      try {
+        const { data, error } = await supabase.from('events').select(EVENT_FIELDS)
+          .eq('is_active', true).eq('status', 'ACTIVE').order('start_date', { ascending: false });
+        if (!current() || error) return;
+        const events = activeEventSnapshot(data);
+        setState({ owner: identity, events });
+        await saveEventCache(identity, events, current);
+        // Only a fully successful read may repair the server's default.
+        if (!current()) return;
+        const repId = live.current.salesRep?.id;
+        if (!repId) return;
+        const result = await supabase.from('sales_representatives').select('default_event_id').eq('id', repId).maybeSingle();
+        if (!current() || result.error || !result.data) return;
+        const defaultId = result.data.default_event_id;
+        const existing = events.find(e => e.id === defaultId);
+        const resolved = existing ?? events.find(e => e.is_default) ?? events[0];
+        if (!resolved) return;
+        if (!existing) {
+          const updated = await supabase.from('sales_representatives').update({ default_event_id: resolved.id }).eq('id', repId);
+          if (!current() || updated.error) return;
+        }
+        live.current.updateSalesRep({ default_event_id: resolved.id });
+        await updateCachedDefaultEvent(identity, resolved.id, current);
+      } catch {
+        // Failed reads/commits preserve the last valid state; a later refresh retries.
+      } finally {
+        if (pending.current === attempt) pending.current = null;
+        if (token === epoch.current) setLoadingEvent(false);
+      }
+    })();
+    pending.current = attempt;
+    return attempt.promise;
   }, []);
 
-  // Resolve and cache the rep's valid default event.
-  // repId = sales_representatives.id (UUID PK, not auth.uid()).
-  // If omitted, fetched from my_rep_profile view.
-  const refreshSelectedEvent = useCallback(async (repId?: string) => {
-    if (refreshingRef.current) return;
-    refreshingRef.current = true;
-    setLoadingEvent(true);
-
-    try {
-      let resolvedRepId = repId;
-      if (!resolvedRepId) {
-        const { data: profile } = await supabase
-          .from('my_rep_profile')
-          .select('id')
-          .maybeSingle();
-        resolvedRepId = profile?.id ?? undefined;
-      }
-      if (!resolvedRepId) return;
-
-      const [event] = await Promise.all([
-        ensureValidDefaultEvent(resolvedRepId),
-        loadActiveEvents(),
-      ]);
-
-      setSelectedEventState(event);
-    } catch (err) {
-      console.warn('[EventContext] refreshSelectedEvent error:', err);
-    } finally {
-      refreshingRef.current = false;
-      setLoadingEvent(false);
+  useEffect(() => {
+    const token = ++epoch.current;
+    setLoadingEvent(false);
+    if (!owner || authMode === 'unauthenticated') {
+      setState({ owner: null, events: [] });
+      return;
     }
-  }, [loadActiveEvents]);
+    // Restore first, then refresh: no late local read can overwrite server data.
+    void (async () => {
+      try {
+        const cached = await loadEventCache(owner);
+        if (token !== epoch.current || live.current.owner !== owner) return;
+        if (cached !== null) setState(previous => previous.owner === owner ? previous : { owner, events: cached });
+      } catch { /* Storage unavailable must not prevent an online fetch. */ }
+      if (token === epoch.current && live.current.owner === owner && authMode === 'online') await refreshSelectedEvent();
+    })();
+    return () => { ++epoch.current; };
+  }, [owner, authMode, refreshSelectedEvent]);
 
-  // Optimistically update and persist the rep's chosen event.
-  // Never allows inactive events through.
   const setSelectedEvent = useCallback(async (event: AppEvent) => {
-    if (!event.is_active) return;
-
-    setSelectedEventState(event); // optimistic
-
-    const { data: profile } = await supabase
-      .from('my_rep_profile')
-      .select('id')
-      .maybeSingle();
-
-    if (!profile?.id) return;
-
-    const { error } = await supabase
-      .from('sales_representatives')
-      .update({ default_event_id: event.id })
-      .eq('id', profile.id);
-
-    if (error) {
-      console.warn('[EventContext] setSelectedEvent DB update failed:', error.message);
-      // Revert optimistic update
-      refreshSelectedEvent(profile.id);
+    const identity = live.current.owner;
+    const repId = live.current.salesRep?.id;
+    if (!identity || !repId || !isActiveEvent(event) || !isCloudSyncAllowed() || !isTransportOnline()) {
+      throw new Error('Changing the account default requires an active event and an online session');
     }
-  }, [refreshSelectedEvent]);
+    const token = ++epoch.current;
+    setLoadingEvent(false);
+    const current = () => token === epoch.current && live.current.owner === identity && isCloudSyncAllowed() && isTransportOnline();
+    const { error } = await supabase.from('sales_representatives').update({ default_event_id: event.id }).eq('id', repId);
+    if (!current() || error) throw new Error('Default event could not be confirmed');
+    live.current.updateSalesRep({ default_event_id: event.id });
+    await updateCachedDefaultEvent(identity, event.id, current);
+  }, []);
 
   const clearEvent = useCallback(() => {
-    setSelectedEventState(null);
-    setActiveEvents([]);
+    ++epoch.current;
+    setState({ owner: null, events: [] });
+    setLoadingEvent(false);
   }, []);
 
-  return (
-    <EventContext.Provider value={{
-      selectedEvent,
-      activeEvents,
-      loadingEvent,
-      setSelectedEvent,
-      refreshSelectedEvent,
-      loadActiveEvents,
-      clearEvent,
-    }}>
-      {children}
-    </EventContext.Provider>
-  );
+  return <EventContext.Provider value={{ selectedEvent, activeEvents, loadingEvent,
+    setSelectedEvent, refreshSelectedEvent, loadActiveEvents: refreshSelectedEvent, clearEvent }}>
+    {children}
+  </EventContext.Provider>;
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────

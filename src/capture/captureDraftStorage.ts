@@ -2,7 +2,7 @@
 // Sits between the raw db layer and the React hooks.
 // Swap the db import to migrate to Capacitor SQLite or any other backend.
 
-import { dbGet, dbPut, dbDelete, dbGetAllInStore } from './db';
+import { dbGet, dbPut, dbPutStrict, dbDelete, dbGetAllInStore } from './db';
 import type { CaptureSession } from './types';
 import { INITIAL_SYNC_STATE } from './types';
 import { DEFAULT_CAPTURE_PROFILE } from './captureProfile';
@@ -197,4 +197,9 @@ export async function deleteSavedDraft(draftId: string, ownerId?: string): Promi
   await dbDelete(STORE, draftId);
   notifySavedDrafts();
   return true;
+}
+
+/** Submission blocked on missing reference data: confirm draft durability. */
+export async function saveDraftStrict(session: CaptureSession, ownerId?: string | null): Promise<void> {
+  await dbPutStrict(STORE, toRecord(session, ownerId));
 }

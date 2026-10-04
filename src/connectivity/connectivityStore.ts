@@ -15,7 +15,10 @@ export function createConnectivityStore(provider: ConnectivityProvider, initial 
   const publish = (value: boolean) => {
     if (online === value) return;
     online = value;
-    listeners.forEach(listener => listener());
+    // A consumer failure must not starve auth or other UI subscribers.
+    listeners.forEach(listener => {
+      try { listener(); } catch { /* The transport transition still reaches other consumers. */ }
+    });
   };
   const reconcile = () => {
     const token = ++revision;
@@ -79,10 +82,12 @@ export function readBrowserConnectivity(): boolean {
 export function createBrowserConnectivityProvider(): ConnectivityProvider {
   return {
     readStatus: readBrowserConnectivity,
-    subscribe(onChange, reconcile) {
+    subscribe(_onChange, reconcile) {
       if (typeof window === 'undefined') return () => {};
-      const onOnline = () => onChange(true);
-      const onOffline = () => onChange(false);
+      // Events are hints to read the current browser state, just like foreground
+      // reconciliation. A delayed event must not publish a stale boolean.
+      const onOnline = () => reconcile();
+      const onOffline = () => reconcile();
       const onVisible = () => {
         if (typeof document === 'undefined' || document.visibilityState === 'visible') reconcile();
       };

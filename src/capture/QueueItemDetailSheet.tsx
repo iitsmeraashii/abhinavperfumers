@@ -1,3 +1,4 @@
+import { hasAutomaticRetryMetadata } from './syncDisplayState';
 // Queue Item Detail Sheet — read-only detail view for any Queue item.
 // Shows all captured fields + resolves evidence from both local (IndexedDB)
 // and remote (Supabase Storage) sources.
@@ -532,9 +533,9 @@ export function QueueItemDetailSheet({ item, ownerId, onClose }: Props) {
           {item.lastError && (
             <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2">
               <p className="text-[11px] font-semibold text-red-700 uppercase tracking-wide flex items-center gap-1.5">
-                <AlertCircle className="w-3.5 h-3.5" /> Sync Error
+                <AlertCircle className="w-3.5 h-3.5" /> {item.isExhausted ? 'Needs attention' : 'Saved lead'}
               </p>
-              <p className="text-xs text-red-600 mt-1">{item.lastError}</p>
+              <p className="text-xs text-red-600 mt-1">{item.isExhausted ? 'Please review this lead and retry.' : hasAutomaticRetryMetadata(item) ? 'Will retry automatically.' : 'Saved.'}</p>
             </div>
           )}
 

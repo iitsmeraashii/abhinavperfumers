@@ -155,6 +155,7 @@ export interface DraftData {
   // Section 2 — quick notes
   notes?:             string;
   notesImageDataUrl?: string;
+  voiceNoteRecordingId?: string;
   voiceNoteDurationMs?: number;
   voiceNoteTranscript?: string;
   // Section 3 — additional details

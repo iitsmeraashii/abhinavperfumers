@@ -1,16 +1,17 @@
+import { useSyncDisplay } from './capture/useSyncDisplay';
+import { hasAutomaticRetryMetadata, type LeadSyncDisplayState } from './capture/syncDisplayState';
 // Lead Queue — local capture draft + sync visibility workspace.
 // Shows all captured leads grouped by sync state.
 // Works fully offline: reads only from IndexedDB, never blocks on network.
 
 import { useState, useEffect, useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
-import { Inbox, RefreshCw, Wifi, WifiOff, Search, X, Clock, CheckCircle2, AlertCircle, Loader2, FileText, ChevronDown, ChevronRight, Flame, Thermometer, Snowflake, Camera, QrCode, ClipboardList, RotateCcw, Trash2, CreditCard as Edit3, Eye, ArrowRight, Filter, Plus } from 'lucide-react';
+import { Inbox, RefreshCw, Search, X, Clock, CheckCircle2, AlertCircle, Loader2, FileText, ChevronDown, ChevronRight, Flame, Thermometer, Snowflake, Camera, QrCode, ClipboardList, RotateCcw, Trash2, CreditCard as Edit3, Eye, ArrowRight, Filter, Plus } from 'lucide-react';
 import {
   loadQueueItems, deleteQueueItem, getDisplayName, getDisplayCompany,
   getLeadTemperature, type QueueItem, type QueueItemStatus,
 } from './capture/leadQueueStorage';
 import { deleteAllSyncedCompletedLeads } from './capture/completedLeadsStorage';
-import { MAX_RETRY_COUNT } from './alpe/types';
-import { getPendingCount, flushQueue } from './capture/captureOfflineQueue';
+import { flushQueue } from './capture/captureOfflineQueue';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import { useAuth } from './AuthContext';
 import { getAlpeRuntimeState, subscribeAlpeRuntime } from './alpe/diagnostics';
@@ -119,34 +120,6 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString(Intl.DateTimeFormat().resolvedOptions().locale, { day: 'numeric', month: 'short', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
 }
 
-function formatDateTime(iso: string | null): string {
-  if (!iso) return '—';
-  return new Date(iso).toLocaleString(Intl.DateTimeFormat().resolvedOptions().locale, {
-    day: 'numeric', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-  });
-}
-
-const STAGE_LABELS: Record<string, string> = {
-  LOAD_CONTEXT:               'Loading context',
-  VERIFY_ASSETS:              'Verifying assets',
-  UPLOAD_ASSETS:              'Uploading assets',
-  EVIDENCE_RESOLUTION:        'Resolving evidence',
-  AI_EXTRACTION:               'AI extraction',
-  PERSIST_EXTRACTION_METADATA: 'Saving extraction data',
-  VALIDATION:                 'Validation',
-  DECISION:                   'Review decision',
-  PROMOTION:                  'Lead promotion',
-  PERSIST_RESULTS:            'Saving results',
-  COMPLETE:                   'Completion',
-};
-
-function stageLabel(stage: string | null): string {
-  if (!stage) return 'Processing';
-  return STAGE_LABELS[stage] ?? stage;
-}
-
 function MethodIcon({ method }: { method: QueueItem['captureMethod'] }) {
   if (method === 'BUSINESS_CARD') return <Camera className="w-3.5 h-3.5" />;
   if (method === 'QR')            return <QrCode className="w-3.5 h-3.5" />;
@@ -162,12 +135,15 @@ function TempIcon({ temp }: { temp: ReturnType<typeof getLeadTemperature> }) {
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: QueueItemStatus }) {
-  const cfg = STATUS_CONFIG[status];
+function StatusBadge({ status, display }: { status: QueueItemStatus; display?: LeadSyncDisplayState }) {
+  const cfg = display === 'Saved offline' ? STATUS_CONFIG.local_only
+    : display === 'Syncing…' ? STATUS_CONFIG.syncing
+    : display === 'Saved' ? STATUS_CONFIG.local_only
+    : STATUS_CONFIG[status];
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${cfg.badge}`}>
       {cfg.icon}
-      {cfg.short}
+      {display ?? cfg.short}
     </span>
   );
 }
@@ -176,6 +152,7 @@ function StatusBadge({ status }: { status: QueueItemStatus }) {
 
 interface QueueCardProps {
   item:        QueueItem;
+  display?: LeadSyncDisplayState;
   isOnline:    boolean;
   onContinue:  (item: QueueItem) => void;
   onRetry:     (item: QueueItem) => void;
@@ -184,7 +161,7 @@ interface QueueCardProps {
   onViewLead?: (item: QueueItem) => void;
 }
 
-function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView, onViewLead }: QueueCardProps) {
+function QueueCard({ item, display, isOnline, onContinue, onRetry, onDelete, onView, onViewLead }: QueueCardProps) {
   const [expanded, setExpanded] = useState(false);
   const name      = getDisplayName(item);
   const company   = getDisplayCompany(item);
@@ -239,7 +216,7 @@ function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView, onVi
 
           {/* Meta row */}
           <div className="flex items-center gap-2 mt-2 flex-wrap">
-            <StatusBadge status={item.status} />
+            <StatusBadge status={item.status} display={display} />
             {temp && (
               <span className="flex items-center gap-1">
                 <TempIcon temp={temp} />
@@ -254,36 +231,8 @@ function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView, onVi
         </div>
       </button>
 
-      {/* Failure diagnostics for failed items — always visible */}
-      {isFailed && (
-        <div className="px-4 pb-3 -mt-1 space-y-1.5">
-          {/* Attempt count + retry status */}
-          <div className="flex items-center gap-2 text-[11px]">
-            <span className="font-semibold text-red-700">
-              Attempt {item.retries || 0} / {MAX_RETRY_COUNT}
-            </span>
-            <span className="text-stone-300">|</span>
-            {item.isExhausted ? (
-              <span className="text-stone-500 font-medium">Maximum retry attempts reached</span>
-            ) : (
-              <span className="text-amber-600 font-medium">Will retry automatically</span>
-            )}
-          </div>
-          {/* Failure reason */}
-          {item.lastError && (
-            <div className="text-[11px] text-red-600 bg-red-50 rounded-lg px-3 py-2 leading-snug">
-              <span className="font-medium">{stageLabel(item.failedStage)}:</span>{' '}
-              {item.lastError.length > 120 ? item.lastError.slice(0, 120) + '…' : item.lastError}
-            </div>
-          )}
-          {/* Last attempted timestamp */}
-          {item.lastAttemptAt && (
-            <p className="text-[10px] text-stone-400">
-              Last attempted: {formatDateTime(item.lastAttemptAt)}
-            </p>
-          )}
-        </div>
-      )}
+      {display === 'Saved offline' && <p className="px-4 pb-3 text-xs text-stone-500">Saved safely. It will sync automatically when connected.</p>}
+      {isFailed && <p className="px-4 pb-3 text-xs text-stone-500">{item.isExhausted ? 'Please review this lead and retry.' : hasAutomaticRetryMetadata(item) ? 'Will retry automatically.' : 'Saved.'}</p>}
 
       {/* Expanded details */}
       {expanded && (
@@ -300,9 +249,7 @@ function QueueCard({ item, isOnline, onContinue, onRetry, onDelete, onView, onVi
           {hasNotes && (
             <p className="text-xs text-stone-500 line-clamp-2 italic">"{item.draftData.notes}"</p>
           )}
-          {item.backendSessionId && (
-            <p className="text-[10px] text-stone-300 font-mono truncate">ID: {item.backendSessionId.slice(0, 16)}…</p>
-          )}
+
         </div>
       )}
 
@@ -394,6 +341,7 @@ interface SectionProps {
   title:       string;
   count:       number;
   items:       QueueItem[];
+  displays: Map<string, LeadSyncDisplayState>;
   isOnline:    boolean;
   defaultOpen: boolean;
   onContinue:  (item: QueueItem) => void;
@@ -404,7 +352,7 @@ interface SectionProps {
   onBulkDeleteSynced?: () => void;
 }
 
-function QueueSection({ title, count, items, isOnline, defaultOpen, onContinue, onRetry, onDelete, onView, onViewLead, onBulkDeleteSynced }: SectionProps) {
+function QueueSection({ title, count, items, displays, isOnline, defaultOpen, onContinue, onRetry, onDelete, onView, onViewLead, onBulkDeleteSynced }: SectionProps) {
   const [open, setOpen] = useState(defaultOpen);
   const isSyncedSection = title === 'Synced';
 
@@ -446,6 +394,7 @@ function QueueSection({ title, count, items, isOnline, defaultOpen, onContinue, 
             <QueueCard
               key={item.id}
               item={item}
+              display={displays.get(item.id)}
               isOnline={isOnline}
               onContinue={onContinue}
               onRetry={onRetry}
@@ -753,6 +702,8 @@ function QueueDebugPanel({ items, filtered, pendingOps, isOnline }: {
                   <div key={item.id} className="bg-stone-50 rounded-lg px-3 py-2 text-[10px] leading-relaxed">
                     <p className="font-bold text-stone-700 truncate">{getDisplayName(item)}</p>
                     <p className="text-stone-400">status: <span className="text-stone-600">{item.status}</span></p>
+                    <p className="text-stone-400">backendSessionId: {item.backendSessionId}; lastAttemptAt: {item.lastAttemptAt}</p>
+                    <p className="text-stone-400">retries: {item.retries}; exhausted: {String(item.isExhausted)}; stage: {item.failedStage}; error: {item.lastError}</p>
                     <p className="text-stone-400">method: <span className="text-stone-600">{item.captureMethod ?? 'null'}</span></p>
                     <p className="text-stone-400 truncate">id: <span className="text-stone-600">{item.id.slice(0, 24)}…</span></p>
                     <p className="text-stone-400">updated: <span className="text-stone-600">{relativeTime(item.updatedAt)}</span></p>
@@ -815,48 +766,48 @@ interface Props {
 let persistedFilter: FilterTab = 'all';
 
 export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }: Props) {
-  const { user } = useAuth();
+  const { user, authMode } = useAuth();
   const ownerId = user?.authUserId ?? undefined;
-  const [items,       setItems]       = useState<QueueItem[]>([]);
+  const [queueSnapshot, setQueueSnapshot] = useState<{ ownerId: string | undefined; items: QueueItem[] } | null>(null);
+  const items = useMemo(() => queueSnapshot && queueSnapshot.ownerId === ownerId ? queueSnapshot.items : [], [queueSnapshot, ownerId]);
   const [loading,     setLoading]     = useState(true);
   const [filter,      setFilterState]   = useState<FilterTab>(persistedFilter);
   const [search,      setSearch]      = useState('');
-  const [pendingOps,  setPendingOps]  = useState(0);
-  const [isFlushing,  setIsFlushing]  = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<QueueItem | null>(null);
   const [detailTarget, setDetailTarget] = useState<QueueItem | null>(null);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkDeleteMsg, setBulkDeleteMsg] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { setDetailTarget(null); setDeleteTarget(null); }, [ownerId]);
 
   const setFilter = useCallback((f: FilterTab) => {
     persistedFilter = f;
     setFilterState(f);
   }, []);
 
-  const handleReconnect = useCallback(async () => {
-    if (!ownerId) return;
-    setIsFlushing(true);
-    try { await flushQueue(ownerId); }
-    finally {
-      setIsFlushing(false);
-      getPendingCount(ownerId).then(setPendingOps);
-      loadQueueItems(ownerId).then(setItems);
-    }
-  }, [ownerId]);
-
-  const isOnline = useOnlineStatus({ onReconnect: handleReconnect });
-
+  const loadGeneration = useRef(0);
+  const currentOwner = useRef(ownerId);
+  currentOwner.current = ownerId;
   const reload = useCallback(async () => {
-    const [loadedItems, pendingCount] = await Promise.all([
-      loadQueueItems(ownerId),
-      getPendingCount(ownerId),
-    ]);
-    setItems(loadedItems);
-    setPendingOps(pendingCount);
+    const generation = ++loadGeneration.current;
+    const loadedItems = ownerId ? await loadQueueItems(ownerId) : [];
+    if (currentOwner.current !== ownerId || generation !== loadGeneration.current) return;
+    setQueueSnapshot({ ownerId, items: loadedItems });
     setLoading(false);
   }, [ownerId]);
+
+  const handleReconnect = useCallback(async () => {
+    if (!ownerId) return;
+    try { await flushQueue(ownerId); }
+    finally {
+      await reload();
+    }
+  }, [ownerId, reload]);
+
+  const isOnline = useOnlineStatus({ onReconnect: handleReconnect });
+  const syncDisplay = useSyncDisplay(ownerId, isOnline, authMode);
+
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -924,9 +875,9 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
 
   const handleDelete = useCallback(async (item: QueueItem) => {
     await deleteQueueItem(item.id, ownerId);
-    setItems(prev => prev.filter(i => i.id !== item.id));
+    setQueueSnapshot(prev => prev && prev.ownerId === ownerId ? { ...prev, items: prev.items.filter(i => i.id !== item.id) } : prev);
     setDeleteTarget(null);
-  }, []);
+  }, [ownerId]);
 
   const handleBulkDeleteSynced = useCallback(async () => {
     setBulkDeleting(true);
@@ -950,9 +901,8 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
 
   const handleRetry = useCallback(async (item: QueueItem) => {
     if (!isOnline) return;
-    setIsFlushing(true);
     try { await flushQueue(ownerId); }
-    finally { setIsFlushing(false); reload(); }
+    finally { reload(); }
   }, [isOnline, reload]);
 
   const handleContinue = useCallback((item: QueueItem) => {
@@ -987,27 +937,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
 
             {/* Sync status pill */}
             <div className="flex items-center gap-2 mt-1">
-              {isFlushing ? (
-                <span className="flex items-center gap-1.5 text-xs font-medium text-blue-600 bg-blue-50
-                  border border-blue-200 rounded-full px-2.5 py-1">
-                  <Loader2 className="w-3 h-3 animate-spin" /> Syncing…
-                </span>
-              ) : !isOnline ? (
-                <span className="flex items-center gap-1.5 text-xs font-medium text-amber-700 bg-amber-50
-                  border border-amber-200 rounded-full px-2.5 py-1">
-                  <WifiOff className="w-3 h-3" /> Offline
-                </span>
-              ) : pendingOps > 0 ? (
-                <span className="flex items-center gap-1.5 text-xs font-medium text-blue-600 bg-blue-50
-                  border border-blue-200 rounded-full px-2.5 py-1">
-                  <Clock className="w-3 h-3" /> {pendingOps} pending
-                </span>
-              ) : (
-                <span className="flex items-center gap-1.5 text-xs font-medium text-green-700 bg-green-50
-                  border border-green-200 rounded-full px-2.5 py-1">
-                  <Wifi className="w-3 h-3" /> Online
-                </span>
-              )}
+              <span className="text-xs font-medium text-stone-600">{syncDisplay.summary ?? (!isOnline || authMode !== 'online' ? 'Offline' : 'Online')}</span>
 
               <button
                 onClick={reload}
@@ -1019,21 +949,6 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
               </button>
             </div>
           </div>
-
-          {/* Offline sync banner */}
-          {!isOnline && pendingOps > 0 && (
-            <div className="mt-3 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 flex items-start gap-3">
-              <WifiOff className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-              <div>
-                <p className="text-sm font-semibold text-amber-900 leading-tight">
-                  {counts.pending} lead{counts.pending !== 1 ? 's' : ''} pending
-                </p>
-                <p className="text-xs text-amber-700 mt-0.5">
-                  Saved safely offline. Will sync automatically when connected.
-                </p>
-              </div>
-            </div>
-          )}
 
           {/* Failed leads banner */}
           {counts.failed > 0 && isOnline && (
@@ -1047,8 +962,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
               </div>
               <button
                 onClick={() => {
-                  setIsFlushing(true);
-                  flushQueue(ownerId).finally(() => { setIsFlushing(false); reload(); });
+                  flushQueue(ownerId).finally(() => { reload(); });
                 }}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-100
                   hover:bg-red-200 text-red-800 text-xs font-semibold transition-colors shrink-0"
@@ -1124,6 +1038,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
                 title={section.title}
                 count={section.items.length}
                 items={section.items}
+                displays={syncDisplay.states}
                 isOnline={isOnline}
                 defaultOpen={section.title !== 'Synced'}
                 onContinue={handleContinue}
@@ -1138,7 +1053,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
         )}
 
         {/* ── Debug panel ── */}
-        {!loading && <QueueDebugPanel items={items} filtered={filtered} pendingOps={pendingOps} isOnline={isOnline} />}
+        {!loading && <QueueDebugPanel items={items} filtered={filtered} pendingOps={syncDisplay.pendingCount} isOnline={isOnline} />}
 
         {/* ── FAB — Capture new lead ── */}
         {!loading && (
@@ -1159,7 +1074,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
       </div>
 
       {/* ── Delete confirmation ── */}
-      {deleteTarget && (
+      {deleteTarget && queueSnapshot?.ownerId === ownerId && (
         <DeleteSheet
           item={deleteTarget}
           onConfirm={() => handleDelete(deleteTarget)}
@@ -1184,7 +1099,7 @@ export default function LeadQueuePage({ onCapture, onContinueDraft, onViewLead }
       )}
 
       {/* ── Queue item detail sheet ── */}
-      {detailTarget && (
+      {detailTarget && queueSnapshot?.ownerId === ownerId && (
         <QueueItemDetailSheet
           item={detailTarget}
           ownerId={ownerId}
