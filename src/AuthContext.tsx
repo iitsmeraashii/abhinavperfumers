@@ -1,3 +1,4 @@
+import { reconnectTrace, traceContext, traceId, type TraceContext } from './runtime/reconnectTimingTrace';
 import { connectivityStore, isTransportOnline } from './connectivity/connectivityStore';
 import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import { isAuthRetryableFetchError } from '@supabase/supabase-js';
@@ -107,6 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // React state.
   const transitionAuthMode = useCallback((next: AuthMode) => {
     publishAuthMode(next);
+    if (next === 'online') reconnectTrace('AUTH_ONLINE', { authAttemptId: validationRef.current?.traceAttemptId }, validationRef.current?.traceRun);
     setReactAuthMode(next);
   }, []);
 
@@ -121,7 +123,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // One effective attempt per generation/identity, shared by auth and reconnect triggers.
-  const validationRef = useRef<{ generation: number; identity: string | null; promise: Promise<void> } | null>(null);
+  const validationRef = useRef<{ generation: number; identity: string | null; promise: Promise<void>; traceAttemptId: string; traceRun: TraceContext } | null>(null);
   const expectedIdentityRef = useRef<string | null>(null);
   const loggedOutRef = useRef(false);
   const mountedRef = useRef(true);
@@ -207,9 +209,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!isTransportOnline()) return retainOffline(generation);
     const existing = validationRef.current;
     if (existing?.generation === generation && existing.identity === identity) return existing.promise;
-    const attempt = { generation, identity, promise: Promise.resolve() };
+    const traceRun = traceContext();
+    const traceAttemptId = traceId('auth');
+    const attempt = { generation, identity, promise: Promise.resolve(), traceAttemptId, traceRun };
     // Defer all SDK calls out of the synchronous auth-state callback.
     attempt.promise = new Promise<void>(resolve => setTimeout(resolve, 0)).then(async () => {
+      reconnectTrace('AUTH_REVALIDATION_START', { authAttemptId: traceAttemptId }, traceRun);
       const current = () => currentAttempt(generation, identity) && isTransportOnline();
       try {
         if (!current()) return;
@@ -242,6 +247,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         if (current()) await retainOffline(generation);
       } finally {
+        const outcome = !currentAttempt(generation, identity) ? 'stale' : getAuthMode() === 'online' ? 'online' : 'restricted';
+        if (outcome === 'restricted') reconnectTrace('AUTH_REVALIDATION_FAILED', { authAttemptId: traceAttemptId, outcome }, traceRun);
+        reconnectTrace('AUTH_REVALIDATION_END', { authAttemptId: traceAttemptId, outcome }, traceRun);
         if (validationRef.current === attempt) validationRef.current = null;
         if (currentAttempt(generation, identity)) setLoading(false);
       }

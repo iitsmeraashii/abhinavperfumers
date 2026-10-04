@@ -1,3 +1,4 @@
+import { reconnectTrace } from '../runtime/reconnectTimingTrace';
 /** Transport availability only. This module never grants cloud authorization. */
 export interface ConnectivityProvider {
   readStatus(): boolean | Promise<boolean>;
@@ -15,6 +16,7 @@ export function createConnectivityStore(provider: ConnectivityProvider, initial 
   const publish = (value: boolean) => {
     if (online === value) return;
     online = value;
+    if (value) reconnectTrace('TRANSPORT_ONLINE');
     listeners.forEach(listener => listener());
   };
   const reconcile = () => {

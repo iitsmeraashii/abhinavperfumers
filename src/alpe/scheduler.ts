@@ -1,3 +1,4 @@
+import { reconnectTrace, traceContext, traceId, traceElapsed } from '../runtime/reconnectTimingTrace';
 import { isTransportOnline } from '../connectivity/connectivityStore';
 // ALPE Queue Scheduler — singleton that manages the polling lifecycle.
 //
@@ -85,10 +86,14 @@ class AlpeScheduler {
     alpeLog('Scheduler start', { userId });
 
     // Recovery must complete before polling begins
+    const recoveryTrace = traceContext();
+    reconnectTrace('RECOVERY_START', {}, recoveryTrace);
+    let recoveryOutcome = 'completed';
     try {
       this.recoveryReport = await runRecovery(userId);
       alpeLog('Recovery complete', this.recoveryReport);
     } catch (err) {
+      recoveryOutcome = 'failed';
       this.lastError = `Recovery failed: ${(err as Error).message}`;
       this.recoveryReport = {
         interruptedRequeued: 0,
@@ -102,6 +107,7 @@ class AlpeScheduler {
       updateAlpeRuntime({ lastSchedulerError: this.lastError });
     }
 
+    reconnectTrace('RECOVERY_END', { outcome: recoveryOutcome }, recoveryTrace);
     this.status = 'running';
     updateAlpeRuntime({ schedulerStatus: 'running' });
     this.scheduleNextPoll();
@@ -114,9 +120,11 @@ class AlpeScheduler {
    * completes — ALPE jobs replayed from the offline queue are picked up.
    */
   notifyReconnect(): void {
+    reconnectTrace('WAKE_REQUESTED');
     if (this.status === 'running' && !this.inFlightTick) {
+      reconnectTrace('WAKE_ACCEPTED');
       this.tick().catch(() => {});
-    }
+    } else { reconnectTrace('WAKE_IGNORED', { reason: this.inFlightTick ? 'busy' : this.status }); }
   }
 
   /** Compatibility callback; ticks read transport state from the shared store. */
@@ -154,6 +162,7 @@ class AlpeScheduler {
 
   private scheduleNextPoll(): void {
     if (this.status !== 'running') return;
+    reconnectTrace('POLL_SCHEDULED', { counts: { delayMs: POLL_INTERVAL_MS, dueElapsedMs: traceElapsed() + POLL_INTERVAL_MS } });
     this.pollTimer = setTimeout(() => {
       this.tick().finally(() => {
         if (this.status === 'running') {
@@ -174,6 +183,9 @@ class AlpeScheduler {
     if (!isCloudSyncAllowed()) return;
 
     this.inFlightTick = true;
+    const tickTrace = traceContext();
+    const tickId = traceId('tick');
+    reconnectTrace('TICK_START', { tickId }, tickTrace);
     this.pollCount++;
     this.lastPollAt = new Date().toISOString();
     updateAlpeRuntime({ pollCount: this.pollCount, lastPollAt: this.lastPollAt, jobsFoundLastPoll: 0, jobsClaimedLastPoll: 0 });
@@ -200,7 +212,11 @@ class AlpeScheduler {
         alpeLog('Reconciliation pass complete', { userId: this.userId, ...reconciliation });
       }
 
-      const job = await claimNextJob(this.userId);
+      reconnectTrace('CLAIM_START', { tickId }, tickTrace);
+      let job: Awaited<ReturnType<typeof claimNextJob>>;
+      try { job = await claimNextJob(this.userId); }
+      catch (error) { reconnectTrace('CLAIM_END', { tickId, outcome: 'failed' }, tickTrace); throw error; }
+      reconnectTrace('CLAIM_END', { tickId, jobId: job?.id, outcome: job ? 'claimed' : 'not_claimed' }, tickTrace);
 
       if (!job) {
         updateAlpeRuntime({ currentJobId: null, currentQueueState: null, processingStartedAt: null });
@@ -300,6 +316,7 @@ class AlpeScheduler {
       alpeError('Scheduler poll error', err);
       updateAlpeRuntime({ lastSchedulerError: this.lastError, currentJobId: null, currentQueueState: null, processingStartedAt: null, workerState: null, currentPipelineStage: null });
     } finally {
+      reconnectTrace('TICK_END', { tickId }, tickTrace);
       this.inFlightTick = false;
     }
   }

@@ -1,3 +1,4 @@
+import { reconnectTrace, traceContext, traceId } from '../runtime/reconnectTimingTrace';
 import { changeVoiceOp, type VoiceOp } from './voiceOpStorage';
 import { isTransportOnline } from '../connectivity/connectivityStore';
 // Offline sync queue — persists pending backend operations to IndexedDB.
@@ -123,46 +124,58 @@ export async function flushQueue(
   ownerId?: string,
   onProgress?: (flushed: number, total: number) => void,
 ): Promise<{ flushed: number; remaining: number }> {
+  const traceRun = traceContext();
+  const flushId = traceId('flush');
+  reconnectTrace('FLUSH_INVOKED', { flushId }, traceRun);
   const lockKey = ownerId ?? UNSCOPED_KEY;
 
-  if (flushLocks.get(lockKey)) return { flushed: 0, remaining: 0 };
-  if (!isTransportOnline()) return { flushed: 0, remaining: 0 };
+  if (flushLocks.get(lockKey)) { reconnectTrace('FLUSH_SKIPPED', { flushId, reason: 'locked' }, traceRun); return { flushed: 0, remaining: 0 }; }
+  if (!isTransportOnline()) { reconnectTrace('FLUSH_SKIPPED', { flushId, reason: 'offline' }, traceRun); return { flushed: 0, remaining: 0 }; }
   if (!isCloudSyncAllowed()) {
+    reconnectTrace('FLUSH_SKIPPED', { flushId, reason: 'auth_restricted' }, traceRun);
     const remaining = await getPendingCount(ownerId);
     return { flushed: 0, remaining };
   }
 
   flushLocks.set(lockKey, true);
+  reconnectTrace('FLUSH_START', { flushId, reason: ownerId ? undefined : 'no_owner' }, traceRun);
 
   try {
     const allOps: PendingOp[] = await dbGetAllInStore<PendingOp>(STORE);
-    if (allOps.length === 0) return { flushed: 0, remaining: 0 };
+    if (allOps.length === 0) { reconnectTrace('FLUSH_SNAPSHOT', { flushId, counts: { total: 0 } }, traceRun); return { flushed: 0, remaining: 0 }; }
 
     const ops = ownerId ? allOps.filter(op => op.ownerId === ownerId) : allOps;
-    if (ops.length === 0) return { flushed: 0, remaining: allOps.length };
+    if (ops.length === 0) { reconnectTrace('FLUSH_SNAPSHOT', { flushId, counts: { total: 0 } }, traceRun); return { flushed: 0, remaining: allOps.length }; }
 
     // Preserve creation order within stages, but never let processing precede
     // session/evidence work (including operations created in the same millisecond).
     const stage = (op: PendingOp) => op.type === 'enqueue_processing_job' ? 2 : op.type === 'upsert_session' ? 0 : 1;
     ops.sort((a, b) => stage(a) - stage(b) || a.createdAt.localeCompare(b.createdAt));
 
+    reconnectTrace('FLUSH_SNAPSHOT', { flushId, counts: { total: ops.length, sessions: ops.filter(op => op.type === 'upsert_session').length, prerequisites: ops.filter(op => op.type !== 'enqueue_processing_job').length, enqueue: ops.filter(op => op.type === 'enqueue_processing_job').length } }, traceRun);
+    let enqueuePhaseLogged = false;
     let flushed = 0;
 
     for (const op of ops) {
       if (!isTransportOnline()) break;
       if (!isCloudSyncAllowed()) break;
 
+      const traceOp = { flushId, sessionId: op.sessionId, opId: op.id, opType: op.type };
+      reconnectTrace('OP_START', traceOp, traceRun);
       if (op.type === 'enqueue_processing_job') {
         const pending = await dbGetAllInStore<PendingOp>(STORE);
+        if (!enqueuePhaseLogged) { reconnectTrace('ENQUEUE_PHASE_REACHED', { flushId, counts: { remaining: pending.filter(other => other.ownerId === op.ownerId && other.type !== 'enqueue_processing_job').length } }, traceRun); enqueuePhaseLogged = true; }
         if (pending.some(other => other.ownerId === op.ownerId && other.sessionId === op.sessionId &&
-            other.type !== 'enqueue_processing_job')) continue;
+            other.type !== 'enqueue_processing_job')) { reconnectTrace('OP_END', { flushId, sessionId: op.sessionId, opId: op.id, opType: op.type, outcome: 'deferred' }, traceRun); continue; }
       }
+      let traceOutcome = 'completed';
       try {
         await executeOp(op);
         if (op.type !== 'upload_voice_note') await dbDelete(STORE, op.id);
         flushed++;
         onProgress?.(flushed, ops.length);
       } catch (err) {
+        traceOutcome = 'failed';
         const msg = err instanceof Error ? err.message : String(err);
         // Preserve capture intents even when auth is temporarily unavailable.
         // Legacy operation behavior is unchanged.
@@ -176,13 +189,14 @@ export async function flushQueue(
           if (op.type === 'upload_voice_note') await changeVoiceOp(op as VoiceOp, undefined, true);
           else await dbPut(STORE, updated);
         }
-      }
+      } finally { reconnectTrace('OP_END', { ...traceOp, outcome: traceOutcome }, traceRun); }
     }
 
     const remaining = (await dbGetAllInStore<PendingOp>(STORE)).length;
     return { flushed, remaining };
 
   } finally {
+    reconnectTrace('FLUSH_END', { flushId }, traceRun);
     flushLocks.delete(lockKey);
   }
 }

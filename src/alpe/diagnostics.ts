@@ -1,3 +1,4 @@
+import { reconnectTrace } from '../runtime/reconnectTimingTrace';
 // ALPE Runtime Diagnostics — development-only live state store.
 //
 // Single in-memory snapshot that the scheduler, worker, pipeline, and
@@ -73,6 +74,15 @@ export function resetAlpeRuntime(): void {
 import { isConsoleEnabled } from '../runtime/runtimeDiagnostics';
 
 export function alpeLog(message: string, ...args: unknown[]): void {
+  // Temporary timing bridge, independent of broad diagnostics flags. Never copy payloads.
+  try {
+    if (message === 'Worker start' || message === 'PROMOTION_SUCCESS') {
+      const meta = args[0] as { captureSessionId?: string; jobId?: string } | undefined;
+      reconnectTrace(message === 'Worker start' ? 'WORKER_START' : 'PROMOTION_SUCCESS', {
+        sessionId: meta?.captureSessionId, jobId: meta?.jobId ?? meta?.captureSessionId,
+      });
+    }
+  } catch { /* Timing instrumentation is non-blocking and non-throwing. */ }
   if (!isConsoleEnabled()) return;
   console.log('[ALPE]', message, ...args);
 }

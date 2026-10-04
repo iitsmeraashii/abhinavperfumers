@@ -1,3 +1,4 @@
+import { reconnectTrace, traceContext } from '../runtime/reconnectTimingTrace';
 // Processing Queue Repository — sole reader/writer of the `processing_queue`
 // Supabase table. Provides enqueue, claim, recovery queries, and state
 // transitions for the scheduler.
@@ -13,6 +14,10 @@ const TABLE = 'processing_queue';
 // ─── Enqueue ──────────────────────────────────────────────────────────────────
 
 export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult> {
+  const traceRun = traceContext();
+  const traceMeta = { sessionId: input.captureSessionId, jobId: input.jobId };
+  reconnectTrace('ENQUEUE_JOB_START', traceMeta, traceRun);
+  try {
   const metaCorrId = (input.metadata as Record<string, unknown> | undefined)?.correlationId ?? null;
   const corrId = (typeof metaCorrId === 'string' ? metaCorrId : null) ?? getCorrelationId() ?? 'no_correlation';
 
@@ -82,6 +87,7 @@ export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult>
       .select('id').eq('id', jobId).eq('capture_session_id', captureSessionId)
       .eq('user_id', userId).maybeSingle();
     if (!lookupError && existing?.id === jobId) {
+      reconnectTrace('JOB_ACK', { ...traceMeta, outcome: 'duplicate_recognized' }, traceRun);
       return { success: true, jobId, error: null, queued: true };
     }
   }
@@ -93,6 +99,7 @@ export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult>
       operation: 'enqueueJob',
     });
     logOperationEnd(op, { payload: row, error, rowsAffected: 0 });
+    reconnectTrace('JOB_ACK', { ...traceMeta, outcome: 'failed' }, traceRun);
     return { success: false, jobId: null, error: error.message, queued: false };
   }
 
@@ -115,12 +122,17 @@ export async function enqueueJob(input: EnqueueJobInput): Promise<EnqueueResult>
 
   logEvent('enqueueJob() — returning success', ctx, { corrId, jobId: (data as QueueEntry | null)?.id ?? jobId });
 
+  reconnectTrace('JOB_ACK', { ...traceMeta, outcome: 'inserted' }, traceRun);
   return {
     success:   true,
     jobId:     (data as QueueEntry | null)?.id ?? jobId,
     error:     null,
     queued:    true,
   };
+  } catch (error) {
+    reconnectTrace('JOB_ACK', { ...traceMeta, outcome: 'failed' }, traceRun);
+    throw error;
+  }
 }
 
 // ─── Lookup ───────────────────────────────────────────────────────────────────
