@@ -1,3 +1,4 @@
+import { useSyncDisplay } from './capture/useSyncDisplay';
 import { voiceEvidenceManager } from './capture/voiceEvidenceManager';
 import { usePriceRangeQuickValues } from './capture/usePriceRangeQuickValues';
 import { usePreviousReps } from './capture/usePreviousReps';
@@ -24,7 +25,6 @@ import type { SaveState } from './capture/useAutosave';
 import { CaptureDebugPanel, useDebugLog } from './capture/CaptureDebugPanel';
 import {
   flushQueue,
-  getPendingCount,
 } from './capture/captureOfflineQueue';
 import { saveCompletedLead, buildCompletedLead } from './capture/completedLeadsStorage';
 import {
@@ -73,11 +73,9 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     activeEvents, draftData.captureEventId, salesRep?.default_event_id,
     historicalEvent.current?.id === draftData.captureEventId ? historicalEvent.current?.id : null,
   ), [activeEvents, salesRep?.default_event_id]);
-  const [pendingSyncCount, setPendingSyncCount] = useState(0);
-  const [isFlushing, setIsFlushing] = useState(false);
   const [promotionToast, setPromotionToast] = useState<{ message: string; isError: boolean } | null>(null);
 
-  // Flush the offline queue and update pending count badge.
+  // Flush the offline queue using the existing reconnect path.
   // After the offline queue drains, notify ALPE so it polls immediately —
   // jobs replayed from the offline queue are now in processing_queue and
   // ready to be processed.
@@ -89,12 +87,9 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       // lifecycle fires, or on the next explicit flushQueue(authUserId).
       return;
     }
-    setIsFlushing(true);
     try {
       await flushQueue(authUserId);
     } finally {
-      setIsFlushing(false);
-      getPendingCount(authUserId).then(setPendingSyncCount);
       notifyAlpeReconnect();
     }
   }, [authUserId]);
@@ -103,6 +98,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     onReconnect: handleReconnect,
     onOffline: notifyAlpeOffline,
   });
+  const syncDisplay = useSyncDisplay(authUserId, isOnline, authMode);
   const [session, actions] = useCaptureSession();
   const form = useManualEntryForm(actions);
   const [saveState, setSaveState] = useState<SaveState>('idle');
@@ -162,11 +158,6 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     executionEngine.setOwnerId(authUserId);
   }, [authUserId]);
 
-  // Poll pending count on mount and after flush
-  useEffect(() => {
-    getPendingCount(authUserId ?? undefined).then(setPendingSyncCount);
-  }, [isFlushing, authUserId]);
-
   // Seed the session's capture profile from the rep's persisted default.
   // Fires on mount and whenever the session returns to IDLE, so leaving and
   // reopening Capture (or backing out of a session) restores the persisted
@@ -207,7 +198,6 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
     },
     onOfflineQueued: () => {
       actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
     },
     correlationId:   correlationIdRef.current,
   }), [actions]);
@@ -566,7 +556,6 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
       }
       logOperationEnd(saveOp, { extra: { outcome: result.outcome, jobId: result.jobId } });
       if (resumeDraftId) await deleteSavedDraft(resumeDraftId, authUserId ?? undefined);
-      if (result.outcome === 'queued') setPendingSyncCount(await getPendingCount(authUserId ?? undefined));
       notifySessionReset(authUserId ?? null);
 
       // ── Reset UI after accepted submission ────────────────────────────────────────────
@@ -618,7 +607,6 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
 
     if (result.outcome === 'queued') {
       if (!isOnline) actions.setSyncStatus('offline');
-      setPendingSyncCount(n => n + 1);
       const msg = isOnline
         ? 'Lead saved — will sync when reconnected'
         : 'Lead saved — will sync when back online';
@@ -1088,7 +1076,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
 
   return (
     <div className="min-h-[calc(100vh-57px)] bg-stone-50 flex flex-col">
-      <OfflineBanner visible={!isOnline || authMode !== 'online'} pendingCount={pendingSyncCount} isFlushing={isFlushing} />
+      <OfflineBanner visible={!isOnline || authMode !== 'online'} summary={syncDisplay.summary} />
 
       <div className="flex-1 w-full max-w-lg mx-auto px-5 pt-10 pb-10 flex flex-col">
 
