@@ -1092,7 +1092,8 @@ function RepDetailView({
                   value={editEmail}
                   onChange={e => setEditEmail(e.target.value)}
                   placeholder="Enter email…"
-                  className="w-full pl-9 pr-3 py-2 text-sm border border-stone-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-700/20 focus:border-amber-700"
+                  disabled
+                  className="w-full pl-9 pr-3 py-2 text-sm border border-stone-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-700/20 focus:border-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 />
               </div>
             </div>
