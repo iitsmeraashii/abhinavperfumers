@@ -13,6 +13,8 @@
 //   - capture_assets.transcription_status update (transcribing → ready | failed)
 
 import { supabase } from '../supabaseClient';
+import { isTransportOnline } from '../connectivity/connectivityStore';
+import { isCloudSyncAllowed } from '../authModeState';
 
 export interface TranscribeResult {
   transcript: string | null;
@@ -30,6 +32,7 @@ export interface TranscribeResult {
  * Safe to call multiple times — idempotent when the asset row already exists.
  */
 export async function transcribeVoiceNote(sessionId: string): Promise<TranscribeResult> {
+  if (!isTransportOnline() || !isCloudSyncAllowed()) return { transcript: null, error: 'Transcription awaits authenticated connectivity' };
   try {
     const { data, error } = await supabase.functions.invoke('transcribe-voice-note', {
       body: { sessionId },

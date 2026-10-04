@@ -1,3 +1,4 @@
+import { voiceEvidenceManager } from './capture/voiceEvidenceManager';
 import { usePriceRangeQuickValues } from './capture/usePriceRangeQuickValues';
 import { usePreviousReps } from './capture/usePreviousReps';
 import { resolveCaptureEvent } from './capture/eventCacheStorage';
@@ -827,11 +828,16 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
   }, [actions, isOnline, makeRoutingCbs, queue, cardUploadTiming, resolveEvent]);
 
   // ── Voice note recorded ───────────────────────────────────────────────────
-  const handleVoiceNoteRecorded = useCallback((blob: Blob, durationMs: number, mimeType: string) => {
-    const bsid = sessionRef.current.sync.backendSessionId;
-    if (!bsid) return;
-    registerVoiceNoteEvidence(bsid, blob, durationMs, mimeType, voiceUploadTiming, authUserId ?? null);
-  }, [voiceUploadTiming, authUserId]);
+  const voiceSessionId = session.sync.backendSessionId;
+  const handleVoiceNoteRecorded = useCallback(async (blob: Blob, durationMs: number, mimeType: string) => {
+    if (!voiceSessionId) throw new Error('Start a capture before recording');
+    const recordingId = await registerVoiceNoteEvidence(voiceSessionId, blob, durationMs, mimeType, voiceUploadTiming, authUserId ?? null);
+    if (sessionRef.current.sync.backendSessionId === voiceSessionId) actions.patchDraft({ voiceNoteRecordingId: recordingId });
+  }, [voiceSessionId, voiceUploadTiming, authUserId, actions]);
+  const handleVoiceNoteRemove = useCallback(async () => {
+    if (!voiceSessionId || !authUserId) throw new Error('Voice capture owner is unavailable');
+    await voiceEvidenceManager.remove(voiceSessionId, authUserId);
+  }, [voiceSessionId, authUserId]);
 
   // ── OCR result received ───────────────────────────────────────────────────
   const handleOcrResult = useCallback(async (result: OcrResult) => {
@@ -1155,6 +1161,7 @@ export default function CaptureLeadPage({ resumeDraftId }: { resumeDraftId?: str
             onSaveAndNext={handleSaveAndNext}
             onSaveAsDraft={handleSaveAsDraft}
             onVoiceNoteRecorded={handleVoiceNoteRecorded}
+            onVoiceNoteRemove={handleVoiceNoteRemove}
             contactDetailsOptional={session.captureProfile === 'EXHIBITION'}
             activeEvents={activeEvents}
             defaultEvent={selectedEvent}

@@ -73,7 +73,10 @@ export async function submitCaptureSession(params: SubmitParams): Promise<Adapte
     return { outcome: 'queued', leadId: null, error: null, jobId: null };
   };
 
-  if (!isOnline || !isCloudSyncAllowed()) return queueProcessing();
+  // Voice-bearing captures hand off after local durability; the queue producer
+  // enforces remote audio + metadata before enqueueing ALPE, without holding the UI.
+  if (!isOnline || !isCloudSyncAllowed() || session.draftData.voiceNoteRecordingId ||
+      Number(session.draftData.voiceNoteDurationMs) > 0) return queueProcessing();
 
   let result: ProduceJobResult;
   try {

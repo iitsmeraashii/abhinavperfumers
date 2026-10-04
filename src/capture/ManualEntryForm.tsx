@@ -1,3 +1,6 @@
+import { useAuth } from '../AuthContext';
+import { isCloudSyncAllowed } from '../authModeState';
+import { isTransportOnline } from '../connectivity/connectivityStore';
 import { filterPreviousReps, previousRepLabel } from './previousRepCacheStorage';
 import type { usePreviousReps } from './usePreviousReps';
 import { useState, useRef, useEffect, useCallback } from 'react';
@@ -241,14 +244,42 @@ function VoiceNoteRecorder({
   onUpdate,
   onBlobReady,
   onRetryTranscription,
+  onRemove,
+  onPersistenceState,
 }: {
   durationMs?: number;
   transcript?: string;
   transcriptionStatus?: VoiceTranscriptionStatus;
   onUpdate: (patch: Partial<DraftData>) => void;
-  onBlobReady?: (blob: Blob, durationMs: number, mimeType: string) => void;
+  onBlobReady?: (blob: Blob, durationMs: number, mimeType: string) => Promise<void>;
+  onRemove?: () => Promise<void>;
+  onPersistenceState: (state: 'idle' | 'saving' | 'saved' | 'error') => void;
   onRetryTranscription?: () => void;
 }) {
+  const [localError, setLocalError] = useState<string | null>(null);
+  const retained = useRef<{ blob: Blob; ms: number; mime: string } | null>(null);
+  const accepting = useRef(false);
+  const mountedRef = useRef(true);
+  async function persistRecording() {
+    const record = retained.current;
+    if (!record || accepting.current) return;
+    accepting.current = true;
+    if (mountedRef.current) { onPersistenceState('saving'); setLocalError(null); }
+    try {
+      if (!onBlobReady) throw new Error('Voice storage is unavailable');
+      await onBlobReady(record.blob, record.ms, record.mime);
+      if (mountedRef.current) {
+        onUpdate({ voiceNoteDurationMs: record.ms, voiceNoteTranscript: '' });
+        onPersistenceState('saved');
+      }
+      retained.current = null;
+    } catch {
+      if (mountedRef.current) {
+        setLocalError('Voice note could not be saved on this device. Retry, remove, or re-record before saving the lead.');
+        onPersistenceState('error');
+      }
+    } finally { accepting.current = false; }
+  }
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed]     = useState(durationMs ?? 0);
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -258,14 +289,18 @@ function VoiceNoteRecorder({
   const elapsedRef  = useRef(0);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (timerRef.current) clearInterval(timerRef.current);
-      recorderRef.current?.stop();
+      if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop();
       streamRef.current?.getTracks().forEach(t => t.stop());
     };
   }, []);
 
   async function handleStart() {
+    if (accepting.current) return;
+    onPersistenceState('saving');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -287,8 +322,8 @@ function VoiceNoteRecorder({
         streamRef.current?.getTracks().forEach(t => t.stop());
         streamRef.current = null;
         const ms = elapsedRef.current;
-        onUpdate({ voiceNoteDurationMs: ms, voiceNoteTranscript: '' });
-        onBlobReady?.(blob, ms, mimeType);
+        retained.current = { blob, ms, mime: mimeType };
+        void persistRecording();
       };
 
       recorder.start();
@@ -299,7 +334,8 @@ function VoiceNoteRecorder({
         setElapsed(prev => prev + 1000);
       }, 1000);
     } catch {
-      // microphone permission denied or unavailable — silently ignore
+      onPersistenceState(retained.current ? 'error' : durationMs ? 'saved' : 'idle');
+      setLocalError('Microphone is unavailable. Check permission and try again.');
     }
   }
 
@@ -310,7 +346,16 @@ function VoiceNoteRecorder({
     setRecording(false);
   }
 
-  function handleClear() {
+  async function handleClear() {
+    if (accepting.current) return;
+    onPersistenceState('saving');
+    try {
+      await onRemove?.();
+    } catch { setLocalError('Could not remove the saved recording. Please retry.'); onPersistenceState('error'); return; }
+    if (recorderRef.current) recorderRef.current.onstop = null;
+    retained.current = null;
+    setLocalError(null);
+    onPersistenceState('idle');
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     recorderRef.current?.stop();
     recorderRef.current = null;
@@ -319,7 +364,7 @@ function VoiceNoteRecorder({
     setRecording(false);
     setElapsed(0);
     elapsedRef.current = 0;
-    onUpdate({ voiceNoteDurationMs: undefined, voiceNoteTranscript: undefined });
+    onUpdate({ voiceNoteRecordingId: undefined, voiceNoteDurationMs: undefined, voiceNoteTranscript: undefined });
   }
 
   function formatTime(ms: number) {
@@ -339,6 +384,11 @@ function VoiceNoteRecorder({
   return (
     <div>
       <FieldLabel label="Voice Note" optional />
+      {localError && <div role="alert" className="text-sm text-red-600">
+        {localError}
+        {retained.current && <button type="button" onClick={() => void persistRecording()} className="ml-2 underline">Retry saving</button>}
+        <button type="button" onClick={() => void handleClear()} className="ml-2 underline">Remove</button>
+      </div>}
       <div className="flex items-center gap-3">
         {recording ? (
           <>
@@ -855,7 +905,8 @@ interface Props {
   onDiscard:     () => Promise<void>;
   onSaveAndNext?: () => Promise<{ error?: string } | void>;
   onSaveAsDraft?: () => Promise<void>;
-  onVoiceNoteRecorded?: (blob: Blob, durationMs: number, mimeType: string) => void;
+  onVoiceNoteRecorded?: (blob: Blob, durationMs: number, mimeType: string) => Promise<void>;
+  onVoiceNoteRemove?: () => Promise<void>;
   /** When true, contact fields are optional because evidence (card/QR)
    *  satisfies the minimum save requirement. Used in Exhibition mode. */
   contactDetailsOptional?: boolean;
@@ -865,12 +916,15 @@ interface Props {
   defaultEvent?:  AppEvent | null;
 }
 
-export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, contactDetailsOptional, activeEvents = [], defaultEvent = null }: Props) {
+export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, isOnline, saveState = 'idle', form, onBack, onDiscard, onSaveAndNext, onSaveAsDraft, onVoiceNoteRecorded, onVoiceNoteRemove, contactDetailsOptional, activeEvents = [], defaultEvent = null }: Props) {
   const {
     toastMessage, toastIsError, handleChange, handleBlur,
     handlePatchDraft, handleSaveDraft,
   } = form;
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
+  const { authMode } = useAuth();
+  const [voicePersistence, setVoicePersistence] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const voiceBlocked = voicePersistence === 'saving' || voicePersistence === 'error';
   const [saving, setSaving] = useState(false);
 
   // Ref to the Lead Classification section for post-extraction auto-scroll.
@@ -969,6 +1023,8 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
   const hasEvidence = !!(d.cardFrontAssetId || d.rawQr);
   const canSave = contactDetailsOptional ? (hasIdentifier || hasEvidence) : hasIdentifier;
   const backendSessionId = session.sync.backendSessionId;
+  const voiceRecordingId = d.voiceNoteRecordingId;
+  useEffect(() => { setVoicePersistence('idle'); }, [backendSessionId]);
 
   // Authoritative transcription state derived solely from capture_assets.transcription_status.
   // Uses 'none' as initial value so the transcript block is hidden until we
@@ -988,8 +1044,8 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
 
   // Reset to 'none' whenever the recording is cleared.
   useEffect(() => {
-    if (!voiceDuration) setPolledTranscriptionStatus('none');
-  }, [voiceDuration]);
+    setPolledTranscriptionStatus(voiceDuration ? 'pending' : 'none');
+  }, [voiceDuration, voiceRecordingId, backendSessionId]);
 
   // Poll capture_assets.transcription_status — the sole source of truth.
   // Uses recursive setTimeout (not setInterval) so concurrent polls cannot
@@ -997,13 +1053,13 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
   // Does NOT include polledTranscriptionStatus in deps — uses polledStatusRef
   // instead to avoid tearing down the effect on every state change.
   useEffect(() => {
-    if (!backendSessionId || (voiceDuration ?? 0) <= 0) return;
+    if (!backendSessionId || (voiceDuration ?? 0) <= 0 || !isOnline || authMode !== 'online') return;
 
     let mounted = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     async function poll() {
-      if (!mounted) return;
+      if (!mounted || !isTransportOnline() || !isCloudSyncAllowed()) return;
 
       // Stop once a terminal state is confirmed.
       const current = polledStatusRef.current;
@@ -1016,7 +1072,7 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
         .eq('asset_type', 'voice_note')
         .maybeSingle();
 
-      if (!mounted) return;
+      if (!mounted || !isTransportOnline() || !isCloudSyncAllowed()) return;
 
       const dbStatus = (asset as { transcription_status?: string | null } | null)
         ?.transcription_status ?? null;
@@ -1029,7 +1085,7 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
           .eq('id', backendSessionId)
           .maybeSingle();
 
-        if (!mounted) return;
+        if (!mounted || !isTransportOnline() || !isCloudSyncAllowed()) return;
 
         const transcript = (sessionRow as { voice_note_transcript?: string | null } | null)
           ?.voice_note_transcript ?? null;
@@ -1056,17 +1112,22 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
         setPolledTranscriptionStatus('pending');
       }
 
-      timer = setTimeout(() => { void poll(); }, 3000);
+      timer = setTimeout(runPoll, 3000);
     }
 
+    function runPoll() {
+      void poll().catch(() => {
+        if (mounted && isTransportOnline() && isCloudSyncAllowed()) timer = setTimeout(runPoll, 3000);
+      });
+    }
     // Small initial delay to allow the upload to begin before the first query.
-    timer = setTimeout(() => { void poll(); }, 800);
+    timer = setTimeout(runPoll, 800);
 
     return () => {
       mounted = false;
       if (timer) clearTimeout(timer);
     };
-  }, [backendSessionId, voiceDuration]);
+  }, [backendSessionId, voiceDuration, voiceRecordingId, isOnline, authMode]);
 
   // Derive the status shown in the UI directly from the polled DB state.
   // Never infer status from the transcript draft field.
@@ -1074,6 +1135,7 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
     (voiceDuration ?? 0) <= 0 ? 'none' : polledTranscriptionStatus;
 
   const handleSaveAndNext = useCallback(async () => {
+    if (voiceBlocked) return;
     setSaving(true);
     const ok = await handleSaveDraft(session);
     if (!ok) { setSaving(false); return; }
@@ -1087,7 +1149,7 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
       setPromotionActive(false);
       setSaving(false);
     }
-  }, [handleSaveDraft, session, onSaveAndNext]);
+  }, [handleSaveDraft, session, onSaveAndNext, voiceBlocked]);
 
   const handleContinueEnrich = useCallback(async () => {
     setSaving(true);
@@ -1312,11 +1374,14 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
 
             {/* Voice note */}
             <VoiceNoteRecorder
+              key={backendSessionId}
               durationMs={voiceDuration}
               transcript={voiceTranscript}
               transcriptionStatus={computedTranscriptionStatus}
               onUpdate={handlePatchDraft}
               onBlobReady={onVoiceNoteRecorded}
+              onRemove={onVoiceNoteRemove}
+              onPersistenceState={setVoicePersistence}
               onRetryTranscription={
                 backendSessionId && polledTranscriptionStatus === 'failed'
                   ? () => setPolledTranscriptionStatus(null)
@@ -1432,7 +1497,7 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
           <button
             type="button"
             onClick={onSaveAsDraft ? handleSaveAsDraftClick : handleContinueEnrich}
-            disabled={saving || (onSaveAsDraft && !hasDraftData)}
+            disabled={voiceBlocked || saving || (onSaveAsDraft && !hasDraftData)}
             className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl
               border border-stone-200 bg-white text-stone-700 text-sm font-semibold
               hover:bg-stone-50 active:bg-stone-100 active:scale-[0.98]
@@ -1444,13 +1509,13 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
           <button
             type="button"
             onClick={handleSaveAndNext}
-            disabled={saving || !canSave}
+            disabled={voiceBlocked || saving || !canSave}
             className="flex-[2] flex items-center justify-center gap-2 py-3.5 rounded-xl
               bg-stone-900 text-white text-sm font-semibold shadow-sm
               hover:bg-stone-800 active:bg-stone-950 active:scale-[0.98]
               transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {saving ? (
+            {voiceBlocked ? (voicePersistence === 'saving' ? 'Saving voice note…' : 'Save voice note first') : saving ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Saving…
