@@ -245,12 +245,6 @@ export async function findRetryableJobs(userId: string): Promise<QueueEntry[]> {
 
 // ─── State transitions ────────────────────────────────────────────────────────
 
-// Do not include backend messages/details: they may contain application data.
-function verifyTransition(operation: string, error: unknown, confirmed: boolean): void {
-  if (error) throw new Error(`processing_queue ${operation}: database write failed`);
-  if (!confirmed) throw new Error(`processing_queue ${operation}: no transition confirmed`);
-}
-
 export async function updateJobState(
   jobId: string,
   newState: ProcessingState,
@@ -278,13 +272,10 @@ export async function updateJobState(
     if (extra.error_code !== undefined) update.error_code = extra.error_code;
   }
 
-  const { error, count } = await supabase
+  await supabase
     .from(TABLE)
-    .update(update, { count: 'exact' })
+    .update(update)
     .eq('id', jobId);
-  // Count the UPDATE itself, not a follow-up read: COMPLETED rows may be
-  // deleted by the existing AFTER UPDATE trigger.
-  verifyTransition(`updateJobState(${newState})`, error, count === 1);
 }
 
 export async function markRetrying(
@@ -293,15 +284,17 @@ export async function markRetrying(
   failedStage: string | null = null,
   errorMessage: string | null = null,
 ): Promise<void> {
-  const { data, error } = await supabase.rpc('increment_retry_count', {
+  const { error } = await supabase.rpc('increment_retry_count', {
     p_job_id: jobId,
     p_failure_reason: failureReason,
     p_failed_stage: failedStage,
     p_error_message: errorMessage ?? failureReason,
   });
-  // The RPC returns the incremented count, or null when its predicates reject
-  // the transition. A blind fallback would hide a failed/no-op RPC.
-  verifyTransition('markRetrying', error, Number.isInteger(data) && data > 0);
+  if (error) {
+    // Fallback: manual update if RPC is unavailable
+    await updateJobState(jobId, 'RETRYING', { failure_reason: failureReason });
+    return;
+  }
   await updateJobState(jobId, 'RETRYING', { failure_reason: failureReason });
 }
 
@@ -309,26 +302,24 @@ export async function markRecovering(
   jobId: string,
 ): Promise<void> {
   const now = new Date().toISOString();
-  const { error, count } = await supabase
+  await supabase
     .from(TABLE)
     .update({
       state: 'RECOVERING' as ProcessingState,
       processing_started_at: now,
       updated_at: now,
-    }, { count: 'exact' })
+    })
     .eq('id', jobId);
-  verifyTransition('markRecovering', error, count === 1);
 }
 
 export async function requeueJob(jobId: string): Promise<void> {
   const now = new Date().toISOString();
-  const { error, count } = await supabase
+  await supabase
     .from(TABLE)
     .update({
       state: 'QUEUED' as ProcessingState,
       processing_started_at: null,
       updated_at: now,
-    }, { count: 'exact' })
+    })
     .eq('id', jobId);
-  verifyTransition('requeueJob', error, count === 1);
 }

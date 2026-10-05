@@ -55,7 +55,7 @@ export function getAlpeRuntimeState(): AlpeRuntimeState {
 
 export function updateAlpeRuntime(patch: Partial<AlpeRuntimeState>): void {
   state = { ...state, ...patch };
-  notifyListeners();
+  listeners.forEach(fn => fn());
 }
 
 export function subscribeAlpeRuntime(fn: () => void): () => void {
@@ -65,13 +65,7 @@ export function subscribeAlpeRuntime(fn: () => void): () => void {
 
 export function resetAlpeRuntime(): void {
   state = { ...DEFAULT_STATE };
-  notifyListeners();
-}
-
-function notifyListeners(): void {
-  listeners.forEach(fn => {
-    try { fn(); } catch { /* Diagnostics must never interrupt processing. */ }
-  });
+  listeners.forEach(fn => fn());
 }
 
 // ─── Console logger ──────────────────────────────────────────────────────────

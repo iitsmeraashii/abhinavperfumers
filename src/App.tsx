@@ -19,6 +19,7 @@ import SalesRepsPage from './SalesRepsPage';
 import ConversationsPage from './ConversationsPage';
 import ConversationDetailPage from './ConversationDetailPage';
 import WhatsAppAssetsPage from './WhatsAppAssetsPage';
+import FollowUpsPage from './FollowUpsPage';
 import { supabase } from './supabaseClient';
 import { startQueueReplay } from './capture/captureOfflineQueue';
 import { isConsoleEnabled } from './runtime/runtimeDiagnostics';
@@ -28,7 +29,7 @@ import {
   MoreHorizontal, X, User, ChevronDown, Layers, Users, MessageCircle, Package,
 } from 'lucide-react';
 
-type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'notifications' | 'salesreps' | 'whatsapp_assets' | 'account';
+type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'notifications' | 'salesreps' | 'whatsapp_assets' | 'followups' | 'account';
 
 // ─── Mobile bottom nav tabs ───────────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ const MOBILE_TABS: MobileTab[] = [
   { id: 'capture',   label: 'Capture',   icon: <PlusCircle className="w-5 h-5" />, emphasize: true },
   { id: 'queue',          label: 'Queue',         icon: <Layers className="w-5 h-5" /> },
   { id: 'conversations',  label: 'WhatsApp',      icon: <MessageCircle className="w-5 h-5" /> },
+  { id: 'followups',      label: 'Follow-Ups',    icon: <Bell className="w-5 h-5" /> },
   { id: 'events',          label: 'Events',        icon: <CalendarDays className="w-5 h-5" />, adminOnly: true },
 ];
 
@@ -138,7 +140,7 @@ interface MobileNavProps {
 
 function MobileBottomNav({ tab, isAdmin, onTabChange, onMorePress }: MobileNavProps) {
   const visibleTabs = MOBILE_TABS.filter(t => !t.adminOnly || isAdmin);
-  const moreActive  = tab === 'notifications' || tab === 'salesreps' || tab === 'whatsapp_assets' || tab === 'account';
+  const moreActive  = tab === 'notifications' || tab === 'salesreps' || tab === 'whatsapp_assets' || tab === 'followups' || tab === 'account';
 
   return (
     <nav
@@ -238,6 +240,7 @@ function MobileMoreDrawer({
   }, [onClose]);
 
   const items: { id: Tab; label: string; icon: React.ReactNode }[] = [
+    { id: 'followups', label: 'Follow-Ups', icon: <Bell className="w-5 h-5" /> },
     { id: 'account', label: 'My Account', icon: <User className="w-5 h-5" /> },
     ...(isAdmin
       ? [
@@ -332,8 +335,8 @@ function Layout() {
   const initialFollowUp = params.get('followup');
 
   const [tab,                setTab]                = useState<Tab>(() => {
-    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'whatsapp_assets', 'account'];
-    const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'conversations', 'account'];
+    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'whatsapp_assets', 'followups', 'account'];
+    const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'conversations', 'followups', 'account'];
     const allowed = isAdmin ? adminTabs : repTabs;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
     if (saved && allowed.includes(saved)) return saved;
@@ -409,6 +412,13 @@ function Layout() {
     window.history.pushState({}, '', url.toString());
     setLeadsEventFilter(undefined);
     setLeadsInitialFilters(undefined);
+  }
+
+  function handleOpenFollowUpComplete(id: string) {
+    setFollowUpModalId(id);
+    const url = new URL(window.location.href);
+    url.searchParams.set('followup', id);
+    window.history.pushState({}, '', url.toString());
   }
 
   function handleCloseFollowUpModal() {
@@ -511,6 +521,13 @@ function Layout() {
             >
               <MessageCircle className="w-4 h-4" /> WhatsApp
             </button>
+            <button
+              onClick={() => handleTabChange('followups')}
+              className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                ${tab === 'followups' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+            >
+              <Bell className="w-4 h-4" /> Follow-Ups
+            </button>
             {isAdmin && (
               <button
                 onClick={() => handleTabChange('events')}
@@ -608,6 +625,9 @@ function Layout() {
                 }}
                 onViewLead={handleViewLeadFromQueue}
               />
+            )}
+            {tab === 'followups' && !selectedLeadId && (
+              <FollowUpsPage onSelectLead={handleSelectLead} onOpenFollowUpComplete={handleOpenFollowUpComplete} />
             )}
             {tab === 'conversations' && !selectedLeadId && !selectedConversationId && (
               <ConversationsPage
