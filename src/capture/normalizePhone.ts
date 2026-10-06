@@ -147,3 +147,13 @@ export function phoneDedupKey(
   if (!rawPhone) return '';
   return extractDigits(stripPresentation(rawPhone.trim()));
 }
+
+/** Persist using Lead Detail's canonical form; preserve unresolved input without guessing. */
+export function phoneForStorage(
+  rawPhone: string | null | undefined,
+  options?: NormalizePhoneOptions,
+): string {
+  const raw = rawPhone?.trim() ?? '';
+  const result = normalizePhone(raw, options);
+  return result.ok ? '+' + result.value : raw;
+}

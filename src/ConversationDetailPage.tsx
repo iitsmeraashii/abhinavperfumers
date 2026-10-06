@@ -8,6 +8,7 @@ import {
   CheckCheck, Check, X, Plus, Unlink,
   AlertTriangle, Lock, ChevronDown, ChevronUp, RotateCw,
   Paperclip, Search, Globe, LayoutTemplate,
+  FlaskConical, CheckCircle2,
 } from 'lucide-react';
 import { formatDateTime } from './utils/dateFormat';
 import { formatBytes } from './utils/formatBytes';
@@ -67,6 +68,16 @@ interface LinkedLead {
   leadStatus: string | null;
   leadTemperature: string | null;
   state: string | null;
+}
+
+interface SamplesRequested {
+  id: string;
+  requested_at: string;
+  status: string;
+  processed_at: string | null;
+  processed_by: string | null;
+  processed_note: string | null;
+  processed_by_name: string | null;
 }
 
 interface Props {
@@ -363,6 +374,12 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
   const [showTextOnlyPicker, setShowTextOnlyPicker] = useState(false);
   const [textOnlyParams, setTextOnlyParams] = useState<string[]>([]);
 
+  const [samplesRequested, setSamplesRequested] = useState<SamplesRequested | null>(null);
+  const [showSamplesModal, setShowSamplesModal] = useState(false);
+  const [samplesNote, setSamplesNote] = useState('');
+  const [processingSamples, setProcessingSamples] = useState(false);
+  const [samplesError, setSamplesError] = useState('');
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const onUnreadClearedRef = useRef(onUnreadCleared);
@@ -393,6 +410,39 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
     } else {
       setLinkedLeads([]);
     }
+  }, [conversationId]);
+
+  const refreshSamplesRequested = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('samples_requested')
+      .select('id, requested_at, status, processed_at, processed_by, processed_note')
+      .eq('conversation_id', conversationId)
+      .maybeSingle();
+
+    if (error || !data) {
+      setSamplesRequested(null);
+      return;
+    }
+
+    let processedByName: string | null = null;
+    if (data.processed_by) {
+      const { data: repRow } = await supabase
+        .from('sales_representatives')
+        .select('name')
+        .eq('auth_user_id', data.processed_by)
+        .maybeSingle();
+      processedByName = repRow?.name ?? null;
+    }
+
+    setSamplesRequested({
+      id: data.id,
+      requested_at: data.requested_at,
+      status: data.status,
+      processed_at: data.processed_at,
+      processed_by: data.processed_by,
+      processed_note: data.processed_note,
+      processed_by_name: processedByName,
+    });
   }, [conversationId]);
 
   useEffect(() => {
@@ -476,6 +526,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
       setMessages((msgData ?? []).map(message => normalizeChatMessage(message as ChatMessage)));
 
       await refreshLinkedLeads();
+      await refreshSamplesRequested();
 
       if (cancelled) return;
       setLoading(false);
@@ -483,7 +534,7 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
 
     load();
     return () => { cancelled = true; };
-  }, [conversationId, refreshLinkedLeads]);
+  }, [conversationId, refreshLinkedLeads, refreshSamplesRequested]);
 
   useEffect(() => {
     if (scrollRef.current && messages.length > 0) {
@@ -654,6 +705,39 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
     await refreshLinkedLeads();
   }
 
+  async function handleMarkSamplesProcessed() {
+    if (processingSamples) return;
+    setProcessingSamples(true);
+    setSamplesError('');
+
+    try {
+      const { data, error: rpcErr } = await supabase.rpc('mark_samples_processed', {
+        p_conversation_id: conversationId,
+        p_note: samplesNote,
+      });
+
+      if (rpcErr) {
+        setSamplesError('We couldn\u2019t process this request. Please try again.');
+        return;
+      }
+
+      const result = data as { success?: boolean; error?: string } | null;
+      if (result && result.success === false) {
+        setSamplesError(result.error ?? 'We couldn\u2019t process this request. Please try again.');
+        return;
+      }
+
+      setShowSamplesModal(false);
+      setSamplesNote('');
+      await refreshSamplesRequested();
+    } catch (err) {
+      console.error('[ConversationDetail] mark_samples_processed error', err);
+      setSamplesError('We couldn\u2019t process this request. Please try again.');
+    } finally {
+      setProcessingSamples(false);
+    }
+  }
+
   // ── Render states ──
 
   if (loading) {
@@ -780,6 +864,76 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
           {actionError}
         </div>
       )}
+
+      {/* ── Mobile priority cards: Service Window + Samples Requested above chat ── */}
+      <div className="lg:hidden grid grid-cols-2 gap-2.5 mb-3">
+        {/* Service Window (mobile) */}
+        <div className={`border rounded-xl px-3 py-2.5 ${wCfg.panelBorder} ${wCfg.panelBg}`}>
+          <div className="flex items-center gap-1.5 mb-1">
+            <Clock className={`w-3 h-3 ${wCfg.iconCls}`} />
+            <span className="text-[10px] text-stone-500 font-medium uppercase tracking-wide">Service Window</span>
+          </div>
+          {conversation.customer_service_window_expires_at ? (
+            <div>
+              <p className="text-xs font-semibold text-stone-800 leading-tight">
+                {serviceWindow === 'open' ? 'Open' : serviceWindow === 'expiring' ? 'Closing Soon' : serviceWindow === 'closed' ? 'Expired' : 'No Window'}
+              </p>
+              {serviceWindow === 'open' && (
+                <p className="text-[10px] text-stone-500 mt-0.5">{formatRemaining(conversation.customer_service_window_expires_at)}</p>
+              )}
+              {serviceWindow === 'expiring' && (
+                <p className="text-[10px] text-amber-600 mt-0.5 font-medium">{formatRemaining(conversation.customer_service_window_expires_at)}</p>
+              )}
+              {serviceWindow === 'closed' && (
+                <p className="text-[10px] text-stone-400 mt-0.5">{formatExpiredAgo(conversation.customer_service_window_expires_at)}</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-stone-400">No window set</p>
+          )}
+        </div>
+
+        {/* Samples Requested (mobile) */}
+        {samplesRequested ? (
+          <div className={`border rounded-xl px-3 py-2.5 ${
+            samplesRequested.status === 'OPEN'
+              ? 'border-amber-200 bg-amber-50/40'
+              : 'border-stone-200 bg-white'
+          }`}>
+            <div className="flex items-center gap-1.5 mb-1">
+              <FlaskConical className={`w-3 h-3 ${samplesRequested.status === 'OPEN' ? 'text-amber-600' : 'text-stone-400'}`} />
+              <span className="text-[10px] text-stone-500 font-medium uppercase tracking-wide">Samples</span>
+              <span className={`ml-auto text-[9px] px-1.5 py-0.5 rounded-full font-medium ${
+                samplesRequested.status === 'OPEN'
+                  ? 'bg-amber-100 text-amber-700'
+                  : 'bg-green-50 text-green-700'
+              }`}>
+                {samplesRequested.status}
+              </span>
+            </div>
+            <p className="text-[10px] text-stone-400">Requested {formatDateTime(samplesRequested.requested_at)}</p>
+            {samplesRequested.status === 'OPEN' && (
+              <button
+                onClick={() => { setSamplesError(''); setShowSamplesModal(true); }}
+                className="w-full flex items-center justify-center gap-1 px-2 py-1.5 mt-2 text-[11px] font-medium rounded-lg bg-stone-800 text-white hover:bg-stone-700 transition"
+              >
+                <CheckCircle2 className="w-3 h-3" />
+                Mark as Processed
+              </button>
+            )}
+            {samplesRequested.status === 'PROCESSED' && samplesRequested.processed_by_name && (
+              <p className="text-[10px] text-stone-500 mt-0.5">By {samplesRequested.processed_by_name}</p>
+            )}
+          </div>
+        ) : (
+          <div className="border border-stone-200 bg-white rounded-xl px-3 py-2.5 flex items-center justify-center">
+            <div className="text-center">
+              <FlaskConical className="w-3 h-3 text-stone-300 mx-auto mb-1" />
+              <p className="text-[10px] text-stone-400">No samples requested</p>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* ── Main layout: chat + info panel ── */}
       <div className="flex flex-col lg:flex-row gap-4">
@@ -1467,6 +1621,69 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
               </button>
             </div>
           </div>
+
+          {/* Samples Requested (desktop info panel) */}
+          {samplesRequested && (
+            <div className={`border rounded-xl px-4 py-3 ${
+              samplesRequested.status === 'OPEN'
+                ? 'border-amber-300 bg-amber-50/50'
+                : 'border-stone-200 bg-white'
+            }`}>
+              <div className="flex items-center gap-2 mb-2">
+                <FlaskConical className={`w-3.5 h-3.5 ${
+                  samplesRequested.status === 'OPEN' ? 'text-amber-600' : 'text-stone-400'
+                }`} />
+                <span className="text-xs text-stone-500 font-medium">Samples Requested</span>
+                <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                  samplesRequested.status === 'OPEN'
+                    ? 'bg-amber-100 text-amber-700'
+                    : 'bg-green-50 text-green-700'
+                }`}>
+                  {samplesRequested.status}
+                </span>
+              </div>
+
+              <div className="space-y-1.5">
+                <div>
+                  <p className="text-[10px] text-stone-400 uppercase tracking-wide">Requested</p>
+                  <p className="text-sm text-stone-700">{formatDateTime(samplesRequested.requested_at)}</p>
+                </div>
+
+                {samplesRequested.status === 'PROCESSED' && (
+                  <>
+                    {samplesRequested.processed_at && (
+                      <div>
+                        <p className="text-[10px] text-stone-400 uppercase tracking-wide">Processed</p>
+                        <p className="text-sm text-stone-700">{formatDateTime(samplesRequested.processed_at)}</p>
+                      </div>
+                    )}
+                    {samplesRequested.processed_by_name && (
+                      <div>
+                        <p className="text-[10px] text-stone-400 uppercase tracking-wide">Processed By</p>
+                        <p className="text-sm text-stone-700">{samplesRequested.processed_by_name}</p>
+                      </div>
+                    )}
+                    {samplesRequested.processed_note && (
+                      <div>
+                        <p className="text-[10px] text-stone-400 uppercase tracking-wide">Processing Note</p>
+                        <p className="text-sm text-stone-600 leading-relaxed">{samplesRequested.processed_note}</p>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {samplesRequested.status === 'OPEN' && (
+                <button
+                  onClick={() => { setSamplesError(''); setShowSamplesModal(true); }}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2 mt-3 text-xs font-medium rounded-lg bg-stone-800 text-white hover:bg-stone-700 transition"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Mark as Processed
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1561,6 +1778,60 @@ export default function ConversationDetailPage({ conversationId, onBack, onViewL
               >
                 {unlinking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Unlink className="w-3.5 h-3.5" />}
                 Unlink
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Mark Samples Processed Modal ── */}
+      {showSamplesModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40" onClick={() => { if (!processingSamples) { setShowSamplesModal(false); setSamplesNote(''); setSamplesError(''); } }} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-sm max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100">
+              <h3 className="text-base font-semibold text-stone-800">Mark Samples Request as Processed</h3>
+              <button
+                onClick={() => { setShowSamplesModal(false); setSamplesNote(''); setSamplesError(''); }}
+                disabled={processingSamples}
+                className="p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 transition disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="px-5 py-4 overflow-y-auto">
+              {samplesError && (
+                <div className="mb-3 flex items-center gap-2 px-3 py-2 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">
+                  <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                  {samplesError}
+                </div>
+              )}
+              <label className="block text-[10px] font-medium text-stone-500 uppercase tracking-wide mb-1">
+                Processing note (optional)
+              </label>
+              <textarea
+                value={samplesNote}
+                onChange={e => setSamplesNote(e.target.value)}
+                placeholder="Add a note about how this was handled…"
+                rows={3}
+                className="w-full px-2.5 py-2 text-sm border border-stone-200 rounded-lg bg-white text-stone-800 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition resize-none"
+              />
+            </div>
+            <div className="px-5 py-3 border-t border-stone-100 flex justify-end gap-2 flex-shrink-0">
+              <button
+                onClick={() => { setShowSamplesModal(false); setSamplesNote(''); setSamplesError(''); }}
+                disabled={processingSamples}
+                className="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg transition disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleMarkSamplesProcessed}
+                disabled={processingSamples}
+                className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-stone-800 hover:bg-stone-700 rounded-lg transition disabled:opacity-50"
+              >
+                {processingSamples ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                Mark as Processed
               </button>
             </div>
           </div>

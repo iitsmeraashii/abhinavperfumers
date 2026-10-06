@@ -126,7 +126,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loggedOutRef = useRef(false);
   const mountedRef = useRef(true);
   const reconnectRequiredRef = useRef(false);
-  const reconnectRetryRef = useRef<{ generation: number; identity: string | null } | null>(null);
   const logoutRef = useRef<Promise<void> | null>(null);
 
   // Logout, identity/transport changes and cleanup invalidate prior async work.
@@ -165,7 +164,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSalesRepSafe(restoredRep);
     reconnectRequiredRef.current = true;
     transitionAuthMode('offline-restored');
-    drainReconnectRetry();
     console.log('[AuthContext] offline profile restored', {
       repCode: restoredRep.rep_code,
       validatedAt: result.profile.validatedAt,
@@ -202,41 +200,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return validateCurrentIdentity(reconnectRequiredRef.current, s);
   }
 
-  // Remember an external reconnect/foreground request until identity restoration
-  // or an older same-user validation finishes. Failures alone never schedule retries.
-  function requestReconnectRetry(): void {
-    if (!mountedRef.current || loggedOutRef.current || !isTransportOnline()) return;
-    reconnectRetryRef.current = {
-      generation: authGenerationRef.current, identity: expectedIdentityRef.current,
-    };
-    drainReconnectRetry();
-  }
-
-  function drainReconnectRetry(): void {
-    const retry = reconnectRetryRef.current;
-    if (!retry) return;
-    const identity = expectedIdentityRef.current;
-    if (!mountedRef.current || loggedOutRef.current || !isTransportOnline() ||
-        retry.generation !== authGenerationRef.current ||
-        (retry.identity !== null && retry.identity !== identity) || getAuthMode() === 'online') {
-      reconnectRetryRef.current = null;
-      return;
-    }
-    if (!identity || validationRef.current?.identity === identity) return;
-    reconnectRetryRef.current = null;
-    void validateCurrentIdentity(true);
-  }
-
   function validateCurrentIdentity(reconnect: boolean, suppliedSession?: Session): Promise<void> {
     const generation = authGenerationRef.current;
     const identity = expectedIdentityRef.current;
     if (!currentAttempt(generation, identity)) return Promise.resolve();
     if (!isTransportOnline()) return retainOffline(generation);
     const existing = validationRef.current;
-    if (existing?.identity === identity) {
-      if (existing.generation !== generation) requestReconnectRetry();
-      return existing.promise;
-    }
+    if (existing?.generation === generation && existing.identity === identity) return existing.promise;
     const attempt = { generation, identity, promise: Promise.resolve() };
     // Defer all SDK calls out of the synchronous auth-state callback.
     attempt.promise = new Promise<void>(resolve => setTimeout(resolve, 0)).then(async () => {
@@ -274,7 +244,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } finally {
         if (validationRef.current === attempt) validationRef.current = null;
         if (currentAttempt(generation, identity)) setLoading(false);
-        drainReconnectRetry();
       }
     });
     validationRef.current = attempt;
@@ -288,29 +257,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const online = connectivityStore.getSnapshot();
       if (online === previous) return;
       previous = online;
-      if (loggedOutRef.current) return;
-      if (!online) reconnectRetryRef.current = null;
-      if (!expectedIdentityRef.current) {
-        if (online) requestReconnectRetry();
-        return;
-      }
+      if (loggedOutRef.current || !expectedIdentityRef.current) return;
       ++authGenerationRef.current;
       reconnectRequiredRef.current = true;
       transitionAuthMode('unauthenticated');
-      if (online) requestReconnectRetry();
+      if (online) void validateCurrentIdentity(true);
       else void retainOffline(authGenerationRef.current);
     };
     const unsubscribe = connectivityStore.subscribe(onTransport);
     const onForeground = () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
       if (reconnectRequiredRef.current && isTransportOnline() && getAuthMode() !== 'online' &&
-          expectedIdentityRef.current && !loggedOutRef.current) requestReconnectRetry();
+          expectedIdentityRef.current && !loggedOutRef.current) void validateCurrentIdentity(true);
     };
     if (typeof window !== 'undefined') window.addEventListener('focus', onForeground);
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onForeground);
     return () => {
       mountedRef.current = false;
-      reconnectRetryRef.current = null;
       ++authGenerationRef.current;
       publishAuthMode('unauthenticated');
       unsubscribe();
@@ -449,7 +412,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    return () => { subscribed = false; subscription.unsubscribe(); };
+    // Safety timeout: if onAuthStateChange hasn't resolved loading within 8s
+    // (e.g. Supabase unreachable in a sandboxed environment), unblock the UI
+    // so the user sees the login page instead of a perpetual spinner.
+    const safetyTimer = setTimeout(() => {
+      if (mountedRef.current && !loggedOutRef.current && salesRepRef.current === null) {
+        console.warn('[AuthContext] bootstrap safety timeout — forcing loading=false');
+        setLoading(false);
+      }
+    }, 8000);
+
+    return () => { subscribed = false; subscription.unsubscribe(); clearTimeout(safetyTimer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

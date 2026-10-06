@@ -24,7 +24,7 @@ import { updateLeadWithAudit } from './leadActivityService';
 import { CountrySelector } from './capture/CountrySelector';
 import { PhoneInputWithCountry } from './capture/PhoneInputWithCountry';
 import { UNSURE_COUNTRY, canonicalizeCountry } from './capture/countryData';
-import { normalizePhone, phoneDedupKey } from './capture/normalizePhone';
+import { phoneForStorage, phoneDedupKey } from './capture/normalizePhone';
 import { resolvePhoneCountry } from './capture/phoneCountryResolver';
 import { splitInternationalPhone } from './capture/splitInternationalPhone';
 import { resolveWhatsAppPhone } from './capture/whatsappPhoneResolver';
@@ -1006,18 +1006,10 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
     for (let i = 0; i < rawPhones.length; i++) {
       const raw = rawPhones[i];
       const dc = dialCodes[i] || undefined;
-      const result = normalizePhone(raw, { dialCode: dc });
       const dedup = phoneDedupKey(raw, { dialCode: dc });
       if (dedup && seenDedupKeys.has(dedup)) continue;
       if (dedup) seenDedupKeys.add(dedup);
-      // Store with leading "+" so the persisted form matches the capture
-      // promotion path (which stores raw international phones with "+").
-      // normalizePhone() intentionally returns bare E.164 digits for
-      // WhatsApp/Meta — that contract is unchanged; resolveWhatsAppPhone()
-      // re-normalizes and strips "+" at use time.
-      // Only prepend "+" on successful normalization; on failure, preserve
-      // the raw value as-is (no spurious "+" on non-phone strings).
-      phones.push(result.ok ? '+' + result.value : raw);
+      phones.push(phoneForStorage(raw, { dialCode: dc }));
     }
 
     const emails = [draft.email0, draft.email1].map(e => e.trim()).filter(Boolean);

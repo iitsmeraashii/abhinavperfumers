@@ -387,8 +387,8 @@ export function canonicalizeCountry(input: string): string | null {
 }
 
 /**
- * Search countries by name for the country selector dropdown.
- * Returns countries whose canonical name contains the query (case-insensitive).
+ * Search countries by name or dial code for the country selector dropdown.
+ * Matches names case-insensitively and dial codes with or without the leading +.
  * Empty query returns all countries.
  */
 export function searchCountries(query: string): CountryOption[] {
@@ -398,7 +398,7 @@ export function searchCountries(query: string): CountryOption[] {
   const matched = new Set<CountryOption>();
 
   for (const c of COUNTRIES) {
-    if (c.name.toLowerCase().includes(lower)) {
+    if (c.name.toLowerCase().includes(lower) || c.dialCode.includes(lower)) {
       matched.add(c);
     }
   }
