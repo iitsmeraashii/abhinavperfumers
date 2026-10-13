@@ -12,7 +12,7 @@ import { getAuthIdentity } from './captureAuth';
 import { deriveState } from './deriveState';
 import { resolveLeadCountry } from './resolveLeadCountry';
 import { saveCompletedLead, buildCompletedLead } from './completedLeadsStorage';
-import { phoneDedupKey } from './normalizePhone';
+import { phoneDedupKey, phoneForStorage } from './normalizePhone';
 import { resolvePhoneCountry } from './phoneCountryResolver';
 import type { CaptureMethod, DraftData } from './types';
 
@@ -90,18 +90,17 @@ export async function executePromotion(
       address:         draftData.address ?? null,
     });
 
-    // 3. Build phones array — preserve RAW phone values, not normalized.
-    //    Normalization happens downstream via resolveWhatsAppPhone() when
-    //    WhatsApp or other services need the canonical form.
-    //    Deduplicate by canonical key so the same number in different formats
-    //    doesn't appear twice, but store the raw value.
+    // 3. Persist the primary with its country context, using Lead Detail's format.
+    // Preserve existing secondary values, ordering and deduplication.
     const phones: string[] = [];
     const seenDedupKeys = new Set<string>();
     for (const raw of rawPhones) {
       const dedup = phoneDedupKey(raw, { dialCode: resolvedDialCode ?? undefined });
       if (dedup && seenDedupKeys.has(dedup)) continue;
       if (dedup) seenDedupKeys.add(dedup);
-      phones.push(raw);
+      phones.push(phones.length === 0
+        ? phoneForStorage(raw, { dialCode: resolvedDialCode ?? undefined })
+        : raw);
     }
 
     const emails: string[] = [];

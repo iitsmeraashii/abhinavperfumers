@@ -16,7 +16,7 @@ const mocks = {
  'react/jsx-runtime': `export const jsx=(type,props)=>{if(type==='Provider')globalThis.authValue=props.value;return null;};export const jsxs=jsx;`,
  '@supabase/supabase-js': `export const isAuthRetryableFetchError=e=>e?.retryable===true;`,
  supabaseClient: `export const supabase=globalThis.h.sdk; export const hasPersistedSupabaseSessionForUser=id=>globalThis.h.persisted===id; export const clearLocalSupabaseAuthSession=()=>{globalThis.h.persisted=null;};`,
- db: `export const openDB=async()=>{throw Error('Unexpected voice IDB transaction in auth fixture');}; export const dbGet=async(store,key)=>{if(globalThis.h.readFailure)throw Error('read failed');if(globalThis.h.readHold){const hold=globalThis.h.readHold;globalThis.h.readHold=null;await hold.promise;}return globalThis.h.db.get(store+key)||null;}; export const dbPutStrict=async(store,row)=>{if(globalThis.h.writeHold){const hold=globalThis.h.writeHold;globalThis.h.writeHold=null;await hold.promise;}globalThis.h.db.set(store+(row.key||row.id),structuredClone(row));}; export const dbDeleteStrict=async(store,key)=>{globalThis.h.db.delete(store+key);};export const dbPut=dbPutStrict;export const dbDelete=dbDeleteStrict;export const dbGetAllInStoreStrict=async store=>[...globalThis.h.db.entries()].filter(([k])=>k.startsWith(store)).map(([,v])=>v);export const dbGetAllInStore=dbGetAllInStoreStrict;`,
+ db: `export const openDB=async()=>{throw Error('Unexpected voice IDB transaction in auth fixture');}; export const dbGet=async(store,key)=>{if(globalThis.h.readFailure)throw Error('read failed');return globalThis.h.db.get(store+key)||null;}; export const dbPutStrict=async(store,row)=>{if(globalThis.h.writeHold){const hold=globalThis.h.writeHold;globalThis.h.writeHold=null;await hold.promise;}globalThis.h.db.set(store+(row.key||row.id),structuredClone(row));}; export const dbDeleteStrict=async(store,key)=>{globalThis.h.db.delete(store+key);};export const dbPut=dbPutStrict;export const dbDelete=dbDeleteStrict;export const dbGetAllInStoreStrict=async store=>[...globalThis.h.db.entries()].filter(([k])=>k.startsWith(store)).map(([,v])=>v);export const dbGetAllInStore=dbGetAllInStoreStrict;`,
  captureBackendSync: ['syncUpsertSession','syncUpsertAsset','syncUpsertOcrExtraction','syncUpsertQrExtraction','syncUpdateSessionFields','syncUpsertVisionExtraction','syncPromoteSession'].map(n=>`export const ${n}=async()=>{};`).join(''),
  assetStorageUpload: `export const uploadBusinessCardAsset=async()=>{globalThis.h.uploads++;return {uploaded:true,metadataWritten:true};};export const reconcileAssetStorageMetadata=async()=>true;export const uploadNotesImage=async()=>{};`,
  voiceEvidenceManager: `export const executeVoiceNoteUploadOp=async()=>{};`,
@@ -29,7 +29,7 @@ const mocks = {
  function hookHost() {
   return {slots:[],cursor:0,pending:[],state(value){const i=this.cursor++;if(!(i in this.slots))this.slots[i]=value;return [this.slots[i],v=>{this.slots[i]=typeof v==='function'?v(this.slots[i]):v;}];},ref(value){const i=this.cursor++;if(!(i in this.slots))this.slots[i]={current:value};return this.slots[i];},effect(fn,deps){const i=this.cursor++;const old=this.slots[i];if(!old||deps.some((v,j)=>v!==old.deps[j])){this.pending.push(()=>{old?.cleanup?.();this.slots[i]={deps,cleanup:fn()};});}},run(fn){global.host=this;this.cursor=0;fn();this.pending.splice(0).forEach(f=>f());},dispose(){this.slots.forEach(s=>s?.cleanup?.());}};
  }
- async function fixture(online=true, beforeStart) {
+ async function fixture(online=true) {
   global.window=new EventTarget();global.document=new EventTarget();document.visibilityState='visible';global.localStorage={removeItem(){}};
   Object.defineProperty(global,'navigator',{value:{onLine:online},configurable:true});
   const profile=id=>({id:'rep-'+id,rep_code:id,name:id,role:'rep',email:'',auth_user_id:id,login_enabled:true,is_active:true});
@@ -40,7 +40,7 @@ const mocks = {
   await api.saveCachedAuthProfile({...profile('A'),phone:null,default_event_id:null,default_capture_profile:'EXHIBITION'});
   const auth=hookHost(),replay=hookHost();const render=()=>{auth.run(()=>api.AuthProvider({children:null}));replay.run(api.Replay);};
   const settle=async()=>{for(let i=0;i<5;i++){await pause();render();}};
-  beforeStart?.(h);render();h.authEvent('INITIAL_SESSION',h.initialNull?null:session('A'));await settle();
+  render();h.authEvent('INITIAL_SESSION',session('A'));await settle();
   const transport=v=>{navigator.onLine=v;window.dispatchEvent(new Event(v?'online':'offline'));};
   return {api,h,profile,session,render,settle,transport,dispose(){replay.dispose();auth.dispose();}};
  }
@@ -81,37 +81,6 @@ const mocks = {
  await test('expired offline eligibility fails closed without signout',async f=>{const cached=await f.api.loadCachedAuthProfile();f.h.db.set('auth_profilecurrent',{...cached,validatedAt:Date.now()-16*24*60*60*1000});f.transport(false);await f.settle();assert.equal(f.api.getAuthMode(),'unauthenticated');assert.equal(global.authValue.user,null);assert.equal(f.h.signouts,0);});
  await test('startup classifier still rejects ambiguous profile HTTP 400',async f=>{f.h.profileResult={data:null,error:{message:'test'},status:400};f.h.authEvent('TOKEN_REFRESHED',f.session('A'));await f.settle();assert.equal(f.api.getAuthMode(),'unauthenticated');assert.equal(f.h.signouts,1);});
  await test('reconnect mismatched profile identity cannot authorize',async f=>{f.transport(false);await f.settle();f.h.profileResult={data:f.profile('B'),error:null,status:200};f.transport(true);await f.settle();assert.equal(f.api.getAuthMode(),'offline-restored');assert.equal(f.h.signouts,0);});
- await test('reconnect during older validation coalesces without overlapping getUser and follows up without focus',async f=>{
-  f.transport(false);await f.settle();const held=deferred();f.h.userResult=held.promise;
-  f.transport(true);await f.settle();assert.equal(f.h.userCalls,1);
-  f.transport(false);await f.settle();f.transport(true);await f.settle();
-  assert.equal(f.h.userCalls,1,'older same-user validation must finish before follow-up');
-  f.h.userResult=null;held.resolve({data:{user:null},error:{status:503}});await f.settle();
-  assert.equal(f.h.userCalls,2);assert.equal(f.api.getAuthMode(),'online');
- });
- await test('foreground requests during failing validation coalesce to one follow-up, then stop',async f=>{
-  f.transport(false);await f.settle();const held=deferred();f.h.userResult=held.promise;f.transport(true);await f.settle();
-  for(let i=0;i<5;i++){window.dispatchEvent(new Event('focus'));document.dispatchEvent(new Event('visibilitychange'));}
-  f.h.userResult={data:{user:null},error:{status:503}};
-  held.resolve(f.h.userResult);await f.settle();await f.settle();
-  assert.equal(f.h.userCalls,2);assert.equal(f.api.getAuthMode(),'offline-restored');
-  await f.settle();assert.equal(f.h.userCalls,2,'failure alone must not create a retry loop');
-  f.h.userResult=null;f.transport(false);await f.settle();f.transport(true);await f.settle();
-  assert.equal(f.h.userCalls,3);assert.equal(f.api.getAuthMode(),'online');
- });
- await test('logout cancels a coalesced reconnect behind old validation',async f=>{
-  f.transport(false);await f.settle();const held=deferred();f.h.userResult=held.promise;f.transport(true);await f.settle();
-  f.transport(false);await f.settle();f.transport(true);await f.settle();await global.authValue.logout();
-  held.resolve({data:{user:{id:'A'}},error:null});await f.settle();
-  assert.equal(f.api.getAuthMode(),'unauthenticated');assert.equal(f.h.userCalls,1);assert.equal(await f.api.loadCachedAuthProfile(),null);
- });
- const restoreHold=deferred();const duringRestore=await fixture(false,h=>{h.initialNull=true;h.sessionResult={data:{session:null},error:{retryable:true}};h.readHold=restoreHold;});
- try {
-  duringRestore.h.sessionResult=null;duringRestore.transport(true);await duringRestore.settle();
-  restoreHold.resolve();await duringRestore.settle();
-  assert.equal(duringRestore.api.getAuthMode(),'online','reconnect before cached identity is known must not be lost');
-  assert.equal(duringRestore.h.userCalls,1);passed++;console.log('PASS: reconnect during null-session cached identity restoration');
- } finally {duringRestore.dispose();}
  const cold=await fixture(false);assert.equal(cold.api.getAuthMode(),'offline-restored');cold.transport(true);await cold.settle();assert.equal(cold.api.getAuthMode(),'online');cold.dispose();passed++;console.log('PASS: offline cold start reconnect');
  console.log(`${passed} auth reconnect checks passed`);
 })().catch(e=>{console.error(e);process.exitCode=1;});

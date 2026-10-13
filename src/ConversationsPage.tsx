@@ -4,6 +4,7 @@ import {
   MessageCircle, RefreshCw, Loader2,
   ChevronLeft, ChevronRight, Inbox, AlertCircle,
   Link2, Link2Off, Search, X,
+  FlaskConical, ChevronDown,
 } from 'lucide-react';
 import { formatDateTime } from './utils/dateFormat';
 
@@ -40,12 +41,19 @@ interface LatestMessage {
   timestamp: string | null;
 }
 
+interface SamplesInfo {
+  status: string;
+  requested_at: string;
+}
+
 type ConversationRow = Conversation & {
   linked_lead: LinkedLeadInfo;
   latest_message: LatestMessage | null;
+  samples: SamplesInfo | null;
 };
 
 type ConversationFilter = 'all' | 'unread' | 'unmatched' | 'linked' | 'window_open' | 'window_expired';
+type SamplesFilter = 'all' | 'open' | 'processed' | 'not_requested';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -86,6 +94,13 @@ const FILTER_TABS: { label: string; value: ConversationFilter }[] = [
   { label: 'Window Expired', value: 'window_expired' },
 ];
 
+const SAMPLES_FILTER_OPTIONS: { label: string; value: SamplesFilter }[] = [
+  { label: 'All',            value: 'all' },
+  { label: 'Samples Open',   value: 'open' },
+  { label: 'Samples Processed', value: 'processed' },
+  { label: 'Not Requested',  value: 'not_requested' },
+];
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildMessagePreview(msg: LatestMessage): string {
@@ -121,10 +136,25 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
   const [searchInput, setSearchInput] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [activeFilter, setActiveFilter] = useState<ConversationFilter>('all');
+  const [samplesFilter, setSamplesFilter] = useState<SamplesFilter>('all');
+  const [samplesDropdownOpen, setSamplesDropdownOpen] = useState(false);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const samplesDropdownRef = useRef<HTMLDivElement | null>(null);
 
-  const fetchPage = useCallback(async (p: number, filter: ConversationFilter, search: string) => {
+  // Close samples dropdown on outside click
+  useEffect(() => {
+    if (!samplesDropdownOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (samplesDropdownRef.current && !samplesDropdownRef.current.contains(e.target as Node)) {
+        setSamplesDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [samplesDropdownOpen]);
+
+  const fetchPage = useCallback(async (p: number, filter: ConversationFilter, search: string, samples: SamplesFilter) => {
     setLoading(true);
     setError('');
 
@@ -136,8 +166,6 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
 
     if (search.trim()) {
       const term = search.trim();
-      // Try phone number or conversation_code match first on conversations
-      // Also search message text via whatsapp_messages
       const { data: msgMatches, error: msgErr } = await supabase
         .from('whatsapp_messages')
         .select('conversation_id')
@@ -147,7 +175,7 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
 
       if (msgErr) {
         console.error('[ConversationsPage] Message search failed', msgErr);
-        setError('We couldn’t load conversations right now. Please try again.');
+        setError('We couldn\u2019t load conversations right now. Please try again.');
         setRows([]);
         setTotal(0);
         setLoading(false);
@@ -155,6 +183,55 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
       }
 
       messageSearchConversationIds = new Set((msgMatches ?? []).map(m => m.conversation_id));
+    }
+
+    // ── Step 1b: Resolve samples filter to conversation ID constraints ──
+    // For Open/Processed: fetch conversation IDs from samples_requested with the matching status.
+    // For Not Requested: fetch ALL conversation IDs that have a samples_requested row,
+    //   then exclude them from the conversation query.
+    let samplesMatchIds: string[] | null = null;
+    let samplesExcludeIds: string[] | null = null;
+
+    if (samples === 'open' || samples === 'processed') {
+      const statusFilter = samples === 'open' ? 'OPEN' : 'PROCESSED';
+      const { data: srRows, error: srErr } = await supabase
+        .from('samples_requested')
+        .select('conversation_id')
+        .eq('status', statusFilter);
+
+      if (srErr) {
+        console.error('[ConversationsPage] Samples filter query failed', srErr);
+        setError('We couldn\u2019t load conversations right now. Please try again.');
+        setRows([]);
+        setTotal(0);
+        setLoading(false);
+        return;
+      }
+
+      samplesMatchIds = (srRows ?? []).map(r => r.conversation_id);
+
+      if (samplesMatchIds.length === 0) {
+        // No conversations match this samples filter — return empty immediately
+        setRows([]);
+        setTotal(0);
+        setLoading(false);
+        return;
+      }
+    } else if (samples === 'not_requested') {
+      const { data: srRows, error: srErr } = await supabase
+        .from('samples_requested')
+        .select('conversation_id');
+
+      if (srErr) {
+        console.error('[ConversationsPage] Samples not-requested query failed', srErr);
+        setError('We couldn\u2019t load conversations right now. Please try again.');
+        setRows([]);
+        setTotal(0);
+        setLoading(false);
+        return;
+      }
+
+      samplesExcludeIds = (srRows ?? []).map(r => r.conversation_id);
     }
 
     // ── Step 2: Build conversation query with filters ──
@@ -170,13 +247,10 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
     // Search: phone number or conversation_code
     if (search.trim()) {
       const term = search.trim();
-      // If we found message matches, filter by those IDs OR phone/code match
       if (messageSearchConversationIds && messageSearchConversationIds.size > 0) {
         const ids = Array.from(messageSearchConversationIds);
-        // Use OR filter: phone ilike OR code ilike OR in message-matched IDs
         q = q.or(`wa_phone_number.ilike.%${term}%,conversation_code.ilike.%${term}%,id.in.(${ids.join(',')})`);
       } else {
-        // No message matches — still try phone/code
         q = q.or(`wa_phone_number.ilike.%${term}%,conversation_code.ilike.%${term}%`);
       }
     }
@@ -196,6 +270,14 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
       q = q.lte('customer_service_window_expires_at', new Date().toISOString());
     }
 
+    // Samples filter: restrict conversation IDs at query level
+    if (samplesMatchIds && samplesMatchIds.length > 0) {
+      q = q.in('id', samplesMatchIds);
+    }
+    if (samplesExcludeIds && samplesExcludeIds.length > 0) {
+      q = q.not('id', 'in', `(${samplesExcludeIds.join(',')})`);
+    }
+
     // Apply pagination
     q = q.range(from, to);
 
@@ -203,7 +285,7 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
 
     if (err) {
       console.error('[ConversationsPage] Conversation load failed', err);
-      setError('We couldn’t load conversations right now. Please try again.');
+      setError('We couldn\u2019t load conversations right now. Please try again.');
       setRows([]);
       setTotal(0);
       setLoading(false);
@@ -227,7 +309,6 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
       .select('conversation_id, lead_entry_id')
       .in('conversation_id', conversationIds);
 
-    // Map conversation_id → linked lead IDs
     const convToLeadIds = new Map<string, string[]>();
     for (const br of bridgeRows ?? []) {
       const arr = convToLeadIds.get(br.conversation_id) ?? [];
@@ -235,7 +316,6 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
       convToLeadIds.set(br.conversation_id, arr);
     }
 
-    // Fetch lead details for all linked lead IDs
     const allLeadIds = Array.from(new Set((bridgeRows ?? []).map(br => br.lead_entry_id)));
     const leadMap = new Map<string, { clientName: string | null; company: string | null }>();
 
@@ -251,15 +331,12 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
     }
 
     // ── Step 4: Fetch latest message per conversation ──
-    // We fetch the most recent message for each conversation by querying
-    // whatsapp_messages filtered to our conversation IDs, ordered by
-    // timestamp DESC, then taking the first per conversation_id client-side.
     const { data: recentMessages } = await supabase
       .from('whatsapp_messages')
       .select('conversation_id, message_type, text_body, media_filename, media_mime_type, media_caption, direction, timestamp')
       .in('conversation_id', conversationIds)
       .order('timestamp', { ascending: false })
-      .limit(conversationIds.length * 3); // fetch a few extra in case of duplicates
+      .limit(conversationIds.length * 3);
 
     const latestPerConv = new Map<string, LatestMessage>();
     for (const msg of recentMessages ?? []) {
@@ -277,8 +354,21 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
       }
     }
 
+    // ── Step 4b: Batch-fetch samples_requested for this page's conversations ──
+    const { data: samplesRows } = await supabase
+      .from('samples_requested')
+      .select('conversation_id, status, requested_at')
+      .in('conversation_id', conversationIds);
+
+    const samplesMap = new Map<string, SamplesInfo>();
+    for (const sr of samplesRows ?? []) {
+      samplesMap.set(sr.conversation_id, {
+        status: sr.status,
+        requested_at: sr.requested_at,
+      });
+    }
+
     // ── Step 5: Assemble enriched rows ──
-    // For unmatched/linked filters we need to post-filter since they depend on bridge table
     let enriched: ConversationRow[] = conversations.map(c => {
       const leadIds = convToLeadIds.get(c.id) ?? [];
       const firstLeadId = leadIds[0] ?? null;
@@ -293,6 +383,7 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
           company: leadInfo?.company ?? null,
         },
         latest_message: latestPerConv.get(c.id) ?? null,
+        samples: samplesMap.get(c.id) ?? null,
       };
     });
 
@@ -310,8 +401,8 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
 
   // Fetch on page or filter change
   useEffect(() => {
-    fetchPage(page, activeFilter, searchTerm);
-  }, [page, activeFilter, searchTerm, fetchPage]);
+    fetchPage(page, activeFilter, searchTerm, samplesFilter);
+  }, [page, activeFilter, searchTerm, samplesFilter, fetchPage]);
 
   // Debounced search
   function handleSearchChange(v: string) {
@@ -328,8 +419,14 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
     setPage(0);
   }
 
+  function handleSamplesFilterChange(s: SamplesFilter) {
+    setSamplesFilter(s);
+    setSamplesDropdownOpen(false);
+    setPage(0);
+  }
+
   function handleRefresh() {
-    fetchPage(page, activeFilter, searchTerm);
+    fetchPage(page, activeFilter, searchTerm, samplesFilter);
   }
 
   function clearSearch() {
@@ -341,6 +438,9 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const rangeStart = total === 0 ? 0 : page * PAGE_SIZE + 1;
   const rangeEnd = Math.min((page + 1) * PAGE_SIZE, total);
+
+  const activeSamplesLabel = SAMPLES_FILTER_OPTIONS.find(o => o.value === samplesFilter)?.label ?? 'All';
+  const hasActiveFilters = searchTerm || activeFilter !== 'all' || samplesFilter !== 'all';
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
@@ -382,24 +482,69 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
         )}
       </div>
 
-      {/* Filter tabs */}
-      <div className="flex items-center gap-1.5 mb-4 overflow-x-auto pb-1 -mx-1 px-1">
-        {FILTER_TABS.map(tab => {
-          const active = activeFilter === tab.value;
-          return (
-            <button
-              key={tab.value}
-              onClick={() => handleFilterChange(tab.value)}
-              className={`flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border transition ${
-                active
-                  ? 'bg-stone-800 border-stone-800 text-white'
-                  : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-50'
-              }`}
-            >
-              {tab.label}
-            </button>
-          );
-        })}
+      {/* Filter tabs + Samples dropdown */}
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        {/* Primary filter tabs */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 -mx-1 px-1 flex-1 min-w-0">
+          {FILTER_TABS.map(tab => {
+            const active = activeFilter === tab.value;
+            return (
+              <button
+                key={tab.value}
+                onClick={() => handleFilterChange(tab.value)}
+                className={`flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg border transition ${
+                  active
+                    ? 'bg-stone-800 border-stone-800 text-white'
+                    : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-50'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Samples filter dropdown */}
+        <div ref={samplesDropdownRef} className="relative flex-shrink-0">
+          <button
+            onClick={() => setSamplesDropdownOpen(prev => !prev)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition ${
+              samplesFilter !== 'all'
+                ? 'bg-amber-50 border-amber-300 text-amber-700'
+                : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-50'
+            }`}
+          >
+            <FlaskConical className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Samples:</span>
+            <span className="sm:hidden">Samples</span>
+            <span className="font-semibold">{samplesFilter === 'all' ? 'All' : activeSamplesLabel.replace('Samples ', '')}</span>
+            <ChevronDown className="w-3 h-3" />
+          </button>
+          {samplesDropdownOpen && (
+            <div className="absolute right-0 top-full mt-1 z-30 bg-white border border-stone-200 rounded-xl shadow-lg py-1 min-w-[180px]">
+              {SAMPLES_FILTER_OPTIONS.map(opt => {
+                const active = samplesFilter === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    onClick={() => handleSamplesFilterChange(opt.value)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-left transition ${
+                      active
+                        ? 'bg-stone-100 text-stone-800'
+                        : 'text-stone-600 hover:bg-stone-50'
+                    }`}
+                  >
+                    <FlaskConical className={`w-3.5 h-3.5 ${active ? 'text-amber-600' : 'text-stone-400'}`} />
+                    {opt.label}
+                    {active && (
+                      <span className="ml-auto text-stone-400">✓</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Error state */}
@@ -424,10 +569,10 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
             <Inbox className="w-6 h-6 text-stone-400" />
           </div>
           <h2 className="text-sm font-semibold text-stone-700 mb-1">
-            {searchTerm || activeFilter !== 'all' ? 'No conversations match' : 'No conversations yet'}
+            {hasActiveFilters ? 'No conversations match' : 'No conversations yet'}
           </h2>
           <p className="text-xs text-stone-400 max-w-xs">
-            {searchTerm || activeFilter !== 'all'
+            {hasActiveFilters
               ? 'Try adjusting your search or filters.'
               : 'WhatsApp conversations will appear here once messages are exchanged with leads.'}
           </p>
@@ -446,6 +591,7 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
               const lastMsg = formatDateTime(conv.last_message_at);
               const preview = conv.latest_message ? buildMessagePreview(conv.latest_message) : null;
               const isInbound = conv.latest_message?.direction === 'inbound';
+              const samplesOpen = conv.samples?.status === 'OPEN';
 
               return (
                 <div
@@ -505,6 +651,17 @@ export default function ConversationsPage({ onSelectConversation }: Conversation
                               {linked.company && (
                                 <span className="text-blue-400 font-normal">· {linked.company}</span>
                               )}
+                            </span>
+                          )}
+                          {/* Samples Requested badge — only for OPEN */}
+                          {samplesOpen && (
+                            <span
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-300"
+                              title="Samples Requested — outstanding action needed"
+                            >
+                              <FlaskConical className="w-3 h-3" />
+                              <span className="hidden sm:inline">Samples Requested</span>
+                              <span className="sm:hidden">Samples</span>
                             </span>
                           )}
                         </div>
