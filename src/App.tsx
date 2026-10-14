@@ -42,7 +42,7 @@ interface MobileTab {
 }
 
 const MOBILE_TABS: MobileTab[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-5 h-5" />, adminOnly: true },
+  { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-5 h-5" /> },
   { id: 'leads',     label: 'Leads',     icon: <List className="w-5 h-5" /> },
   { id: 'capture',   label: 'Capture',   icon: <PlusCircle className="w-5 h-5" />, emphasize: true },
   { id: 'queue',          label: 'Queue',         icon: <Layers className="w-5 h-5" /> },
@@ -336,7 +336,7 @@ function Layout() {
 
   const [tab,                setTab]                = useState<Tab>(() => {
     const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'whatsapp_assets', 'followups', 'account'];
-    const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'conversations', 'followups', 'account'];
+    const repTabs: Tab[]   = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'followups', 'account'];
     const allowed = isAdmin ? adminTabs : repTabs;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
     if (saved && allowed.includes(saved)) return saved;
@@ -484,15 +484,13 @@ function Layout() {
             <p className="text-xs text-stone-500">Sales Portal</p>
           </div>
           <nav className="flex items-stretch gap-1">
-            {isAdmin && (
-              <button
-                onClick={() => handleTabChange('dashboard')}
-                className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
-                  ${tab === 'dashboard' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
-              >
-                <LayoutDashboard className="w-4 h-4" /> Dashboard
-              </button>
-            )}
+            <button
+              onClick={() => handleTabChange('dashboard')}
+              className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                ${tab === 'dashboard' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+            >
+              <LayoutDashboard className="w-4 h-4" /> Dashboard
+            </button>
             <button
               onClick={() => handleTabChange('leads')}
               className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
@@ -606,7 +604,7 @@ function Layout() {
           <MyAccountPage onBack={() => handleTabChange(isAdmin ? 'dashboard' : 'capture')} />
         ) : (
           <>
-            {tab === 'dashboard' && isAdmin && !selectedLeadId && (
+            {tab === 'dashboard' && !selectedLeadId && (
               <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} />
             )}
             {tab === 'events' && isAdmin && !selectedLeadId && (

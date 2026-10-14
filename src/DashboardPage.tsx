@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
 import { useAuth } from './AuthContext';
+import { isCloudSyncAllowed } from './authModeState';
 import {
   Users, TrendingUp, Calendar, Clock,
   MessageCircle, AlertCircle, XCircle,
@@ -149,10 +150,68 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
   const [error, setError] = useState('');
   const isAdmin = user?.role === 'admin';
 
-  async function fetchData() {
+  // Stale-response guard: each fetch increments a generation counter. When the
+  // async response returns, it checks whether it's still the current generation
+  // before publishing results. Identity changes and unmounts invalidate by
+  // bumping the generation, so outdated responses are silently discarded.
+  const generationRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const fetchData = useCallback(async () => {
+    // Fail closed: never issue a dashboard read without a valid identity or
+    // when cloud sync is not allowed (offline-restored or unauthenticated).
+    if (!user?.rep_code || !user?.role) {
+      setData(EMPTY);
+      setLoading(false);
+      return;
+    }
+    if (!isCloudSyncAllowed()) {
+      setData(EMPTY);
+      setLoading(false);
+      return;
+    }
+
+    const generation = ++generationRef.current;
     setLoading(true);
     setError('');
 
+    // Try the server-side aggregate RPC first.
+    const { data: rpcData, error: rpcErr } = await supabase.rpc('get_dashboard_metrics');
+
+    // Discard stale responses from superseded fetches or identity changes.
+    if (generation !== generationRef.current || !mountedRef.current) return;
+
+    if (!rpcErr && rpcData) {
+      const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+      setData({
+        total_leads:                  Number(row.total_leads ?? 0),
+        leads_today:                  Number(row.leads_today ?? 0),
+        leads_last_7_days:            Number(row.leads_last_7_days ?? 0),
+        leads_last_30_days:           Number(row.leads_last_30_days ?? 0),
+        whatsapp_sent:                Number(row.whatsapp_sent ?? 0),
+        whatsapp_failed:              Number(row.whatsapp_failed ?? 0),
+        invalid_leads:                Number(row.invalid_leads ?? 0),
+        new_leads:                    Number(row.new_leads ?? 0),
+        contacted_leads:              Number(row.contacted_leads ?? 0),
+        qualified_leads:              Number(row.qualified_leads ?? 0),
+        converted_leads:              Number(row.converted_leads ?? 0),
+        lost_leads:                   Number(row.lost_leads ?? 0),
+        hot_leads:                    Number(row.hot_leads ?? 0),
+        warm_leads:                   Number(row.warm_leads ?? 0),
+        cold_leads:                   Number(row.cold_leads ?? 0),
+        unassigned_temperature_leads: Number(row.unassigned_temperature_leads ?? 0),
+      });
+      setLoading(false);
+      return;
+    }
+
+    // Fallback: client-side aggregation (used until the RPC migration is applied,
+    // or if the RPC is unavailable for any reason).
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
     const d7 = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -166,6 +225,8 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
     }
 
     const { data: rows, error: err } = await q;
+
+    if (generation !== generationRef.current || !mountedRef.current) return;
 
     if (err || !rows) {
       setError('Failed to load dashboard data.');
@@ -203,9 +264,14 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
 
     setData(totals);
     setLoading(false);
-  }
+  }, [user, isAdmin]);
 
-  useEffect(() => { fetchData(); }, [user]);
+  useEffect(() => {
+    // Clear stale data on identity changes, then fetch fresh.
+    setData(EMPTY);
+    generationRef.current++;
+    fetchData();
+  }, [fetchData]);
 
   const funnelTotal = data.total_leads || 1;
 
