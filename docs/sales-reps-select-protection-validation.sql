@@ -238,8 +238,8 @@ DECLARE
 BEGIN
   -- ── 6a: anon ───────────────────────────────────────────────────────────────
   DECLARE
-    v_results text[] := ARRAY[];
-    v_details text[] := ARRAY[];
+    v_results text[] := ARRAY[]::text[];
+    v_details text[] := ARRAY[]::text[];
     v_i int;
   BEGIN
     PERFORM set_config('request.jwt.claim.sub', '', true);
@@ -290,8 +290,8 @@ BEGIN
 
   -- ── 6b: authenticated as admin ─────────────────────────────────────────────
   DECLARE
-    v_results text[] := ARRAY[];
-    v_details text[] := ARRAY[];
+    v_results text[] := ARRAY[]::text[];
+    v_details text[] := ARRAY[]::text[];
     v_i int;
   BEGIN
     PERFORM set_config('request.jwt.claim.sub', v_admin_uid, true);
@@ -344,8 +344,8 @@ BEGIN
 
   -- ── 6c: authenticated as sales_rep ─────────────────────────────────────────
   DECLARE
-    v_results text[] := ARRAY[];
-    v_details text[] := ARRAY[];
+    v_results text[] := ARRAY[]::text[];
+    v_details text[] := ARRAY[]::text[];
     v_i int;
   BEGIN
     PERFORM set_config('request.jwt.claim.sub', v_rep_uid, true);
