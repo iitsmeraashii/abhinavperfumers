@@ -365,8 +365,9 @@ DECLARE
   v_verify_user    text;
   v_verify_uid     text;
   v_sqlstate       text;
-  v_all_passed     boolean;
-  v_expected_count bigint;
+  v_all_passed      boolean;
+  v_expected_count  bigint;
+  v_distinct_count  bigint;
 BEGIN
   -- Load parameters (privileged)
   SELECT val INTO v_admin_uuid     FROM _ids WHERE key = 'admin_uuid';
@@ -386,7 +387,7 @@ BEGIN
     EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_admin_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_admin_uuid)::text);
-    SET ROLE authenticated;
+    SET LOCAL ROLE authenticated;
 
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
@@ -420,7 +421,7 @@ BEGIN
     EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_rep_a_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_rep_a_uuid)::text);
-    SET ROLE authenticated;
+    SET LOCAL ROLE authenticated;
 
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
@@ -460,7 +461,7 @@ BEGIN
     EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_rep_b_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_rep_b_uuid)::text);
-    SET ROLE authenticated;
+    SET LOCAL ROLE authenticated;
 
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
@@ -500,7 +501,7 @@ BEGIN
     EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_rep_a_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_rep_a_uuid)::text);
-    SET ROLE authenticated;
+    SET LOCAL ROLE authenticated;
 
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
@@ -537,7 +538,7 @@ BEGIN
     EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_rep_b_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_rep_b_uuid)::text);
-    SET ROLE authenticated;
+    SET LOCAL ROLE authenticated;
 
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
@@ -577,7 +578,7 @@ BEGIN
   BEGIN
     EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', '');
     EXECUTE format('SET LOCAL request.jwt.claims = %L', '{}');
-    SET ROLE anon;
+    SET LOCAL ROLE anon;
 
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
@@ -625,7 +626,7 @@ BEGIN
     EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_no_profile);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_no_profile)::text);
-    SET ROLE authenticated;
+    SET LOCAL ROLE authenticated;
 
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
@@ -658,7 +659,7 @@ BEGIN
   -- PASS only when exactly one result exists for each of the seven expected
   -- test names and every one is PASS.
   SELECT count(*), count(DISTINCT test_name), bool_and(result = 'PASS')
-    INTO v_expected_count, v_all_passed, v_all_passed
+    INTO v_expected_count, v_distinct_count, v_all_passed
   FROM _results
   WHERE test_name IN (
     'admin_sees_all',
@@ -670,7 +671,9 @@ BEGIN
     'no_profile_user'
   );
 
-  IF v_expected_count <> 7 OR v_all_passed IS NULL OR NOT v_all_passed THEN
+  IF v_expected_count <> 7
+     OR v_distinct_count <> 7
+     OR COALESCE(v_all_passed, false) <> true THEN
     v_all_passed := false;
   END IF;
 
