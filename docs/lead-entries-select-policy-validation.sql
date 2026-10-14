@@ -1,7 +1,7 @@
 -- ============================================================================
 -- PRODUCTION VALIDATION SCRIPT — REVIEW ONLY. DO NOT EXECUTE.
 -- File: docs/lead-entries-select-policy-validation.sql
--- Date: 2026-10-14 (revised)
+-- Date: 2026-10-14 (revised — temp-table privilege fix)
 --
 -- PURPOSE:
 --   Validates the proposed lead_entries SELECT policies (from
@@ -22,6 +22,23 @@
 --   - No changes to auth.users or sales_representatives.
 --   - Output contains only PASS/FAIL/INFO labels, counts, and SQLSTATEs —
 --     no names, emails, UUIDs, tokens, passwords, or lead contents.
+--
+-- CRITICAL DESIGN NOTE (temp-table privilege isolation):
+--   The _results and _ids temp tables are owned by the postgres / SQL Editor
+--   role that creates them.  The authenticated and anon roles do NOT have
+--   any privileges on these tables.  Therefore, every INSERT into _results
+--   MUST occur while the session has been restored to the privileged role
+--   (after RESET ROLE).  Each test follows this strict sequence:
+--     1. Load parameters while privileged.
+--     2. Set transaction-local JWT identity settings and SET ROLE.
+--     3. Verify effective role and auth.uid() match the intended identity
+--        (anon must have NULL auth.uid()).
+--     4. Run ONLY the lead_entries access checks under the impersonated role.
+--     5. Store outcomes in PL/pgSQL local variables.
+--     6. Restore the privileged role (RESET ROLE) and clear identity settings.
+--     7. Only then INSERT the result into _results.
+--   No INSERT into _results ever occurs while impersonating authenticated
+--   or anon.  No grants on temp tables are issued to those roles.
 --
 -- PREREQUISITES:
 --   - Run as the postgres / SQL Editor role (BYPASSRLS, can SET ROLE).
@@ -58,18 +75,17 @@
 -- HOW ROLE / JWT IMPERSONATION AND VERIFICATION WORK:
 --   PostgreSQL SET ROLE changes the current user for the session.  Within a
 --   transaction that ends with ROLLBACK, the role change is automatically
---   undone.  Supabase's auth.uid() reads the JWT subject from the
---   request.jwt.claims GUC.  By setting this GUC with SET LOCAL
---   (transaction-scoped) to a JSON object containing a "sub" field, then
---   SET ROLE authenticated, subsequent queries execute as that authenticated
---   user with RLS policies applied.  The combination tests actual RLS
---   enforcement — not merely the policy definition.
+--   undone.  Supabase's auth.uid() reads the JWT subject from both the
+--   request.jwt.claim.sub GUC (single value) and the request.jwt.claims
+--   GUC (JSON object with a "sub" key).  Both are set with SET LOCAL
+--   (transaction-scoped) before each test and explicitly cleared after.
 --
---   Before each access test, the script verifies the impersonation by checking
---   current_user and auth.uid() against the intended identity.  If either
---   does not match, the test is recorded as FAIL and the access query is not
---   executed.  This catches impersonation setup failures that would otherwise
---   produce misleading PASS/FAIL results.
+--   Before each access test, the script verifies the impersonation by
+--   checking current_user and auth.uid() against the expected identity.
+--   For anon, auth.uid() must be NULL.  If verification fails, the test
+--   records FAIL and the access query is not executed.  Impersonation
+--   failure details use generic labels — no UUIDs or user values are
+--   disclosed.
 --
 -- HOW BASELINE COMPARISONS WORK:
 --   Before installing the new policies, the script records the total lead
@@ -90,6 +106,10 @@
 --     aborts immediately.  No policies are changed.  The final ROLLBACK
 --     is a no-op (transaction already aborted) but is still required
 --     syntax to close the block.
+--   - If the outer exception handler of any test fires (role-switch failure,
+--     identity-verification failure, etc.), the result is ALWAYS FAIL.
+--     Only the inner nested exception block for the anon lead_entries read
+--     can produce a PASS from insufficient_privilege (42501).
 --
 -- WHAT THIS VERIFIES:
 --   1. Active/login-enabled admin sees exactly the baseline total count.
@@ -103,17 +123,8 @@
 --   6. The generated no-profile UUID is verified to have no matching
 --      sales_representatives profile before the test runs.
 --   7. Baseline counts are consistent across all checks (REPEATABLE READ).
---   8. An explicit overall PASS is returned only when every required test
---      ran and passed.
---
---   Note on Test 7 (no-profile user): The script generates a random UUID
---   with gen_random_uuid() and explicitly verifies it matches no
---   sales_representatives.auth_user_id.  From the RLS policy's perspective
---   this is functionally identical to a real auth.user without a profile:
---   auth.uid() returns a UUID, the EXISTS checks
---   sales_representatives.auth_user_id = auth.uid(), and no row matches.
---   The policy never consults auth.users.  This avoids dependency on
---   finding a real no-profile user and avoids exposing any real user data.
+--   8. An explicit overall PASS is returned only when exactly one result
+--      exists for each of the seven expected test names and all are PASS.
 --
 -- WHAT STILL REQUIRES POST-APPLICATION WORKFLOW TESTING:
 --   This script tests ONLY the SELECT path under RLS.  The following
@@ -140,6 +151,7 @@ SET LOCAL statement_timeout = '15s';
 SET LOCAL idle_in_transaction_session_timeout = '30s';
 
 -- ─── Temp tables (transaction-scoped, destroyed on ROLLBACK) ────────────────
+-- Owned by the privileged SQL Editor role.  No grants to authenticated/anon.
 
 CREATE TEMP TABLE _results (
   seq serial PRIMARY KEY,
@@ -171,7 +183,6 @@ DECLARE
   v_baseline_b     bigint;
   v_profile_check  bigint;
 BEGIN
-  -- Find one active / login-enabled admin
   SELECT sr.auth_user_id::text
     INTO v_admin_uuid
   FROM public.sales_representatives sr
@@ -187,7 +198,6 @@ BEGIN
 
   INSERT INTO _ids (key, val) VALUES ('admin_uuid', v_admin_uuid);
 
-  -- Find rep A: active / login-enabled sales_rep with the most assigned leads
   SELECT sr.auth_user_id::text, sr.rep_code
     INTO v_rep_a_uuid, v_rep_a_code
   FROM public.sales_representatives sr
@@ -213,7 +223,6 @@ BEGIN
   INSERT INTO _ids (key, val) VALUES ('rep_a_uuid', v_rep_a_uuid);
   INSERT INTO _ids (key, val) VALUES ('rep_a_code', v_rep_a_code);
 
-  -- Find rep B: distinct rep_code, also active / login-enabled with leads
   SELECT sr.auth_user_id::text, sr.rep_code
     INTO v_rep_b_uuid, v_rep_b_code
   FROM public.sales_representatives sr
@@ -240,7 +249,6 @@ BEGIN
   INSERT INTO _ids (key, val) VALUES ('rep_b_uuid', v_rep_b_uuid);
   INSERT INTO _ids (key, val) VALUES ('rep_b_code', v_rep_b_code);
 
-  -- Pick one lead ID per rep for cross-rep denial tests
   SELECT le.id::text
     INTO v_rep_a_lead_id
   FROM public.lead_entries le
@@ -260,8 +268,6 @@ BEGIN
   INSERT INTO _ids (key, val) VALUES ('rep_a_lead_id', v_rep_a_lead_id);
   INSERT INTO _ids (key, val) VALUES ('rep_b_lead_id', v_rep_b_lead_id);
 
-  -- Generate a random UUID for the no-profile test.
-  -- Verify it matches no sales_representatives.auth_user_id.
   v_no_profile := gen_random_uuid();
 
   SELECT count(*) INTO v_profile_check
@@ -269,13 +275,11 @@ BEGIN
   WHERE sr.auth_user_id = v_no_profile;
 
   IF v_profile_check > 0 THEN
-    -- Astronomically unlikely, but abort rather than weaken the test.
     RAISE EXCEPTION 'ABORT: Generated no-profile UUID unexpectedly matches a sales_representatives row';
   END IF;
 
   INSERT INTO _ids (key, val) VALUES ('no_profile_uuid', v_no_profile::text);
 
-  -- Record baseline counts (as privileged role, BYPASSRLS)
   SELECT count(*) INTO v_baseline_total FROM public.lead_entries;
   SELECT count(*) INTO v_baseline_a
     FROM public.lead_entries WHERE sales_rep_code = v_rep_a_code;
@@ -329,17 +333,18 @@ CREATE POLICY "Sales rep can see own leads"
 
 REVOKE SELECT ON public.lead_entries FROM anon;
 
--- ─── Phase 3: RLS tests via SET LOCAL ROLE + SET LOCAL JWT claims ───────────
--- Each test:
---   1. SET LOCAL request.jwt.claims with the identity's sub
---   2. SET ROLE <target role>
---   3. Verify current_user and auth.uid() match the intended identity
---   4. Execute the access query
---   5. RESET ROLE and clear JWT claims
--- Exception handlers ensure RESET ROLE runs even if the query fails.
+-- ─── Phase 3: RLS tests ─────────────────────────────────────────────────────
+-- Strict sequence per test:
+--   1. Set JWT identity (request.jwt.claim.sub + request.jwt.claims) and SET ROLE
+--   2. Verify current_user and auth.uid()
+--   3. Run ONLY lead_entries access checks; store results in local variables
+--   4. RESET ROLE and clear JWT identity
+--   5. INSERT into _results (privileged — never while impersonating)
+-- Outer EXCEPTION: always FAIL (role-switch/verification/restore errors).
 
 DO $$
 DECLARE
+  -- Parameters (loaded while privileged)
   v_admin_uuid     text;
   v_rep_a_uuid     text;
   v_rep_b_uuid     text;
@@ -351,17 +356,19 @@ DECLARE
   v_baseline_total text;
   v_baseline_a     text;
   v_baseline_b     text;
+
+  -- Per-test working variables
+  v_result         text;
+  v_detail         text;
   v_count          bigint;
   v_foreign_count  bigint;
   v_verify_user    text;
   v_verify_uid     text;
-  v_expected_uid   text;
-  v_expected_role  text;
   v_sqlstate       text;
-  v_anon_ok        boolean := false;
-  v_all_passed     boolean := true;
+  v_all_passed     boolean;
+  v_expected_count bigint;
 BEGIN
-  -- Load test parameters
+  -- Load parameters (privileged)
   SELECT val INTO v_admin_uuid     FROM _ids WHERE key = 'admin_uuid';
   SELECT val INTO v_rep_a_uuid     FROM _ids WHERE key = 'rep_a_uuid';
   SELECT val INTO v_rep_b_uuid     FROM _ids WHERE key = 'rep_b_uuid';
@@ -376,316 +383,304 @@ BEGIN
 
   -- ── Test 1: Admin sees all leads ──────────────────────────────────────────
   BEGIN
-    v_expected_uid  := v_admin_uuid;
-    v_expected_role := 'authenticated';
-
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_admin_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_admin_uuid)::text);
     SET ROLE authenticated;
 
-    -- Verify impersonation
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
 
-    IF v_verify_user <> v_expected_role OR v_verify_uid IS DISTINCT FROM v_expected_uid THEN
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'admin_sees_all', 'FAIL',
-        'impersonation_failed: current_user=' || coalesce(v_verify_user, 'NULL') ||
-        ' auth.uid=' || coalesce(v_verify_uid, 'NULL')
-      );
+    IF v_verify_user <> 'authenticated' OR v_verify_uid IS DISTINCT FROM v_admin_uuid THEN
+      v_result := 'FAIL';
+      v_detail := 'impersonation_failed';
     ELSE
       EXECUTE 'SELECT count(*) FROM public.lead_entries' INTO v_count;
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'admin_sees_all',
-        CASE WHEN v_count::text = v_baseline_total THEN 'PASS' ELSE 'FAIL' END,
-        'count=' || v_count::text || ' baseline=' || v_baseline_total
-      );
+      v_result := CASE WHEN v_count::text = v_baseline_total THEN 'PASS' ELSE 'FAIL' END;
+      v_detail := 'count=' || v_count::text || ' baseline=' || v_baseline_total;
     END IF;
 
     RESET ROLE;
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', '');
     EXECUTE format('SET LOCAL request.jwt.claims = %L', '');
+
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('admin_sees_all', v_result, v_detail);
   EXCEPTION WHEN OTHERS THEN
     BEGIN RESET ROLE; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     BEGIN EXECUTE format('SET LOCAL request.jwt.claims = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     v_sqlstate := SQLSTATE;
-    INSERT INTO _results (test_name, result, detail) VALUES (
-      'admin_sees_all', 'FAIL', 'SQLSTATE=' || v_sqlstate
-    );
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('admin_sees_all', 'FAIL', 'SQLSTATE=' || v_sqlstate);
   END;
 
   -- ── Test 2: Rep A sees only own leads ─────────────────────────────────────
   BEGIN
-    v_expected_uid  := v_rep_a_uuid;
-    v_expected_role := 'authenticated';
-
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_rep_a_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_rep_a_uuid)::text);
     SET ROLE authenticated;
 
-    -- Verify impersonation
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
 
-    IF v_verify_user <> v_expected_role OR v_verify_uid IS DISTINCT FROM v_expected_uid THEN
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'rep_a_own_leads', 'FAIL',
-        'impersonation_failed: current_user=' || coalesce(v_verify_user, 'NULL') ||
-        ' auth.uid=' || coalesce(v_verify_uid, 'NULL')
-      );
+    IF v_verify_user <> 'authenticated' OR v_verify_uid IS DISTINCT FROM v_rep_a_uuid THEN
+      v_result := 'FAIL';
+      v_detail := 'impersonation_failed';
     ELSE
       EXECUTE 'SELECT count(*) FROM public.lead_entries' INTO v_count;
-      -- Also assert zero rows with a foreign rep_code
       EXECUTE format(
         'SELECT count(*) FROM public.lead_entries WHERE sales_rep_code IS DISTINCT FROM %L',
         v_rep_a_code
       ) INTO v_foreign_count;
-
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'rep_a_own_leads',
-        CASE WHEN v_count::text = v_baseline_a AND v_foreign_count = 0 THEN 'PASS' ELSE 'FAIL' END,
-        'count=' || v_count::text || ' baseline=' || v_baseline_a ||
-        ' foreign_rows=' || v_foreign_count::text
-      );
+      v_result := CASE WHEN v_count::text = v_baseline_a AND v_foreign_count = 0
+                       THEN 'PASS' ELSE 'FAIL' END;
+      v_detail := 'count=' || v_count::text || ' baseline=' || v_baseline_a ||
+                  ' foreign_rows=' || v_foreign_count::text;
     END IF;
 
     RESET ROLE;
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', '');
     EXECUTE format('SET LOCAL request.jwt.claims = %L', '');
+
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('rep_a_own_leads', v_result, v_detail);
   EXCEPTION WHEN OTHERS THEN
     BEGIN RESET ROLE; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     BEGIN EXECUTE format('SET LOCAL request.jwt.claims = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     v_sqlstate := SQLSTATE;
-    INSERT INTO _results (test_name, result, detail) VALUES (
-      'rep_a_own_leads', 'FAIL', 'SQLSTATE=' || v_sqlstate
-    );
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('rep_a_own_leads', 'FAIL', 'SQLSTATE=' || v_sqlstate);
   END;
 
   -- ── Test 3: Rep B sees only own leads ─────────────────────────────────────
   BEGIN
-    v_expected_uid  := v_rep_b_uuid;
-    v_expected_role := 'authenticated';
-
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_rep_b_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_rep_b_uuid)::text);
     SET ROLE authenticated;
 
-    -- Verify impersonation
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
 
-    IF v_verify_user <> v_expected_role OR v_verify_uid IS DISTINCT FROM v_expected_uid THEN
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'rep_b_own_leads', 'FAIL',
-        'impersonation_failed: current_user=' || coalesce(v_verify_user, 'NULL') ||
-        ' auth.uid=' || coalesce(v_verify_uid, 'NULL')
-      );
+    IF v_verify_user <> 'authenticated' OR v_verify_uid IS DISTINCT FROM v_rep_b_uuid THEN
+      v_result := 'FAIL';
+      v_detail := 'impersonation_failed';
     ELSE
       EXECUTE 'SELECT count(*) FROM public.lead_entries' INTO v_count;
-      -- Also assert zero rows with a foreign rep_code
       EXECUTE format(
         'SELECT count(*) FROM public.lead_entries WHERE sales_rep_code IS DISTINCT FROM %L',
         v_rep_b_code
       ) INTO v_foreign_count;
-
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'rep_b_own_leads',
-        CASE WHEN v_count::text = v_baseline_b AND v_foreign_count = 0 THEN 'PASS' ELSE 'FAIL' END,
-        'count=' || v_count::text || ' baseline=' || v_baseline_b ||
-        ' foreign_rows=' || v_foreign_count::text
-      );
+      v_result := CASE WHEN v_count::text = v_baseline_b AND v_foreign_count = 0
+                       THEN 'PASS' ELSE 'FAIL' END;
+      v_detail := 'count=' || v_count::text || ' baseline=' || v_baseline_b ||
+                  ' foreign_rows=' || v_foreign_count::text;
     END IF;
 
     RESET ROLE;
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', '');
     EXECUTE format('SET LOCAL request.jwt.claims = %L', '');
+
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('rep_b_own_leads', v_result, v_detail);
   EXCEPTION WHEN OTHERS THEN
     BEGIN RESET ROLE; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     BEGIN EXECUTE format('SET LOCAL request.jwt.claims = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     v_sqlstate := SQLSTATE;
-    INSERT INTO _results (test_name, result, detail) VALUES (
-      'rep_b_own_leads', 'FAIL', 'SQLSTATE=' || v_sqlstate
-    );
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('rep_b_own_leads', 'FAIL', 'SQLSTATE=' || v_sqlstate);
   END;
 
   -- ── Test 4: Rep A cannot read Rep B's lead by ID ──────────────────────────
   BEGIN
-    v_expected_uid  := v_rep_a_uuid;
-    v_expected_role := 'authenticated';
-
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_rep_a_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_rep_a_uuid)::text);
     SET ROLE authenticated;
 
-    -- Verify impersonation
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
 
-    IF v_verify_user <> v_expected_role OR v_verify_uid IS DISTINCT FROM v_expected_uid THEN
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'rep_a_cannot_read_rep_b_lead', 'FAIL',
-        'impersonation_failed: current_user=' || coalesce(v_verify_user, 'NULL') ||
-        ' auth.uid=' || coalesce(v_verify_uid, 'NULL')
-      );
+    IF v_verify_user <> 'authenticated' OR v_verify_uid IS DISTINCT FROM v_rep_a_uuid THEN
+      v_result := 'FAIL';
+      v_detail := 'impersonation_failed';
     ELSE
       EXECUTE format(
         'SELECT count(*) FROM public.lead_entries WHERE id = %L::uuid',
         v_rep_b_lead_id
       ) INTO v_count;
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'rep_a_cannot_read_rep_b_lead',
-        CASE WHEN v_count = 0 THEN 'PASS' ELSE 'FAIL' END,
-        'rows_visible=' || v_count::text
-      );
+      v_result := CASE WHEN v_count = 0 THEN 'PASS' ELSE 'FAIL' END;
+      v_detail := 'rows_visible=' || v_count::text;
     END IF;
 
     RESET ROLE;
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', '');
     EXECUTE format('SET LOCAL request.jwt.claims = %L', '');
+
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('rep_a_cannot_read_rep_b_lead', v_result, v_detail);
   EXCEPTION WHEN OTHERS THEN
     BEGIN RESET ROLE; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     BEGIN EXECUTE format('SET LOCAL request.jwt.claims = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     v_sqlstate := SQLSTATE;
-    INSERT INTO _results (test_name, result, detail) VALUES (
-      'rep_a_cannot_read_rep_b_lead', 'FAIL', 'SQLSTATE=' || v_sqlstate
-    );
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('rep_a_cannot_read_rep_b_lead', 'FAIL', 'SQLSTATE=' || v_sqlstate);
   END;
 
   -- ── Test 5: Rep B cannot read Rep A's lead by ID ──────────────────────────
   BEGIN
-    v_expected_uid  := v_rep_b_uuid;
-    v_expected_role := 'authenticated';
-
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_rep_b_uuid);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_rep_b_uuid)::text);
     SET ROLE authenticated;
 
-    -- Verify impersonation
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
 
-    IF v_verify_user <> v_expected_role OR v_verify_uid IS DISTINCT FROM v_expected_uid THEN
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'rep_b_cannot_read_rep_a_lead', 'FAIL',
-        'impersonation_failed: current_user=' || coalesce(v_verify_user, 'NULL') ||
-        ' auth.uid=' || coalesce(v_verify_uid, 'NULL')
-      );
+    IF v_verify_user <> 'authenticated' OR v_verify_uid IS DISTINCT FROM v_rep_b_uuid THEN
+      v_result := 'FAIL';
+      v_detail := 'impersonation_failed';
     ELSE
       EXECUTE format(
         'SELECT count(*) FROM public.lead_entries WHERE id = %L::uuid',
         v_rep_a_lead_id
       ) INTO v_count;
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'rep_b_cannot_read_rep_a_lead',
-        CASE WHEN v_count = 0 THEN 'PASS' ELSE 'FAIL' END,
-        'rows_visible=' || v_count::text
-      );
+      v_result := CASE WHEN v_count = 0 THEN 'PASS' ELSE 'FAIL' END;
+      v_detail := 'rows_visible=' || v_count::text;
     END IF;
 
     RESET ROLE;
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', '');
     EXECUTE format('SET LOCAL request.jwt.claims = %L', '');
+
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('rep_b_cannot_read_rep_a_lead', v_result, v_detail);
   EXCEPTION WHEN OTHERS THEN
     BEGIN RESET ROLE; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     BEGIN EXECUTE format('SET LOCAL request.jwt.claims = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     v_sqlstate := SQLSTATE;
-    INSERT INTO _results (test_name, result, detail) VALUES (
-      'rep_b_cannot_read_rep_a_lead', 'FAIL', 'SQLSTATE=' || v_sqlstate
-    );
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('rep_b_cannot_read_rep_a_lead', 'FAIL', 'SQLSTATE=' || v_sqlstate);
   END;
 
   -- ── Test 6: Anon denial ──────────────────────────────────────────────────
-  -- Always execute an actual read under role anon.  Acceptable outcomes:
-  --   (a) insufficient_privilege (SQLSTATE 42501) from the read query
-  --   (b) 0 rows returned from the read query
-  -- Any other error or any rows returned is FAIL.
+  -- Only the actual lead_entries SELECT is in a nested exception block.
+  -- insufficient_privilege (42501) from that read is the only acceptable
+  -- exception.  All other errors (role-switch, verification, restore, etc.)
+  -- are caught by the outer handler and are always FAIL.
   BEGIN
-    v_expected_role := 'anon';
-
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', '');
     EXECUTE format('SET LOCAL request.jwt.claims = %L', '{}');
     SET ROLE anon;
 
-    -- Verify impersonation
     SELECT current_user INTO v_verify_user;
+    EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
 
-    IF v_verify_user <> v_expected_role THEN
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'anon_denial', 'FAIL',
-        'impersonation_failed: current_user=' || coalesce(v_verify_user, 'NULL')
-      );
+    IF v_verify_user <> 'anon' OR v_verify_uid IS NOT NULL THEN
+      v_result := 'FAIL';
+      v_detail := 'impersonation_failed';
     ELSE
-      -- Execute the actual read.  No has_table_privilege shortcut.
-      EXECUTE 'SELECT count(*) FROM public.lead_entries' INTO v_count;
-      v_anon_ok := (v_count = 0);
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'anon_denial',
-        CASE WHEN v_anon_ok THEN 'PASS' ELSE 'FAIL' END,
-        'rows_visible=' || v_count::text
-      );
+      -- Nested block: ONLY the lead_entries read is here.
+      -- 42501 is acceptable (PASS).  Any other error is FAIL.
+      BEGIN
+        EXECUTE 'SELECT count(*) FROM public.lead_entries' INTO v_count;
+        v_result := CASE WHEN v_count = 0 THEN 'PASS' ELSE 'FAIL' END;
+        v_detail := 'rows_visible=' || v_count::text;
+      EXCEPTION
+        WHEN insufficient_privilege THEN
+          v_result := 'PASS';
+          v_detail := 'insufficient_privilege (42501)';
+        WHEN OTHERS THEN
+          v_result := 'FAIL';
+          v_detail := 'SQLSTATE=' || SQLSTATE;
+      END;
     END IF;
 
     RESET ROLE;
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', '');
     EXECUTE format('SET LOCAL request.jwt.claims = %L', '');
-  EXCEPTION
-    WHEN insufficient_privilege THEN
-      BEGIN RESET ROLE; EXCEPTION WHEN OTHERS THEN NULL; END;
-      BEGIN EXECUTE format('SET LOCAL request.jwt.claims = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'anon_denial', 'PASS', 'insufficient_privilege (42501)'
-      );
-    WHEN OTHERS THEN
-      BEGIN RESET ROLE; EXCEPTION WHEN OTHERS THEN NULL; END;
-      BEGIN EXECUTE format('SET LOCAL request.jwt.claims = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
-      v_sqlstate := SQLSTATE;
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'anon_denial', 'FAIL', 'SQLSTATE=' || v_sqlstate
-      );
+
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('anon_denial', v_result, v_detail);
+  EXCEPTION WHEN OTHERS THEN
+    -- Role-switch, identity-verification, or restore errors.
+    -- These must NEVER be PASS.
+    BEGIN RESET ROLE; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN EXECUTE format('SET LOCAL request.jwt.claims = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
+    v_sqlstate := SQLSTATE;
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('anon_denial', 'FAIL', 'SQLSTATE=' || v_sqlstate);
   END;
 
   -- ── Test 7: Authenticated identity with no rep profile ───────────────────
   -- Requires a successful query returning zero rows.  Any exception is FAIL.
   BEGIN
-    v_expected_uid  := v_no_profile;
-    v_expected_role := 'authenticated';
-
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', v_no_profile);
     EXECUTE format('SET LOCAL request.jwt.claims = %L',
       json_build_object('sub', v_no_profile)::text);
     SET ROLE authenticated;
 
-    -- Verify impersonation
     SELECT current_user INTO v_verify_user;
     EXECUTE 'SELECT auth.uid()::text' INTO v_verify_uid;
 
-    IF v_verify_user <> v_expected_role OR v_verify_uid IS DISTINCT FROM v_expected_uid THEN
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'no_profile_user', 'FAIL',
-        'impersonation_failed: current_user=' || coalesce(v_verify_user, 'NULL') ||
-        ' auth.uid=' || coalesce(v_verify_uid, 'NULL')
-      );
+    IF v_verify_user <> 'authenticated' OR v_verify_uid IS DISTINCT FROM v_no_profile THEN
+      v_result := 'FAIL';
+      v_detail := 'impersonation_failed';
     ELSE
       EXECUTE 'SELECT count(*) FROM public.lead_entries' INTO v_count;
-      INSERT INTO _results (test_name, result, detail) VALUES (
-        'no_profile_user',
-        CASE WHEN v_count = 0 THEN 'PASS' ELSE 'FAIL' END,
-        'rows_visible=' || v_count::text
-      );
+      v_result := CASE WHEN v_count = 0 THEN 'PASS' ELSE 'FAIL' END;
+      v_detail := 'rows_visible=' || v_count::text;
     END IF;
 
     RESET ROLE;
+    EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', '');
     EXECUTE format('SET LOCAL request.jwt.claims = %L', '');
+
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('no_profile_user', v_result, v_detail);
   EXCEPTION WHEN OTHERS THEN
     BEGIN RESET ROLE; EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN EXECUTE format('SET LOCAL request.jwt.claim.sub = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     BEGIN EXECUTE format('SET LOCAL request.jwt.claims = %L', ''); EXCEPTION WHEN OTHERS THEN NULL; END;
     v_sqlstate := SQLSTATE;
-    INSERT INTO _results (test_name, result, detail) VALUES (
-      'no_profile_user', 'FAIL', 'SQLSTATE=' || v_sqlstate
-    );
+    INSERT INTO _results (test_name, result, detail)
+      VALUES ('no_profile_user', 'FAIL', 'SQLSTATE=' || v_sqlstate);
   END;
 
   -- ── Overall verdict ───────────────────────────────────────────────────────
-  SELECT bool_and(result = 'PASS') INTO v_all_passed
+  -- PASS only when exactly one result exists for each of the seven expected
+  -- test names and every one is PASS.
+  SELECT count(*), count(DISTINCT test_name), bool_and(result = 'PASS')
+    INTO v_expected_count, v_all_passed, v_all_passed
   FROM _results
-  WHERE result IN ('PASS', 'FAIL');
+  WHERE test_name IN (
+    'admin_sees_all',
+    'rep_a_own_leads',
+    'rep_b_own_leads',
+    'rep_a_cannot_read_rep_b_lead',
+    'rep_b_cannot_read_rep_a_lead',
+    'anon_denial',
+    'no_profile_user'
+  );
+
+  IF v_expected_count <> 7 OR v_all_passed IS NULL OR NOT v_all_passed THEN
+    v_all_passed := false;
+  END IF;
 
   INSERT INTO _results (test_name, result, detail) VALUES (
     'overall',
     CASE WHEN v_all_passed THEN 'PASS' ELSE 'FAIL' END,
-    CASE WHEN v_all_passed THEN 'all tests passed' ELSE 'one or more tests failed' END
+    CASE WHEN v_all_passed
+         THEN 'all 7 tests passed'
+         ELSE 'tests_run=' || coalesce(v_expected_count::text, '0') || ' expected=7'
+    END
   );
 END $$;
 
