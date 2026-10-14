@@ -95,8 +95,11 @@ export function getTodayIso(now: Date = new Date()): string {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
 }
 
+const SUPPORTED_ROLES = new Set(['admin', 'sales_rep']);
+
 export function identityKey(user: { authUserId?: string; rep_code: string; role: string } | null): string | null {
   if (!user?.authUserId || !user?.role) return null;
+  if (!SUPPORTED_ROLES.has(user.role)) return null;
   if (user.role === 'sales_rep' && !user.rep_code) return null;
   return `${user.authUserId}|${user.role}|${user.rep_code}`;
 }

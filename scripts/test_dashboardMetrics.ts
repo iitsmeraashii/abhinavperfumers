@@ -27,6 +27,7 @@ import {
 import { __setRpcHandler, __resetRpcHandler } from './test_dashboard_stub_supabase';
 import { setAuthModeState } from './test_dashboard_stub_authMode';
 import { __setTransportOnline } from './test_dashboard_stub_connectivity';
+import { DashboardWiringHarness } from './test_dashboard_wiring';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -578,6 +579,254 @@ async function main(): Promise<void> {
 
   assert(EMPTY_DASHBOARD.total_leads === 0, 'total_leads = 0');
   assert(Object.values(EMPTY_DASHBOARD).every(v => v === 0), 'all fields are 0');
+
+  // ═══ Section 16: identityKey — unsupported roles ═══════════════════════════
+
+  console.log('\n--- identityKey: unsupported roles ---');
+
+  assert(identityKey({ authUserId: 'x', role: 'super_admin', rep_code: 'SA' }) === null, 'super_admin → null');
+  assert(identityKey({ authUserId: 'x', role: 'manager', rep_code: 'M' }) === null, 'manager → null');
+  assert(identityKey({ authUserId: 'x', role: 'viewer', rep_code: 'V' }) === null, 'viewer → null');
+  assert(identityKey({ authUserId: 'x', role: 'guest', rep_code: 'G' }) === null, 'guest → null');
+  assert(identityKey({ authUserId: 'x', role: 'support', rep_code: 'S' }) === null, 'support → null');
+  assert(identityKey({ authUserId: 'x', role: 'admin', rep_code: 'A' }) !== null, 'admin still accepted');
+  assert(identityKey({ authUserId: 'x', role: 'sales_rep', rep_code: 'R' }) !== null, 'sales_rep still accepted');
+
+  console.log('TEST: unsupported role → no RPC');
+  {
+    setAuthorized();
+    let rpcCalled = false;
+    __setRpcHandler(async () => { rpcCalled = true; return { data: VALID_METRICS, error: null }; });
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(identityKey({ authUserId: 'x', role: 'super_admin', rep_code: 'SA' }));
+    assert(result.kind === 'error', 'unsupported role → error (not RPC)');
+    assert((result as { message: string }).message === ERR_SIGN_IN, 'unsupported role → sign-in required');
+    assert(!rpcCalled, 'RPC never called for unsupported role');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 17: Lifecycle wiring — StrictMode ═══════════════════════════════
+
+  console.log('\n--- Lifecycle wiring: StrictMode ---');
+
+  console.log('TEST: StrictMode setup→cleanup→setup → successful loading');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: VALID_METRICS, error: null }));
+    const harness = new DashboardWiringHarness();
+    harness.setUser({ authUserId: 'auth-admin', role: 'admin', rep_code: 'ADMIN' });
+    harness.setAuthMode('online');
+    harness.setIsOnline(true);
+
+    // Simulate StrictMode: setup → cleanup → setup
+    harness.strictModeCycle();
+    await flushPromises();
+
+    const s = harness.state;
+    assert(!s.showLoading, 'StrictMode: not loading after setup→cleanup→setup');
+    assert(!s.showError, 'StrictMode: no error after setup→cleanup→setup');
+    assert(s.displayData.total_leads === 100, 'StrictMode: shows metrics = 100 after cycle');
+    assert(s.dataIdentity === 'auth-admin|admin|ADMIN', 'StrictMode: data identity set correctly');
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: StrictMode cleanup does not permanently unmount loader');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: VALID_METRICS, error: null }));
+    const harness = new DashboardWiringHarness();
+    harness.setUser({ authUserId: 'auth-admin', role: 'admin', rep_code: 'ADMIN' });
+    harness.setAuthMode('online');
+    harness.setIsOnline(true);
+
+    // First cycle
+    harness.triggerEffect();
+    await flushPromises();
+    assert(harness.state.displayData.total_leads === 100, 'first setup loads data');
+
+    // StrictMode cleanup then re-setup
+    harness.cleanup();
+    harness.triggerEffect();
+    await flushPromises();
+    assert(harness.state.displayData.total_leads === 100, 're-setup after cleanup loads data');
+    assert(!harness.state.showLoading, 're-setup not stuck loading');
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 18: Lifecycle wiring — Retry ═══════════════════════════════════
+
+  console.log('\n--- Lifecycle wiring: Retry ---');
+
+  console.log('TEST: RPC error → Retry → success → metrics visible');
+  {
+    setAuthorized();
+    const harness = new DashboardWiringHarness();
+    harness.setUser({ authUserId: 'auth-admin', role: 'admin', rep_code: 'ADMIN' });
+    harness.setAuthMode('online');
+    harness.setIsOnline(true);
+
+    // First: RPC error
+    __setRpcHandler(async () => ({ data: null, error: { message: 'function missing' } }));
+    harness.triggerEffect();
+    await flushPromises();
+
+    let s = harness.state;
+    assert(s.showError, 'error state visible after RPC error');
+    assert(s.errorMessage === ERR_UNAVAILABLE, 'error message = unavailable');
+    assert(s.displayData.total_leads === 0, 'no metrics shown on error');
+
+    // Retry: success
+    __setRpcHandler(async () => ({ data: VALID_METRICS, error: null }));
+    await harness.fetchData();
+    await flushPromises();
+
+    s = harness.state;
+    assert(!s.showError, 'no error after successful Retry');
+    assert(!s.showLoading, 'not loading after successful Retry');
+    assert(s.displayData.total_leads === 100, 'metrics visible after Retry = 100');
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: Retry sets loading and clears previous error at start');
+  {
+    setAuthorized();
+    const resolvers: Array<(v: { data: unknown; error: unknown }) => void> = [];
+    const harness = new DashboardWiringHarness();
+    harness.setUser({ authUserId: 'auth-admin', role: 'admin', rep_code: 'ADMIN' });
+    harness.setAuthMode('online');
+    harness.setIsOnline(true);
+
+    // First: get an error
+    __setRpcHandler(async () => ({ data: null, error: { message: 'fail' } }));
+    harness.triggerEffect();
+    await flushPromises();
+    assert(harness.state.showError, 'error shown before Retry');
+
+    // Retry: with pending RPC
+    __setRpcHandler(async () => new Promise(resolve => { resolvers.push(resolve); }));
+    const retryPromise = harness.fetchData();
+    // Before the RPC resolves, loading should be true and error cleared
+    assert(harness.state.showLoading, 'loading set at Retry start');
+    assert(!harness.state.showError, 'error cleared at Retry start');
+
+    // Resolve the RPC
+    resolvers.forEach(r => r({ data: VALID_METRICS, error: null }));
+    await retryPromise;
+    await flushPromises();
+    assert(!harness.state.showLoading, 'not loading after Retry completes');
+    assert(harness.state.displayData.total_leads === 100, 'metrics shown after Retry');
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: stale completion does not clear another request\'s loading/error');
+  {
+    setAuthorized();
+    const resolvers: Array<(v: { data: unknown; error: unknown }) => void> = [];
+    const harness = new DashboardWiringHarness();
+    harness.setUser({ authUserId: 'auth-admin', role: 'admin', rep_code: 'ADMIN' });
+    harness.setAuthMode('online');
+    harness.setIsOnline(true);
+
+    // Start first request with pending RPC
+    __setRpcHandler(async () => new Promise(resolve => { resolvers.push(resolve); }));
+    harness.triggerEffect();
+    await flushPromises();
+    assert(harness.state.showLoading, 'first request: loading');
+
+    // Trigger effect again (simulates re-render with same deps) — invalidates
+    harness.triggerEffect();
+    await flushPromises();
+    // The first RPC is now stale, the second is pending
+    assert(harness.state.showLoading, 'second request: loading');
+
+    // Resolve the stale first request — should NOT set data
+    if (resolvers[0]) resolvers[0]({ data: { ...VALID_METRICS, total_leads: 999 }, error: null });
+    await flushPromises();
+    assert(harness.state.displayData.total_leads !== 999, 'stale completion does not set data');
+    assert(harness.state.showLoading, 'still loading after stale resolves');
+
+    // Resolve the current request
+    if (resolvers[1]) resolvers[1]({ data: VALID_METRICS, error: null });
+    await flushPromises();
+    assert(harness.state.displayData.total_leads === 100, 'current request succeeds with 100');
+    assert(!harness.state.showLoading, 'not loading after current resolves');
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 19: Lifecycle wiring — identity change ═════════════════════════
+
+  console.log('\n--- Lifecycle wiring: identity change ---');
+
+  console.log('TEST: identity change → no previous-user metrics displayed');
+  {
+    setAuthorized();
+    const harness = new DashboardWiringHarness();
+
+    // Admin loads data
+    __setRpcHandler(async () => ({ data: VALID_METRICS, error: null }));
+    harness.setUser({ authUserId: 'auth-admin', role: 'admin', rep_code: 'ADMIN' });
+    harness.setAuthMode('online');
+    harness.setIsOnline(true);
+    harness.triggerEffect();
+    await flushPromises();
+
+    assert(harness.state.displayData.total_leads === 100, 'admin sees 100');
+    assert(harness.state.dataIdentity === 'auth-admin|admin|ADMIN', 'admin identity set');
+
+    // Switch to rep user — previous metrics must NOT show under new header
+    harness.setUser({ authUserId: 'auth-rep', role: 'sales_rep', rep_code: 'REP' });
+    // Before the effect runs, the identity display guard must hide old data
+    const stateBeforeEffect = harness.state;
+    assert(stateBeforeEffect.showLoading, 'identity change: shows loading before effect');
+    assert(stateBeforeEffect.displayData.total_leads === 0, 'identity change: old metrics hidden (EMPTY) before effect');
+    assert(!stateBeforeEffect.showError, 'identity change: no error before effect');
+
+    // Now trigger the effect for the new user
+    harness.triggerEffect();
+    await flushPromises();
+
+    assert(harness.state.displayData.total_leads === 100, 'rep sees 100 after loading');
+    assert(harness.state.dataIdentity === 'auth-rep|sales_rep|REP', 'rep identity set');
+    assert(!harness.state.showLoading, 'rep: not loading after data loads');
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: identity change with pending data — old metrics never flash');
+  {
+    setAuthorized();
+    const resolvers: Array<(v: { data: unknown; error: unknown }) => void> = [];
+    const harness = new DashboardWiringHarness();
+
+    // Admin loads data
+    __setRpcHandler(async () => ({ data: { ...VALID_METRICS, total_leads: 100 }, error: null }));
+    harness.setUser({ authUserId: 'auth-admin', role: 'admin', rep_code: 'ADMIN' });
+    harness.setAuthMode('online');
+    harness.setIsOnline(true);
+    harness.triggerEffect();
+    await flushPromises();
+    assert(harness.state.displayData.total_leads === 100, 'admin loaded 100');
+
+    // Switch to rep with pending RPC
+    harness.setUser({ authUserId: 'auth-rep', role: 'sales_rep', rep_code: 'REP' });
+    // Before effect, old data must be hidden
+    assert(harness.state.displayData.total_leads === 0, 'rep: old admin data hidden before effect');
+    assert(harness.state.showLoading, 'rep: loading shown before effect');
+
+    // Trigger effect with pending RPC
+    __setRpcHandler(async () => new Promise(resolve => { resolvers.push(resolve); }));
+    harness.triggerEffect();
+    await flushPromises();
+    // While RPC is pending, still loading, no old data
+    assert(harness.state.showLoading, 'rep: loading while RPC pending');
+    assert(harness.state.displayData.total_leads === 0, 'rep: no old data while RPC pending');
+
+    // Resolve with rep-specific data
+    resolvers.forEach(r => r({ data: { ...VALID_METRICS, total_leads: 50 }, error: null }));
+    await flushPromises();
+    assert(harness.state.displayData.total_leads === 50, 'rep: sees 50 after load');
+    __resetRpcHandler();
+  }
 
   // ═══ Summary ═══════════════════════════════════════════════════════════════
 

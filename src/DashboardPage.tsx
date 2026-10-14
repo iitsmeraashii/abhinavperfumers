@@ -5,9 +5,6 @@ import {
   DashboardMetricsLoader,
   EMPTY_DASHBOARD,
   identityKey,
-  ERR_SIGN_IN,
-  ERR_WAITING,
-  ERR_UNAVAILABLE,
   type DashboardData,
 } from './dashboardMetricsLoader';
 import {
@@ -129,7 +126,10 @@ interface DashboardPageProps {
 export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps) {
   const { user, authMode } = useAuth();
   const nav = (f: DashboardFilter) => onNavigateToLeads?.(f);
+  const currentIdentity = identityKey(user);
+
   const [data, setData] = useState<DashboardData>(EMPTY);
+  const [dataIdentity, setDataIdentity] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const isAdmin = user?.role === 'admin';
@@ -137,14 +137,14 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
   const loaderRef = useRef<DashboardMetricsLoader | null>(null);
   if (!loaderRef.current) loaderRef.current = new DashboardMetricsLoader();
 
-  const currentIdentity = identityKey(user);
-
   // Subscribe to transport connectivity. The returned boolean is a reactive
   // dependency that re-triggers the fetch effect when transport changes.
   const isOnline = useOnlineStatus();
 
   const fetchData = useCallback(async () => {
     const loader = loaderRef.current!;
+    setLoading(true);
+    setError('');
     const result = await loader.load(currentIdentity);
 
     if (result.kind === 'stale') return;
@@ -152,11 +152,13 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
     if (result.kind === 'error') {
       setError(result.message);
       setData(EMPTY);
+      setDataIdentity(null);
       setLoading(false);
       return;
     }
 
     setData(result.data);
+    setDataIdentity(currentIdentity);
     setLoading(false);
   }, [currentIdentity]);
 
@@ -165,6 +167,7 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
   // and transport change (isOnline from useOnlineStatus).
   useEffect(() => {
     setData(EMPTY);
+    setDataIdentity(null);
     setLoading(true);
     setError('');
     loaderRef.current!.invalidate();
@@ -172,12 +175,22 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchData, authMode, isOnline]);
 
-  // Cleanup on unmount.
+  // Cleanup on unmount — invalidate only, don't permanently unmount.
+  // In StrictMode, setup→cleanup→setup reuses the same loader instance;
+  // unmount() would make it permanently unusable.
   useEffect(() => {
-    return () => { loaderRef.current?.unmount(); };
+    return () => { loaderRef.current?.invalidate(); };
   }, []);
 
-  const funnelTotal = data.total_leads || 1;
+  // ─── Identity display guard ──────────────────────────────────────────
+  // Prevent previous-user metrics from rendering under a new user's header,
+  // including before effects run. If the loaded data's identity doesn't
+  // match the current identity, show loading state instead.
+  const displayData = dataIdentity === currentIdentity ? data : EMPTY;
+  const showLoading = loading || dataIdentity !== currentIdentity;
+  const showError = error && dataIdentity === null;
+
+  const funnelTotal = displayData.total_leads || 1;
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
@@ -199,16 +212,16 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
           </div>
           <button
             onClick={fetchData}
-            disabled={loading}
+            disabled={showLoading}
             className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 transition disabled:opacity-50 self-start sm:self-auto flex-shrink-0"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${showLoading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
         </div>
       </div>
 
-      {error && (
+      {showError && (
         <div className="mb-5 flex flex-col items-start gap-3 px-4 py-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl">
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -216,20 +229,20 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
           </div>
           <button
             onClick={fetchData}
-            disabled={loading}
+            disabled={showLoading}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-red-200 bg-white text-red-700 hover:bg-red-50 transition disabled:opacity-50"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${showLoading ? 'animate-spin' : ''}`} />
             Retry
           </button>
         </div>
       )}
 
-      {loading ? (
+      {showLoading ? (
         <div className="flex items-center justify-center py-24">
           <Loader2 className="w-6 h-6 text-stone-400 animate-spin" />
         </div>
-      ) : error ? (
+      ) : showError ? (
         null
       ) : (
         <div className="flex flex-col gap-8">
@@ -238,13 +251,13 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
           <section>
             <SectionLabel>Lead Volume</SectionLabel>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <KpiCard icon={<Users className="w-5 h-5" />}      label="Total Leads"  value={data.total_leads}        color="blue"
+              <KpiCard icon={<Users className="w-5 h-5" />}      label="Total Leads"  value={displayData.total_leads}        color="blue"
                 onClick={() => nav({})} />
-              <KpiCard icon={<TrendingUp className="w-5 h-5" />} label="Today"        value={data.leads_today}        color="blue" sub="since midnight"
+              <KpiCard icon={<TrendingUp className="w-5 h-5" />} label="Today"        value={displayData.leads_today}        color="blue" sub="since midnight"
                 onClick={() => nav({ dateFilter: 'today' })} />
-              <KpiCard icon={<Calendar className="w-5 h-5" />}   label="Last 7 Days"  value={data.leads_last_7_days}  color="blue"
+              <KpiCard icon={<Calendar className="w-5 h-5" />}   label="Last 7 Days"  value={displayData.leads_last_7_days}  color="blue"
                 onClick={() => nav({ dateFilter: '7days' })} />
-              <KpiCard icon={<Clock className="w-5 h-5" />}      label="Last 30 Days" value={data.leads_last_30_days} color="blue"
+              <KpiCard icon={<Clock className="w-5 h-5" />}      label="Last 30 Days" value={displayData.leads_last_30_days} color="blue"
                 onClick={() => nav({ dateFilter: '30days' })} />
             </div>
           </section>
@@ -253,14 +266,14 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
           <section>
             <SectionLabel>System Status</SectionLabel>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <KpiCard icon={<MessageCircle className="w-5 h-5" />} label="WhatsApp Sent"   value={data.whatsapp_sent}   color="green"
-                sub={`${pct(data.whatsapp_sent, data.total_leads)}% of total`}
+              <KpiCard icon={<MessageCircle className="w-5 h-5" />} label="WhatsApp Sent"   value={displayData.whatsapp_sent}   color="green"
+                sub={`${pct(displayData.whatsapp_sent, displayData.total_leads)}% of total`}
                 onClick={() => nav({ systemStatus: 'WHATSAPP_SENT' })} />
-              <KpiCard icon={<AlertCircle className="w-5 h-5" />}   label="WhatsApp Failed" value={data.whatsapp_failed}  color="red"
-                sub={`${pct(data.whatsapp_failed, data.total_leads)}% of total`}
+              <KpiCard icon={<AlertCircle className="w-5 h-5" />}   label="WhatsApp Failed" value={displayData.whatsapp_failed}  color="red"
+                sub={`${pct(displayData.whatsapp_failed, displayData.total_leads)}% of total`}
                 onClick={() => nav({ systemStatus: 'WHATSAPP_FAILED' })} />
-              <KpiCard icon={<XCircle className="w-5 h-5" />}       label="Invalid Leads"   value={data.invalid_leads}   color="stone"
-                sub={`${pct(data.invalid_leads, data.total_leads)}% of total`}
+              <KpiCard icon={<XCircle className="w-5 h-5" />}       label="Invalid Leads"   value={displayData.invalid_leads}   color="stone"
+                sub={`${pct(displayData.invalid_leads, displayData.total_leads)}% of total`}
                 onClick={() => nav({ systemStatus: 'INVALID_LEAD' })} />
             </div>
           </section>
@@ -269,17 +282,17 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
           <section>
             <SectionLabel>Lead Status Breakdown</SectionLabel>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <KpiCard icon={<PhoneCall className="w-5 h-5" />}    label="Contacted" value={data.contacted_leads} color="yellow"
-                sub={`${pct(data.contacted_leads, data.total_leads)}% of total`}
+              <KpiCard icon={<PhoneCall className="w-5 h-5" />}    label="Contacted" value={displayData.contacted_leads} color="yellow"
+                sub={`${pct(displayData.contacted_leads, displayData.total_leads)}% of total`}
                 onClick={() => nav({ leadStatus: 'CONTACTED' })} />
-              <KpiCard icon={<Star className="w-5 h-5" />}         label="Samples Sent" value={data.qualified_leads} color="yellow"
-                sub={`${pct(data.qualified_leads, data.total_leads)}% of total`}
+              <KpiCard icon={<Star className="w-5 h-5" />}         label="Samples Sent" value={displayData.qualified_leads} color="yellow"
+                sub={`${pct(displayData.qualified_leads, displayData.total_leads)}% of total`}
                 onClick={() => nav({ leadStatus: 'QUALIFIED' })} />
-              <KpiCard icon={<CheckCircle2 className="w-5 h-5" />} label="Converted" value={data.converted_leads} color="green"
-                sub={`${pct(data.converted_leads, data.total_leads)}% of total`}
+              <KpiCard icon={<CheckCircle2 className="w-5 h-5" />} label="Converted" value={displayData.converted_leads} color="green"
+                sub={`${pct(displayData.converted_leads, displayData.total_leads)}% of total`}
                 onClick={() => nav({ leadStatus: 'CONVERTED' })} />
-              <KpiCard icon={<HeartCrack className="w-5 h-5" />}   label="Lost"      value={data.lost_leads}      color="red"
-                sub={`${pct(data.lost_leads, data.total_leads)}% of total`}
+              <KpiCard icon={<HeartCrack className="w-5 h-5" />}   label="Lost"      value={displayData.lost_leads}      color="red"
+                sub={`${pct(displayData.lost_leads, displayData.total_leads)}% of total`}
                 onClick={() => nav({ leadStatus: 'LOST' })} />
             </div>
           </section>
@@ -288,17 +301,17 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
           <section>
             <SectionLabel>Lead Temperature</SectionLabel>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <KpiCard icon={<Flame className="w-5 h-5" />}      label="Hot"        value={data.hot_leads} color="red"
-                sub={`${pct(data.hot_leads, data.total_leads)}% of total`}
+              <KpiCard icon={<Flame className="w-5 h-5" />}      label="Hot"        value={displayData.hot_leads} color="red"
+                sub={`${pct(displayData.hot_leads, displayData.total_leads)}% of total`}
                 onClick={() => nav({ temperature: 'Hot' })} />
-              <KpiCard icon={<Sun className="w-5 h-5" />}        label="Warm"       value={data.warm_leads} color="yellow"
-                sub={`${pct(data.warm_leads, data.total_leads)}% of total`}
+              <KpiCard icon={<Sun className="w-5 h-5" />}        label="Warm"       value={displayData.warm_leads} color="yellow"
+                sub={`${pct(displayData.warm_leads, displayData.total_leads)}% of total`}
                 onClick={() => nav({ temperature: 'Warm' })} />
-              <KpiCard icon={<Snowflake className="w-5 h-5" />}  label="Cold"       value={data.cold_leads} color="blue"
-                sub={`${pct(data.cold_leads, data.total_leads)}% of total`}
+              <KpiCard icon={<Snowflake className="w-5 h-5" />}  label="Cold"       value={displayData.cold_leads} color="blue"
+                sub={`${pct(displayData.cold_leads, displayData.total_leads)}% of total`}
                 onClick={() => nav({ temperature: 'Cold' })} />
-              <KpiCard icon={<HelpCircle className="w-5 h-5" />} label="Unassigned" value={data.unassigned_temperature_leads} color="stone"
-                sub={`${pct(data.unassigned_temperature_leads, data.total_leads)}% of total`}
+              <KpiCard icon={<HelpCircle className="w-5 h-5" />} label="Unassigned" value={displayData.unassigned_temperature_leads} color="stone"
+                sub={`${pct(displayData.unassigned_temperature_leads, displayData.total_leads)}% of total`}
                 onClick={() => nav({ temperature: '__unassigned__' })} />
             </div>
           </section>
@@ -308,29 +321,29 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
             <SectionLabel>Sales Funnel</SectionLabel>
             <div className="bg-white border border-stone-200 rounded-xl px-6 py-5">
               <div className="flex flex-col sm:flex-row gap-6">
-                <FunnelStep label="New"       value={data.new_leads}       total={funnelTotal} color="text-blue-600"   bar="bg-blue-400"
+                <FunnelStep label="New"       value={displayData.new_leads}       total={funnelTotal} color="text-blue-600"   bar="bg-blue-400"
                   onClick={() => nav({ leadStatus: 'NEW' })} />
-                <FunnelStep label="Contacted" value={data.contacted_leads} total={funnelTotal} color="text-yellow-600" bar="bg-yellow-400"
+                <FunnelStep label="Contacted" value={displayData.contacted_leads} total={funnelTotal} color="text-yellow-600" bar="bg-yellow-400"
                   onClick={() => nav({ leadStatus: 'CONTACTED' })} />
-                <FunnelStep label="Samples Sent" value={data.qualified_leads} total={funnelTotal} color="text-teal-600"   bar="bg-teal-400"
+                <FunnelStep label="Samples Sent" value={displayData.qualified_leads} total={funnelTotal} color="text-teal-600"   bar="bg-teal-400"
                   onClick={() => nav({ leadStatus: 'QUALIFIED' })} />
-                <FunnelStep label="Converted" value={data.converted_leads} total={funnelTotal} color="text-green-600"  bar="bg-green-400" isLast
+                <FunnelStep label="Converted" value={displayData.converted_leads} total={funnelTotal} color="text-green-600"  bar="bg-green-400" isLast
                   onClick={() => nav({ leadStatus: 'CONVERTED' })} />
               </div>
 
               {/* Conversion rate summary */}
               <div className="mt-5 pt-4 border-t border-stone-100 flex flex-wrap gap-x-6 gap-y-1">
                 <span className="text-xs text-stone-400">
-                  Contact rate: <strong className="text-stone-600">{pct(data.contacted_leads, data.new_leads || 1)}%</strong>
+                  Contact rate: <strong className="text-stone-600">{pct(displayData.contacted_leads, displayData.new_leads || 1)}%</strong>
                 </span>
                 <span className="text-xs text-stone-400">
-                  Sample rate: <strong className="text-stone-600">{pct(data.qualified_leads, data.contacted_leads || 1)}%</strong>
+                  Sample rate: <strong className="text-stone-600">{pct(displayData.qualified_leads, displayData.contacted_leads || 1)}%</strong>
                 </span>
                 <span className="text-xs text-stone-400">
-                  Close rate: <strong className="text-stone-600">{pct(data.converted_leads, data.qualified_leads || 1)}%</strong>
+                  Close rate: <strong className="text-stone-600">{pct(displayData.converted_leads, displayData.qualified_leads || 1)}%</strong>
                 </span>
                 <span className="text-xs text-stone-400">
-                  Overall conversion: <strong className="text-green-600">{pct(data.converted_leads, data.total_leads)}%</strong>
+                  Overall conversion: <strong className="text-green-600">{pct(displayData.converted_leads, displayData.total_leads)}%</strong>
                 </span>
               </div>
             </div>
