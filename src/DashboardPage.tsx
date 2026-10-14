@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
 import { useAuth } from './AuthContext';
 import { isCloudSyncAllowed } from './authModeState';
+import { useOnlineStatus } from './capture/useOnlineStatus';
 import {
   Users, TrendingUp, Calendar, Clock,
   MessageCircle, AlertCircle, XCircle,
@@ -138,140 +139,177 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Extracted so tests can import without rendering JSX.
+export interface DashboardMetricsRow {
+  total_leads:                  number;
+  leads_today:                  number;
+  leads_last_7_days:            number;
+  leads_last_30_days:           number;
+  whatsapp_sent:                number;
+  whatsapp_failed:              number;
+  invalid_leads:                number;
+  new_leads:                    number;
+  contacted_leads:              number;
+  qualified_leads:              number;
+  converted_leads:              number;
+  lost_leads:                   number;
+  hot_leads:                    number;
+  warm_leads:                   number;
+  cold_leads:                   number;
+  unassigned_temperature_leads: number;
+}
+
+function rowToData(row: Record<string, unknown>): DashboardData {
+  return {
+    total_leads:                  Number(row.total_leads ?? 0),
+    leads_today:                  Number(row.leads_today ?? 0),
+    leads_last_7_days:            Number(row.leads_last_7_days ?? 0),
+    leads_last_30_days:           Number(row.leads_last_30_days ?? 0),
+    whatsapp_sent:                Number(row.whatsapp_sent ?? 0),
+    whatsapp_failed:              Number(row.whatsapp_failed ?? 0),
+    invalid_leads:                Number(row.invalid_leads ?? 0),
+    new_leads:                    Number(row.new_leads ?? 0),
+    contacted_leads:              Number(row.contacted_leads ?? 0),
+    qualified_leads:              Number(row.qualified_leads ?? 0),
+    converted_leads:              Number(row.converted_leads ?? 0),
+    lost_leads:                   Number(row.lost_leads ?? 0),
+    hot_leads:                    Number(row.hot_leads ?? 0),
+    warm_leads:                   Number(row.warm_leads ?? 0),
+    cold_leads:                   Number(row.cold_leads ?? 0),
+    unassigned_temperature_leads: Number(row.unassigned_temperature_leads ?? 0),
+  };
+}
+
+// Exported for testing — pure function, no side effects.
+export function parseMetricsResponse(rpcData: unknown): DashboardData | null {
+  if (!rpcData) return null;
+  const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+  if (!row || typeof row !== 'object') return null;
+  return rowToData(row as Record<string, unknown>);
+}
+
+// Exported for testing — computes the browser-local midnight ISO timestamp
+// the same way the original client-side aggregation did.
+export function getTodayIso(now: Date = new Date()): string {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+}
+
 interface DashboardPageProps {
   onNavigateToLeads?: (filter: DashboardFilter) => void;
 }
 
 export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps) {
-  const { user } = useAuth();
+  const { user, authMode } = useAuth();
   const nav = (f: DashboardFilter) => onNavigateToLeads?.(f);
   const [data, setData] = useState<DashboardData>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const isAdmin = user?.role === 'admin';
 
-  // Stale-response guard: each fetch increments a generation counter. When the
-  // async response returns, it checks whether it's still the current generation
-  // before publishing results. Identity changes and unmounts invalidate by
-  // bumping the generation, so outdated responses are silently discarded.
+  // ─── Stale-response guard ────────────────────────────────────────────
+  // Every fetch increments generationRef. When an async response returns,
+  // it checks whether it's still the current generation AND whether the
+  // identity and cloud-sync authorization are still valid. If any of these
+  // changed during the in-flight request, the response is silently discarded.
   const generationRef = useRef(0);
+  const identityRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+
+  // Track the last identity we fetched for, so identity switches invalidate.
+  const currentIdentity = user?.rep_code ?? null;
 
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
 
+  // ─── Reconnect resume ────────────────────────────────────────────────
+  // When the transport comes back online, the AuthContext transitions
+  // authMode from 'offline-restored' → 'online'. We watch authMode as a
+  // dependency of the main fetch effect so the dashboard re-fetches
+  // automatically after authorized reconnect — no polling required.
+  // useOnlineStatus also fires onReconnect for immediate transport-level
+  // resume, but the fetch still gates on isCloudSyncAllowed() to ensure
+  // auth has confirmed 'online' before any request goes out.
+
+  // Subscribe to connectivity for reconnect detection.
+  useOnlineStatus();
+
   const fetchData = useCallback(async () => {
-    // Fail closed: never issue a dashboard read without a valid identity or
-    // when cloud sync is not allowed (offline-restored or unauthenticated).
+    // ── Fail-closed gate: check BEFORE issuing any request ──
     if (!user?.rep_code || !user?.role) {
+      setError('Dashboard metrics unavailable: sign-in required.');
       setData(EMPTY);
       setLoading(false);
       return;
     }
     if (!isCloudSyncAllowed()) {
+      setError('Dashboard metrics unavailable: waiting for connection.');
       setData(EMPTY);
       setLoading(false);
       return;
     }
 
     const generation = ++generationRef.current;
+    identityRef.current = currentIdentity;
     setLoading(true);
     setError('');
 
-    // Try the server-side aggregate RPC first.
-    const { data: rpcData, error: rpcErr } = await supabase.rpc('get_dashboard_metrics');
+    // Compute browser-local midnight ISO — preserves the original
+    // client-side "today" boundary behavior in the RPC.
+    const todayIso = getTodayIso();
 
-    // Discard stale responses from superseded fetches or identity changes.
-    if (generation !== generationRef.current || !mountedRef.current) return;
-
-    if (!rpcErr && rpcData) {
-      const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
-      setData({
-        total_leads:                  Number(row.total_leads ?? 0),
-        leads_today:                  Number(row.leads_today ?? 0),
-        leads_last_7_days:            Number(row.leads_last_7_days ?? 0),
-        leads_last_30_days:           Number(row.leads_last_30_days ?? 0),
-        whatsapp_sent:                Number(row.whatsapp_sent ?? 0),
-        whatsapp_failed:              Number(row.whatsapp_failed ?? 0),
-        invalid_leads:                Number(row.invalid_leads ?? 0),
-        new_leads:                    Number(row.new_leads ?? 0),
-        contacted_leads:              Number(row.contacted_leads ?? 0),
-        qualified_leads:              Number(row.qualified_leads ?? 0),
-        converted_leads:              Number(row.converted_leads ?? 0),
-        lost_leads:                   Number(row.lost_leads ?? 0),
-        hot_leads:                    Number(row.hot_leads ?? 0),
-        warm_leads:                   Number(row.warm_leads ?? 0),
-        cold_leads:                   Number(row.cold_leads ?? 0),
-        unassigned_temperature_leads: Number(row.unassigned_temperature_leads ?? 0),
-      });
-      setLoading(false);
-      return;
-    }
-
-    // Fallback: client-side aggregation (used until the RPC migration is applied,
-    // or if the RPC is unavailable for any reason).
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-    const d7 = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const d30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-
-    let q = supabase.from('lead_entries').select(
-      'created_at, system_status, lead_status, lead_temperature'
+    const { data: rpcData, error: rpcErr } = await supabase.rpc(
+      'get_dashboard_metrics',
+      { p_today_iso: todayIso },
     );
-    if (!isAdmin && user?.rep_code) {
-      q = q.eq('sales_rep_code', user.rep_code);
-    }
 
-    const { data: rows, error: err } = await q;
-
-    if (generation !== generationRef.current || !mountedRef.current) return;
-
-    if (err || !rows) {
-      setError('Failed to load dashboard data.');
+    // ── Re-check authorization BEFORE publishing results ──
+    // If identity changed, auth was lost, or cloud sync is no longer
+    // allowed while the request was in flight, discard the response.
+    if (generation !== generationRef.current) return;
+    if (identityRef.current !== currentIdentity) return;
+    if (!mountedRef.current) return;
+    if (!isCloudSyncAllowed()) {
+      setError('Dashboard metrics unavailable: waiting for connection.');
+      setData(EMPTY);
       setLoading(false);
       return;
     }
 
-    const totals: DashboardData = { ...EMPTY };
-    totals.total_leads = rows.length;
-
-    for (const row of rows) {
-      const ca = row.created_at ?? '';
-      if (ca >= todayStart) totals.leads_today++;
-      if (ca >= d7) totals.leads_last_7_days++;
-      if (ca >= d30) totals.leads_last_30_days++;
-
-      const ss = (row.system_status ?? '').toUpperCase();
-      if (ss === 'WHATSAPP_SENT') totals.whatsapp_sent++;
-      if (ss === 'WHATSAPP_FAILED') totals.whatsapp_failed++;
-      if (ss === 'INVALID_LEAD') totals.invalid_leads++;
-
-      const ls = (row.lead_status ?? '').toUpperCase();
-      if (ls === 'NEW') totals.new_leads++;
-      if (ls === 'CONTACTED') totals.contacted_leads++;
-      if (ls === 'QUALIFIED') totals.qualified_leads++;
-      if (ls === 'CONVERTED') totals.converted_leads++;
-      if (ls === 'LOST') totals.lost_leads++;
-
-      const lt = (row.lead_temperature ?? '').trim();
-      if (lt === 'Hot') totals.hot_leads++;
-      else if (lt === 'Warm') totals.warm_leads++;
-      else if (lt === 'Cold') totals.cold_leads++;
-      else totals.unassigned_temperature_leads++;
+    if (rpcErr) {
+      // RPC error (missing function, permission denied, raised exception)
+      // → show unavailable state, never zero counts as success.
+      setError('Dashboard metrics unavailable. Tap Retry to try again.');
+      setData(EMPTY);
+      setLoading(false);
+      return;
     }
 
-    setData(totals);
-    setLoading(false);
-  }, [user, isAdmin]);
+    const parsed = parseMetricsResponse(rpcData);
+    if (!parsed) {
+      setError('Dashboard metrics unavailable. Tap Retry to try again.');
+      setData(EMPTY);
+      setLoading(false);
+      return;
+    }
 
+    // Final staleness check before committing.
+    if (generation !== generationRef.current || !mountedRef.current) return;
+
+    setData(parsed);
+    setLoading(false);
+  }, [user, isAdmin, currentIdentity]);
+
+  // ─── Main fetch effect ───────────────────────────────────────────────
+  // Fires on mount, identity change, and authMode change (reconnect resume).
+  // Clears stale data and bumps generation before fetching.
   useEffect(() => {
-    // Clear stale data on identity changes, then fetch fresh.
     setData(EMPTY);
     generationRef.current++;
     fetchData();
-  }, [fetchData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchData, authMode]);
 
   const funnelTotal = data.total_leads || 1;
 
@@ -305,9 +343,19 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
       </div>
 
       {error && (
-        <div className="mb-5 flex items-center gap-2 px-4 py-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl">
-          <AlertCircle className="w-4 h-4 flex-shrink-0" />
-          {error}
+        <div className="mb-5 flex flex-col items-start gap-3 px-4 py-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            {error}
+          </div>
+          <button
+            onClick={fetchData}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-red-200 bg-white text-red-700 hover:bg-red-50 transition disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            Retry
+          </button>
         </div>
       )}
 
@@ -315,6 +363,10 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
         <div className="flex items-center justify-center py-24">
           <Loader2 className="w-6 h-6 text-stone-400 animate-spin" />
         </div>
+      ) : error ? (
+        /* When there's an error, don't render the dashboard sections with
+           zero counts — show nothing but the error banner above. */
+        null
       ) : (
         <div className="flex flex-col gap-8">
 
