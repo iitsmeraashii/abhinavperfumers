@@ -10,6 +10,7 @@ import {
 } from './dashboardMetricsLoader';
 import {
   TodaysFollowUpsLoader,
+  deriveFollowUpTileState,
   type FollowUpCountResult,
   ERR_FOLLOWUP_SIGN_IN,
   ERR_FOLLOWUP_WAITING,
@@ -133,16 +134,15 @@ interface DashboardPageProps {
 }
 
 interface FollowUpAttentionTileProps {
-  loading: boolean;
-  error: boolean;
-  count: number | null;
+  phase: 'loading' | 'success' | 'error' | 'unavailable';
+  count: number;
   onNavigate?: () => void;
   onRetry?: () => void;
 }
 
-function FollowUpAttentionTile({ loading, error, count, onNavigate, onRetry }: FollowUpAttentionTileProps) {
-  const handleClick = error ? onRetry : onNavigate;
-  const clickable = !!handleClick && !loading;
+function FollowUpAttentionTile({ phase, count, onNavigate, onRetry }: FollowUpAttentionTileProps) {
+  const handleClick = phase === 'error' ? onRetry : phase === 'success' ? onNavigate : undefined;
+  const clickable = !!handleClick;
 
   return (
     <div
@@ -159,23 +159,28 @@ function FollowUpAttentionTile({ loading, error, count, onNavigate, onRetry }: F
       </div>
       <div className="min-w-0 flex-1">
         <p className="text-xs text-amber-700 font-medium mb-1">Today's Follow-Ups</p>
-        {loading ? (
+        {phase === 'loading' ? (
           <div className="flex items-center gap-2">
             <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
             <span className="text-sm text-amber-500">Loading…</span>
           </div>
-        ) : error ? (
+        ) : phase === 'error' ? (
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-red-400" />
             <span className="text-sm text-red-500">Couldn't load — tap to retry</span>
           </div>
+        ) : phase === 'unavailable' ? (
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-stone-400" />
+            <span className="text-sm text-stone-500">Unavailable</span>
+          </div>
         ) : (
           <>
             <p className="text-2xl font-bold tabular-nums leading-none text-amber-800">
-              {count ?? 0}
+              {count}
             </p>
             <p className="text-xs text-amber-500 mt-1">
-              {(count ?? 0) === 1 ? 'pending follow-up due today' : 'pending follow-ups due today'}
+              {count === 1 ? 'pending follow-up due today' : 'pending follow-ups due today'}
             </p>
           </>
         )}
@@ -208,6 +213,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
   const [fuCount, setFuCount] = useState<number | null>(null);
   const [fuLoading, setFuLoading] = useState(true);
   const [fuError, setFuError] = useState(false);
+  const [fuUnavailable, setFuUnavailable] = useState(false);
   const [fuIdentity, setFuIdentity] = useState<string | null>(null);
 
   // Subscribe to transport connectivity. The returned boolean is a reactive
@@ -218,6 +224,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     const loader = fuLoaderRef.current!;
     setFuLoading(true);
     setFuError(false);
+    setFuUnavailable(false);
     const result: FollowUpCountResult = await loader.load(currentIdentity, user);
 
     if (result.kind === 'stale') return;
@@ -225,6 +232,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     if (result.kind === 'error') {
       if (result.message === ERR_FOLLOWUP_SIGN_IN || result.message === ERR_FOLLOWUP_WAITING) {
         setFuCount(null);
+        setFuUnavailable(true);
       } else {
         setFuError(true);
         setFuCount(null);
@@ -277,6 +285,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     setFuCount(null);
     setFuIdentity(null);
     setFuError(false);
+    setFuUnavailable(false);
     setFuLoading(true);
     fuLoaderRef.current!.invalidate();
     fetchFollowUpCount();
@@ -318,7 +327,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
             </p>
           </div>
           <button
-            onClick={fetchData}
+            onClick={() => { fetchData(); fetchFollowUpCount(); }}
             disabled={showLoading}
             className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 transition disabled:opacity-50 self-start sm:self-auto flex-shrink-0"
           >
@@ -346,18 +355,23 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
       )}
 
       {/* ── Needs your attention ── */}
-      {fuIdentity === currentIdentity && (
-        <section className="mb-6">
-          <SectionLabel>Needs your attention</SectionLabel>
-          <FollowUpAttentionTile
-            loading={fuLoading}
-            error={fuError}
-            count={fuCount}
-            onNavigate={onNavigateToFollowUps}
-            onRetry={fetchFollowUpCount}
-          />
-        </section>
-      )}
+      {(() => {
+        const tile = deriveFollowUpTileState(
+          fuLoading, fuError, fuUnavailable, fuCount, fuIdentity, currentIdentity,
+        );
+        if (!tile) return null;
+        return (
+          <section className="mb-6">
+            <SectionLabel>Needs your attention</SectionLabel>
+            <FollowUpAttentionTile
+              phase={tile.phase}
+              count={tile.count}
+              onNavigate={tile.canNavigate ? onNavigateToFollowUps : undefined}
+              onRetry={tile.canRetry ? fetchFollowUpCount : undefined}
+            />
+          </section>
+        );
+      })()}
 
       {showLoading ? (
         <div className="flex items-center justify-center py-24">

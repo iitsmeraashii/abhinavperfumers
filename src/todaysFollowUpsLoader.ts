@@ -31,6 +31,45 @@ export const ERR_FOLLOWUP_SIGN_IN = 'Follow-up count unavailable: sign-in requir
 export const ERR_FOLLOWUP_WAITING = 'Follow-up count unavailable: waiting for connection.';
 export const ERR_FOLLOWUP_UNAVAILABLE = 'Follow-up count unavailable. Tap to retry.';
 
+// ─── Tile display derivation (pure, testable) ───────────────────────────────
+//
+// Maps DashboardPage state variables into a tile display state.
+// Returns null when the section should not render at all (no valid identity).
+
+export type FollowUpTilePhase = 'loading' | 'success' | 'error' | 'unavailable';
+
+export interface FollowUpTileDisplay {
+  phase: FollowUpTilePhase;
+  count: number;
+  canNavigate: boolean;
+  canRetry: boolean;
+}
+
+export function deriveFollowUpTileState(
+  loading: boolean,
+  error: boolean,
+  unavailable: boolean,
+  count: number | null,
+  fuIdentity: string | null,
+  currentIdentity: string | null,
+): FollowUpTileDisplay | null {
+  if (!currentIdentity) return null;
+
+  if (fuIdentity !== currentIdentity || loading) {
+    return { phase: 'loading', count: 0, canNavigate: false, canRetry: false };
+  }
+
+  if (unavailable) {
+    return { phase: 'unavailable', count: 0, canNavigate: false, canRetry: false };
+  }
+
+  if (error) {
+    return { phase: 'error', count: 0, canNavigate: false, canRetry: true };
+  }
+
+  return { phase: 'success', count: count ?? 0, canNavigate: true, canRetry: false };
+}
+
 function localStartOfToday(): Date {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
