@@ -141,7 +141,8 @@ function deriveDisplayState(loading, error, dataIdentity, errorIdentity, current
   const isIdentityTransition = dataIdentity !== currentIdentity && errorIdentity !== currentIdentity;
   const showLoading = loading || currentIdentity !== null && isIdentityTransition;
   const showError = !!error && currentIdentity !== null && errorIdentity === currentIdentity;
-  return { displayData, showLoading, showError };
+  const showUnavailable = currentIdentity === null && !loading;
+  return { displayData, showLoading, showError, showUnavailable };
 }
 var DashboardMetricsLoader = class {
   generation = 0;
@@ -274,7 +275,7 @@ var DashboardWiringHarness = class {
   // ── Identity display guard (exact mirror of DashboardPage's derived values) ──
   get state() {
     const currentIdentity = this.currentIdentity;
-    const { displayData, showLoading, showError } = deriveDisplayState(
+    const { displayData, showLoading, showError, showUnavailable } = deriveDisplayState(
       this.loading,
       this.error,
       this.dataIdentity,
@@ -286,6 +287,7 @@ var DashboardWiringHarness = class {
       displayData,
       showLoading,
       showError,
+      showUnavailable,
       errorMessage: this.error,
       dataIdentity: this.dataIdentity
     };
@@ -842,18 +844,48 @@ async function main() {
     );
     assert(s.showLoading, "loading shown during in-flight even with stale error");
   }
-  console.log("TEST: null currentIdentity (signed out) \u2192 no loading, no error");
+  console.log("TEST: null currentIdentity (signed out) \u2192 unavailable state, no metrics, no spinner, no error");
   {
     const s = deriveDisplayState(
       false,
       ERR_UNAVAILABLE,
       null,
+      ADMIN_IDENTITY,
+      null,
+      EMPTY_DASHBOARD
+    );
+    assert(s.showUnavailable, "unavailable state shown");
+    assert(!s.showLoading, "spinner stopped");
+    assert(!s.showError, "previous user error not exposed");
+    assert(s.displayData.total_leads === 0, "no metrics rendered");
+  }
+  console.log("TEST: null currentIdentity while loading \u2192 spinner, not unavailable");
+  {
+    const s = deriveDisplayState(
+      true,
+      "",
+      null,
       null,
       null,
       EMPTY_DASHBOARD
     );
-    assert(!s.showLoading, "no loading when signed out");
-    assert(!s.showError, "no error when signed out");
+    assert(s.showLoading, "spinner during initial load with null identity");
+    assert(!s.showUnavailable, "unavailable not shown while loading");
+  }
+  console.log("TEST: unsupported role identity (null) \u2192 unavailable state after loading");
+  {
+    const s = deriveDisplayState(
+      false,
+      ERR_SIGN_IN,
+      null,
+      null,
+      null,
+      EMPTY_DASHBOARD
+    );
+    assert(s.showUnavailable, "unavailable state for unsupported role");
+    assert(!s.showLoading, "no spinner for unsupported role");
+    assert(!s.showError, "no error banner for unsupported role (sign-in msg hidden)");
+    assert(s.displayData.total_leads === 0, "no metrics for unsupported role");
   }
   console.log("\n--- EMPTY_DASHBOARD ---");
   assert(EMPTY_DASHBOARD.total_leads === 0, "total_leads = 0");

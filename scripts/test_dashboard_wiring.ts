@@ -24,12 +24,14 @@ import {
   ERR_WAITING,
   ERR_UNAVAILABLE,
   type DashboardData,
+  type DisplayState,
 } from '../src/dashboardMetricsLoader';
 
 export interface HarnessState {
   displayData: DashboardData;
   showLoading: boolean;
   showError: boolean;
+  showUnavailable: boolean;
   errorMessage: string;
   dataIdentity: string | null;
 }
@@ -129,7 +131,7 @@ export class DashboardWiringHarness {
   // ── Identity display guard (exact mirror of DashboardPage's derived values) ──
   get state(): HarnessState {
     const currentIdentity = this.currentIdentity;
-    const { displayData, showLoading, showError } = deriveDisplayState(
+    const { displayData, showLoading, showError, showUnavailable } = deriveDisplayState(
       this.loading, this.error, this.dataIdentity, this.errorIdentity, currentIdentity, this.data,
     );
 
@@ -137,6 +139,7 @@ export class DashboardWiringHarness {
       displayData,
       showLoading,
       showError,
+      showUnavailable,
       errorMessage: this.error,
       dataIdentity: this.dataIdentity,
     };

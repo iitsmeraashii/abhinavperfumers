@@ -12,7 +12,7 @@ import {
   Users, TrendingUp, Calendar, Clock,
   MessageCircle, AlertCircle, XCircle,
   PhoneCall, Star, CheckCircle2, HeartCrack,
-  Loader2, RefreshCw, ArrowRight, Flame, Sun, Snowflake, HelpCircle,
+  Loader2, RefreshCw, ArrowRight, Flame, Sun, Snowflake, HelpCircle, UserX,
 } from 'lucide-react';
 
 const EMPTY = EMPTY_DASHBOARD;
@@ -187,7 +187,7 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
     return () => { loaderRef.current?.invalidate(); };
   }, []);
 
-  const { displayData, showLoading, showError } = deriveDisplayState(
+  const { displayData, showLoading, showError, showUnavailable } = deriveDisplayState(
     loading, error, dataIdentity, errorIdentity, currentIdentity, data,
   );
 
@@ -242,6 +242,12 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
       {showLoading ? (
         <div className="flex items-center justify-center py-24">
           <Loader2 className="w-6 h-6 text-stone-400 animate-spin" />
+        </div>
+      ) : showUnavailable ? (
+        <div className="flex flex-col items-center justify-center py-24 px-4 text-center">
+          <UserX className="w-10 h-10 text-stone-300 mb-4" />
+          <p className="text-sm font-medium text-stone-600">Profile unavailable</p>
+          <p className="text-xs text-stone-400 mt-1">Sign in to view dashboard metrics.</p>
         </div>
       ) : showError ? (
         null

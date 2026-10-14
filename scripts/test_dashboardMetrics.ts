@@ -636,13 +636,39 @@ async function main(): Promise<void> {
     assert(s.showLoading, 'loading shown during in-flight even with stale error');
   }
 
-  console.log('TEST: null currentIdentity (signed out) → no loading, no error');
+  console.log('TEST: null currentIdentity (signed out) → unavailable state, no metrics, no spinner, no error');
+  {
+    // loading complete, currentIdentity null — the rendered-state contract:
+    // showUnavailable true, showLoading false, showError false, displayData empty
+    const s = deriveDisplayState(
+      false, ERR_UNAVAILABLE, null, ADMIN_IDENTITY, null, EMPTY_DASHBOARD,
+    );
+    assert(s.showUnavailable, 'unavailable state shown');
+    assert(!s.showLoading, 'spinner stopped');
+    assert(!s.showError, 'previous user error not exposed');
+    assert(s.displayData.total_leads === 0, 'no metrics rendered');
+  }
+
+  console.log('TEST: null currentIdentity while loading → spinner, not unavailable');
   {
     const s = deriveDisplayState(
-      false, ERR_UNAVAILABLE, null, null, null, EMPTY_DASHBOARD,
+      true, '', null, null, null, EMPTY_DASHBOARD,
     );
-    assert(!s.showLoading, 'no loading when signed out');
-    assert(!s.showError, 'no error when signed out');
+    assert(s.showLoading, 'spinner during initial load with null identity');
+    assert(!s.showUnavailable, 'unavailable not shown while loading');
+  }
+
+  console.log('TEST: unsupported role identity (null) → unavailable state after loading');
+  {
+    // identityKey returns null for unsupported roles, so currentIdentity is null.
+    // After loading completes, the rendered-state contract is the same as signed-out.
+    const s = deriveDisplayState(
+      false, ERR_SIGN_IN, null, null, null, EMPTY_DASHBOARD,
+    );
+    assert(s.showUnavailable, 'unavailable state for unsupported role');
+    assert(!s.showLoading, 'no spinner for unsupported role');
+    assert(!s.showError, 'no error banner for unsupported role (sign-in msg hidden)');
+    assert(s.displayData.total_leads === 0, 'no metrics for unsupported role');
   }
 
   // ═══ Section 16: EMPTY_DASHBOARD constant ═══════════════════════════════════

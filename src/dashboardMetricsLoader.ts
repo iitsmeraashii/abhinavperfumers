@@ -122,6 +122,7 @@ export interface DisplayState {
   displayData: DashboardData;
   showLoading: boolean;
   showError: boolean;
+  showUnavailable: boolean;
 }
 
 export function deriveDisplayState(
@@ -137,7 +138,8 @@ export function deriveDisplayState(
     dataIdentity !== currentIdentity && errorIdentity !== currentIdentity;
   const showLoading = loading || (currentIdentity !== null && isIdentityTransition);
   const showError = !!error && currentIdentity !== null && errorIdentity === currentIdentity;
-  return { displayData, showLoading, showError };
+  const showUnavailable = currentIdentity === null && !loading;
+  return { displayData, showLoading, showError, showUnavailable };
 }
 
 export class DashboardMetricsLoader {
