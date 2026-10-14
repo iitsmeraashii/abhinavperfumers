@@ -76,15 +76,18 @@ export class TodaysFollowUpsLoader {
     let queryErr: unknown = null;
 
     try {
-      let q = supabase
+      const q = supabase
         .from('lead_follow_ups')
-        .select('id', { count: 'exact', head: true })
+        .select('id, lead_entries!inner(sales_rep_code)', {
+          count: 'exact',
+          head: true,
+        })
         .eq('status', 'PENDING')
         .gte('reminder_date', startStr)
         .lt('reminder_date', endStr);
 
       if (user.role !== 'admin' && user.rep_code) {
-        q = q.eq('lead_entries.sales_rep_code', user.rep_code);
+        q.eq('lead_entries.sales_rep_code', user.rep_code);
       }
 
       const { count, error } = await q;

@@ -136,21 +136,23 @@ interface FollowUpAttentionTileProps {
   loading: boolean;
   error: boolean;
   count: number | null;
-  onClick?: () => void;
+  onNavigate?: () => void;
+  onRetry?: () => void;
 }
 
-function FollowUpAttentionTile({ loading, error, count, onClick }: FollowUpAttentionTileProps) {
-  const clickable = !!onClick && !loading && !error;
+function FollowUpAttentionTile({ loading, error, count, onNavigate, onRetry }: FollowUpAttentionTileProps) {
+  const handleClick = error ? onRetry : onNavigate;
+  const clickable = !!handleClick && !loading;
 
   return (
     <div
       className={`rounded-xl border px-5 py-4 flex items-center gap-4 transition-all duration-150
         ${clickable ? 'cursor-pointer hover:border-amber-300 hover:shadow-md active:scale-[0.98]' : ''}
         bg-amber-50 border-amber-100`}
-      onClick={clickable ? onClick : undefined}
+      onClick={clickable ? handleClick : undefined}
       role={clickable ? 'button' : undefined}
       tabIndex={clickable ? 0 : undefined}
-      onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') onClick?.(); } : undefined}
+      onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') handleClick?.(); } : undefined}
     >
       <div className="mt-0.5 flex-shrink-0 text-amber-600">
         <CalendarClock className="w-5 h-5" />
@@ -351,7 +353,8 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
             loading={fuLoading}
             error={fuError}
             count={fuCount}
-            onClick={onNavigateToFollowUps}
+            onNavigate={onNavigateToFollowUps}
+            onRetry={fetchFollowUpCount}
           />
         </section>
       )}
