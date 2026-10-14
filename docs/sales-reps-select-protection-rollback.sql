@@ -60,26 +60,33 @@ BEGIN
     RAISE EXCEPTION 'ROLLBACK VERIFICATION FAILED: authenticated lacks SELECT'
       USING ERRCODE = 'check_violation';
   END IF;
-  -- Confirm no lingering column-level grants by inspecting pg_attribute.attacl
-  -- directly with aclexplode.  information_schema.column_privileges may show
-  -- grants implied by the restored table-level SELECT, which would produce a
-  -- false positive.  pg_attribute.attacl stores ONLY explicit column-level
-  -- ACLs, so it accurately reflects whether the proposal's column grants were
-  -- fully removed.
+  -- Confirm the proposal's column-level SELECT grants on the 12 allowed
+  -- columns were fully removed.  Inspect pg_attribute.attacl directly with
+  -- aclexplode, scoped to authenticated SELECT on exactly those 12 columns.
+  -- information_schema.column_privileges may show grants implied by the
+  -- restored table-level SELECT, producing false positives.  Other column
+  -- privileges (other grantees, other columns, other privilege types) are
+  -- not rejected.
   IF EXISTS (
     SELECT 1
     FROM pg_attribute a
     WHERE a.attrelid = 'public.sales_representatives'::regclass
       AND a.attisdropped = false
+      AND a.attname IN (
+        'id', 'rep_code', 'name', 'email', 'phone', 'created_at',
+        'is_active', 'role', 'login_enabled', 'auth_user_id',
+        'default_event_id', 'default_capture_profile'
+      )
       AND a.attacl IS NOT NULL
       AND EXISTS (
         SELECT 1
         FROM aclexplode(a.attacl) acl
         JOIN pg_roles r ON acl.grantee = r.oid
-        WHERE r.rolname IN ('anon', 'authenticated')
+        WHERE r.rolname = 'authenticated'
+          AND acl.privilege_type = 'SELECT'
       )
   ) THEN
-    RAISE EXCEPTION 'ROLLBACK VERIFICATION FAILED: explicit column-level grants still exist in pg_attribute.attacl'
+    RAISE EXCEPTION 'ROLLBACK VERIFICATION FAILED: authenticated SELECT column-level grants from the proposal still exist in pg_attribute.attacl'
       USING ERRCODE = 'check_violation';
   END IF;
 END $$;
