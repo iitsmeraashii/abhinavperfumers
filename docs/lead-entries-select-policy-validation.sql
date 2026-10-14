@@ -511,7 +511,7 @@ BEGIN
       v_detail := 'impersonation_failed';
     ELSE
       EXECUTE format(
-        'SELECT count(*) FROM public.lead_entries WHERE id = %L::uuid',
+        'SELECT count(*) FROM public.lead_entries WHERE id = %L',
         v_rep_b_lead_id
       ) INTO v_count;
       v_result := CASE WHEN v_count = 0 THEN 'PASS' ELSE 'FAIL' END;
@@ -548,7 +548,7 @@ BEGIN
       v_detail := 'impersonation_failed';
     ELSE
       EXECUTE format(
-        'SELECT count(*) FROM public.lead_entries WHERE id = %L::uuid',
+        'SELECT count(*) FROM public.lead_entries WHERE id = %L',
         v_rep_a_lead_id
       ) INTO v_count;
       v_result := CASE WHEN v_count = 0 THEN 'PASS' ELSE 'FAIL' END;
