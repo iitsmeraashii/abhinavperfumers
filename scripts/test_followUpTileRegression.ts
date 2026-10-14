@@ -9,7 +9,7 @@
 // B. Offline/auth-restricted/null count never displays 0
 // C. Online transport + offline-restored auth remains unavailable
 // D. Loaded tile navigates; error tile retries; unavailable does neither
-// E. Header Refresh invokes both loaders
+// E. Repeated follow-up loader calls (header-wiring is manually verified)
 // F. Identity change never displays the previous user's count
 // G. Loading state visible for valid identity even when fuIdentity is null
 
@@ -159,6 +159,29 @@ function test_query_error_never_displays_zero() {
   });
 }
 
+// ─── B2. Null count with no error/unavailable flags must not reach success ───
+
+function test_null_count_no_error_returns_error_not_success() {
+  // loading=false, error=false, unavailable=false, count=null, identities match.
+  // deriveFollowUpTileState must NOT return success or enable navigation.
+  const tile = deriveFollowUpTileState(
+    false,   // loading
+    false,   // error
+    false,   // unavailable
+    null,    // count
+    'admin|admin|',  // fuIdentity
+    'admin|admin|',  // currentIdentity
+  );
+
+  assert(tile !== null, 'B2-null: tile should not be null for valid identity');
+  assert(tile!.phase !== 'success',
+    `B2-null: phase must not be success when count is null, got ${tile!.phase}`);
+  assert(tile!.phase === 'error',
+    `B2-null: phase should be error for null count without error/unavailable, got ${tile!.phase}`);
+  assert(tile!.canNavigate === false, 'B2-null: canNavigate must be false');
+  assert(tile!.canRetry === true, 'B2-null: canRetry should be true');
+}
+
 // ─── C. Online transport + offline-restored auth remains unavailable ──────────
 
 function test_offline_restored_auth_remains_unavailable() {
@@ -224,13 +247,15 @@ function test_unavailable_tile_does_neither() {
   assert(tile!.canRetry === false, 'D-unavail: canRetry should be false');
 }
 
-// ─── E. Header Refresh invokes both loaders ──────────────────────────────────
+// ─── E. Repeated follow-up loader calls (header-wiring is manually verified) ─
 //
-// The header Refresh button calls both fetchData() and fetchFollowUpCount().
-// We verify that the follow-up loader is actually invoked by tracking the
-// handler call count.
+// NOTE: This test verifies only that the follow-up loader can be called
+// repeatedly and that each call hits the Supabase query handler. It does NOT
+// exercise the production DashboardPage header Refresh callback or confirm
+// that both fetchData() and fetchFollowUpCount() are invoked together.
+// That header-wiring behavior is manually verified in the browser.
 
-function test_header_refresh_invokes_both() {
+function test_repeated_followup_loader_calls() {
   let fromCallCount = 0;
 
   __setFromHandler(async () => {
@@ -246,10 +271,10 @@ function test_header_refresh_invokes_both() {
     const firstCount = fromCallCount;
     assert(firstCount === 1, `E: first load should call handler once, got ${firstCount}`);
 
-    // Simulate header Refresh: call load again
+    // Simulate a second call (as header Refresh would trigger)
     return Promise.resolve(loader.load('admin|admin|', adminUser)).then(() => {
       assert(fromCallCount === 2,
-        `E: refresh should call handler again (total 2), got ${fromCallCount}`);
+        `E: second call should invoke handler again (total 2), got ${fromCallCount}`);
 
       __resetFromHandler();
     });
@@ -364,11 +389,12 @@ async function runAll() {
   await test_offline_never_displays_zero();
   await test_null_count_never_displays_zero();
   await test_query_error_never_displays_zero();
+  test_null_count_no_error_returns_error_not_success();
   await test_offline_restored_auth_remains_unavailable();
   test_loaded_tile_navigates();
   test_error_tile_retries();
   test_unavailable_tile_does_neither();
-  await test_header_refresh_invokes_both();
+  await test_repeated_followup_loader_calls();
   test_identity_change_hides_previous_count();
   await test_identity_change_loader_stale();
   test_loading_visible_during_initial_load();

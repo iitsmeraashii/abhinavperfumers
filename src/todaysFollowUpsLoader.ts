@@ -67,7 +67,11 @@ export function deriveFollowUpTileState(
     return { phase: 'error', count: 0, canNavigate: false, canRetry: true };
   }
 
-  return { phase: 'success', count: count ?? 0, canNavigate: true, canRetry: false };
+  if (count === null) {
+    return { phase: 'error', count: 0, canNavigate: false, canRetry: true };
+  }
+
+  return { phase: 'success', count, canNavigate: true, canRetry: false };
 }
 
 function localStartOfToday(): Date {

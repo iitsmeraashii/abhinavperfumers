@@ -88,7 +88,10 @@ function deriveFollowUpTileState(loading, error, unavailable, count, fuIdentity,
   if (error) {
     return { phase: "error", count: 0, canNavigate: false, canRetry: true };
   }
-  return { phase: "success", count: count ?? 0, canNavigate: true, canRetry: false };
+  if (count === null) {
+    return { phase: "error", count: 0, canNavigate: false, canRetry: true };
+  }
+  return { phase: "success", count, canNavigate: true, canRetry: false };
 }
 function localStartOfToday() {
   const now = /* @__PURE__ */ new Date();
@@ -269,6 +272,33 @@ function test_query_error_never_displays_zero() {
     __resetFromHandler();
   });
 }
+function test_null_count_no_error_returns_error_not_success() {
+  const tile = deriveFollowUpTileState(
+    false,
+    // loading
+    false,
+    // error
+    false,
+    // unavailable
+    null,
+    // count
+    "admin|admin|",
+    // fuIdentity
+    "admin|admin|"
+    // currentIdentity
+  );
+  assert(tile !== null, "B2-null: tile should not be null for valid identity");
+  assert(
+    tile.phase !== "success",
+    `B2-null: phase must not be success when count is null, got ${tile.phase}`
+  );
+  assert(
+    tile.phase === "error",
+    `B2-null: phase should be error for null count without error/unavailable, got ${tile.phase}`
+  );
+  assert(tile.canNavigate === false, "B2-null: canNavigate must be false");
+  assert(tile.canRetry === true, "B2-null: canRetry should be true");
+}
 function test_offline_restored_auth_remains_unavailable() {
   setupOfflineRestored();
   const loader = new TodaysFollowUpsLoader();
@@ -334,7 +364,7 @@ function test_unavailable_tile_does_neither() {
   assert(tile.canNavigate === false, "D-unavail: canNavigate should be false");
   assert(tile.canRetry === false, "D-unavail: canRetry should be false");
 }
-function test_header_refresh_invokes_both() {
+function test_repeated_followup_loader_calls() {
   let fromCallCount = 0;
   __setFromHandler(async () => {
     fromCallCount++;
@@ -348,7 +378,7 @@ function test_header_refresh_invokes_both() {
     return Promise.resolve(loader.load("admin|admin|", adminUser)).then(() => {
       assert(
         fromCallCount === 2,
-        `E: refresh should call handler again (total 2), got ${fromCallCount}`
+        `E: second call should invoke handler again (total 2), got ${fromCallCount}`
       );
       __resetFromHandler();
     });
@@ -456,11 +486,12 @@ async function runAll() {
   await test_offline_never_displays_zero();
   await test_null_count_never_displays_zero();
   await test_query_error_never_displays_zero();
+  test_null_count_no_error_returns_error_not_success();
   await test_offline_restored_auth_remains_unavailable();
   test_loaded_tile_navigates();
   test_error_tile_retries();
   test_unavailable_tile_does_neither();
-  await test_header_refresh_invokes_both();
+  await test_repeated_followup_loader_calls();
   test_identity_change_hides_previous_count();
   await test_identity_change_loader_stale();
   test_loading_visible_during_initial_load();
