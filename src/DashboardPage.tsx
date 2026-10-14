@@ -212,29 +212,30 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
   return (
     <div className="p-6 max-w-5xl mx-auto">
       {/* Page header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-bold text-stone-900">Dashboard</h1>
-          <p className="text-xs text-stone-400 mt-0.5">
-            {isAdmin ? 'All leads — admin view' : `Your leads — ${user?.rep_code}`}
-          </p>
-          <p className="text-xs text-stone-500 mt-1">
-            {(() => {
-              const firstName = (user?.name ?? '').trim().split(/\s+/).find(Boolean);
-              return firstName
-                ? `Hello ${firstName}, hope you're having a great day.`
-                : `Hello, hope you're having a great day.`;
-            })()}
-          </p>
+      <div className="mb-6 rounded-2xl bg-amber-50 border border-amber-100 px-5 py-5 sm:px-6 sm:py-6">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+          <div className="min-w-0">
+            <span className="text-xs font-semibold text-amber-700 uppercase tracking-widest">Dashboard</span>
+            <h1 className="mt-1 text-2xl sm:text-3xl font-bold text-stone-900">
+              {(() => {
+                const firstName = (user?.name ?? '').trim().split(/\s+/).find(Boolean);
+                return firstName ? `Hello ${firstName}` : 'Hello';
+              })()}
+            </h1>
+            <p className="mt-0.5 text-sm text-stone-600">Hope you're having a great day.</p>
+            <p className="text-xs text-stone-400 mt-2">
+              {isAdmin ? 'All leads — admin view' : `Your leads — ${user?.rep_code}`}
+            </p>
+          </div>
+          <button
+            onClick={fetchData}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 transition disabled:opacity-50 self-start sm:self-auto flex-shrink-0"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
         </div>
-        <button
-          onClick={fetchData}
-          disabled={loading}
-          className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 transition disabled:opacity-50"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
       </div>
 
       {error && (
