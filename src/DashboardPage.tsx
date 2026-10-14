@@ -9,10 +9,17 @@ import {
   type DashboardData,
 } from './dashboardMetricsLoader';
 import {
+  TodaysFollowUpsLoader,
+  type FollowUpCountResult,
+  ERR_FOLLOWUP_SIGN_IN,
+  ERR_FOLLOWUP_WAITING,
+} from './todaysFollowUpsLoader';
+import {
   Users, TrendingUp, Calendar, Clock,
   MessageCircle, AlertCircle, XCircle,
   PhoneCall, Star, CheckCircle2, HeartCrack,
   Loader2, RefreshCw, ArrowRight, Flame, Sun, Snowflake, HelpCircle, UserX,
+  CalendarClock,
 } from 'lucide-react';
 
 const EMPTY = EMPTY_DASHBOARD;
@@ -122,9 +129,63 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 interface DashboardPageProps {
   onNavigateToLeads?: (filter: DashboardFilter) => void;
+  onNavigateToFollowUps?: () => void;
 }
 
-export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps) {
+interface FollowUpAttentionTileProps {
+  loading: boolean;
+  error: boolean;
+  count: number | null;
+  onClick?: () => void;
+}
+
+function FollowUpAttentionTile({ loading, error, count, onClick }: FollowUpAttentionTileProps) {
+  const clickable = !!onClick && !loading && !error;
+
+  return (
+    <div
+      className={`rounded-xl border px-5 py-4 flex items-center gap-4 transition-all duration-150
+        ${clickable ? 'cursor-pointer hover:border-amber-300 hover:shadow-md active:scale-[0.98]' : ''}
+        bg-amber-50 border-amber-100`}
+      onClick={clickable ? onClick : undefined}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') onClick?.(); } : undefined}
+    >
+      <div className="mt-0.5 flex-shrink-0 text-amber-600">
+        <CalendarClock className="w-5 h-5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-amber-700 font-medium mb-1">Today's Follow-Ups</p>
+        {loading ? (
+          <div className="flex items-center gap-2">
+            <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+            <span className="text-sm text-amber-500">Loading…</span>
+          </div>
+        ) : error ? (
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400" />
+            <span className="text-sm text-red-500">Couldn't load — tap to retry</span>
+          </div>
+        ) : (
+          <>
+            <p className="text-2xl font-bold tabular-nums leading-none text-amber-800">
+              {count ?? 0}
+            </p>
+            <p className="text-xs text-amber-500 mt-1">
+              {(count ?? 0) === 1 ? 'pending follow-up due today' : 'pending follow-ups due today'}
+            </p>
+          </>
+        )}
+      </div>
+      {clickable && (
+        <ArrowRight className="w-3.5 h-3.5 text-amber-300 self-center flex-shrink-0 mt-0.5" />
+      )}
+    </div>
+  );
+}
+
+export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps }: DashboardPageProps) {
   const { user, authMode } = useAuth();
   const nav = (f: DashboardFilter) => onNavigateToLeads?.(f);
   const currentIdentity = identityKey(user);
@@ -139,9 +200,42 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
   const loaderRef = useRef<DashboardMetricsLoader | null>(null);
   if (!loaderRef.current) loaderRef.current = new DashboardMetricsLoader();
 
+  const fuLoaderRef = useRef<TodaysFollowUpsLoader | null>(null);
+  if (!fuLoaderRef.current) fuLoaderRef.current = new TodaysFollowUpsLoader();
+
+  const [fuCount, setFuCount] = useState<number | null>(null);
+  const [fuLoading, setFuLoading] = useState(true);
+  const [fuError, setFuError] = useState(false);
+  const [fuIdentity, setFuIdentity] = useState<string | null>(null);
+
   // Subscribe to transport connectivity. The returned boolean is a reactive
   // dependency that re-triggers the fetch effect when transport changes.
   const isOnline = useOnlineStatus();
+
+  const fetchFollowUpCount = useCallback(async () => {
+    const loader = fuLoaderRef.current!;
+    setFuLoading(true);
+    setFuError(false);
+    const result: FollowUpCountResult = await loader.load(currentIdentity, user);
+
+    if (result.kind === 'stale') return;
+
+    if (result.kind === 'error') {
+      if (result.message === ERR_FOLLOWUP_SIGN_IN || result.message === ERR_FOLLOWUP_WAITING) {
+        setFuCount(null);
+      } else {
+        setFuError(true);
+        setFuCount(null);
+      }
+      setFuIdentity(currentIdentity);
+      setFuLoading(false);
+      return;
+    }
+
+    setFuCount(result.count);
+    setFuIdentity(currentIdentity);
+    setFuLoading(false);
+  }, [currentIdentity, user]);
 
   const fetchData = useCallback(async () => {
     const loader = loaderRef.current!;
@@ -177,14 +271,24 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
     setError('');
     loaderRef.current!.invalidate();
     fetchData();
+
+    setFuCount(null);
+    setFuIdentity(null);
+    setFuError(false);
+    setFuLoading(true);
+    fuLoaderRef.current!.invalidate();
+    fetchFollowUpCount();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchData, authMode, isOnline]);
+  }, [fetchData, fetchFollowUpCount, authMode, isOnline]);
 
   // Cleanup on unmount — invalidate only, don't permanently unmount.
   // In StrictMode, setup→cleanup→setup reuses the same loader instance;
   // unmount() would make it permanently unusable.
   useEffect(() => {
-    return () => { loaderRef.current?.invalidate(); };
+    return () => {
+      loaderRef.current?.invalidate();
+      fuLoaderRef.current?.invalidate();
+    };
   }, []);
 
   const { displayData, showLoading, showError, showUnavailable } = deriveDisplayState(
@@ -237,6 +341,19 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
             Retry
           </button>
         </div>
+      )}
+
+      {/* ── Needs your attention ── */}
+      {fuIdentity === currentIdentity && (
+        <section className="mb-6">
+          <SectionLabel>Needs your attention</SectionLabel>
+          <FollowUpAttentionTile
+            loading={fuLoading}
+            error={fuError}
+            count={fuCount}
+            onClick={onNavigateToFollowUps}
+          />
+        </section>
       )}
 
       {showLoading ? (

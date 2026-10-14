@@ -348,6 +348,7 @@ function Layout() {
   const [leadsEventFilter,   setLeadsEventFilter]   = useState<string | undefined>(undefined);
   const [leadsInitialFilters,setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
+  const [followupsInitialFilter, setFollowupsInitialFilter] = useState<'today' | undefined>(undefined);
   const [moreDrawerOpen,     setMoreDrawerOpen]     = useState(false);
   const [resumeDraftId,      setResumeDraftId]      = useState<string | null>(null);
 
@@ -412,6 +413,7 @@ function Layout() {
     window.history.pushState({}, '', url.toString());
     setLeadsEventFilter(undefined);
     setLeadsInitialFilters(undefined);
+    setFollowupsInitialFilter(undefined);
   }
 
   function handleOpenFollowUpComplete(id: string) {
@@ -453,6 +455,16 @@ function Layout() {
     setLeadsInitialFilters(filter);
     setTab('leads');
     localStorage.setItem('activeTab', 'leads');
+    setSelectedLeadId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
+  function handleNavigateToFollowUps() {
+    setFollowupsInitialFilter('today');
+    setTab('followups');
+    localStorage.setItem('activeTab', 'followups');
     setSelectedLeadId(null);
     const url = new URL(window.location.href);
     url.search = '';
@@ -605,7 +617,7 @@ function Layout() {
         ) : (
           <>
             {tab === 'dashboard' && !selectedLeadId && (
-              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} />
+              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} />
             )}
             {tab === 'events' && isAdmin && !selectedLeadId && (
               <EventsPage onViewLeads={handleViewLeads} />
@@ -625,7 +637,7 @@ function Layout() {
               />
             )}
             {tab === 'followups' && !selectedLeadId && (
-              <FollowUpsPage onSelectLead={handleSelectLead} onOpenFollowUpComplete={handleOpenFollowUpComplete} />
+              <FollowUpsPage key={followupsInitialFilter ?? 'default'} onSelectLead={handleSelectLead} onOpenFollowUpComplete={handleOpenFollowUpComplete} initialDateFilter={followupsInitialFilter} />
             )}
             {tab === 'conversations' && !selectedLeadId && !selectedConversationId && (
               <ConversationsPage

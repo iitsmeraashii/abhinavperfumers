@@ -74,16 +74,17 @@ function classifyDueState(reminderDate: string): DueState {
 interface FollowUpsPageProps {
   onSelectLead: (leadId: string) => void;
   onOpenFollowUpComplete: (followUpId: string) => void;
+  initialDateFilter?: DateFilter;
 }
 
-export default function FollowUpsPage({ onSelectLead, onOpenFollowUpComplete }: FollowUpsPageProps) {
+export default function FollowUpsPage({ onSelectLead, onOpenFollowUpComplete, initialDateFilter }: FollowUpsPageProps) {
   const { user } = useAuth();
   const [rows, setRows] = useState<FollowUpRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
-  const [dateFilter, setDateFilter] = useState<DateFilter>('all');
+  const [dateFilter, setDateFilter] = useState<DateFilter>(initialDateFilter ?? 'all');
   const [completingId, setCompletingId] = useState<string | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
