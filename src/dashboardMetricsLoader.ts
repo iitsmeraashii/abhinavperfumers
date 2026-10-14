@@ -118,6 +118,28 @@ export const ERR_SIGN_IN = 'Dashboard metrics unavailable: sign-in required.';
 export const ERR_WAITING = 'Dashboard metrics unavailable: waiting for connection.';
 export const ERR_UNAVAILABLE = 'Dashboard metrics unavailable. Tap Retry to try again.';
 
+export interface DisplayState {
+  displayData: DashboardData;
+  showLoading: boolean;
+  showError: boolean;
+}
+
+export function deriveDisplayState(
+  loading: boolean,
+  error: string,
+  dataIdentity: string | null,
+  errorIdentity: string | null,
+  currentIdentity: string | null,
+  data: DashboardData,
+): DisplayState {
+  const displayData = dataIdentity === currentIdentity ? data : EMPTY_DASHBOARD;
+  const isIdentityTransition =
+    dataIdentity !== currentIdentity && errorIdentity !== currentIdentity;
+  const showLoading = loading || (currentIdentity !== null && isIdentityTransition);
+  const showError = !!error && currentIdentity !== null && errorIdentity === currentIdentity;
+  return { displayData, showLoading, showError };
+}
+
 export class DashboardMetricsLoader {
   private generation = 0;
   private currentIdentity: string | null = null;

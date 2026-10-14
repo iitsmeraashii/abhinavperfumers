@@ -5,6 +5,7 @@ import {
   DashboardMetricsLoader,
   EMPTY_DASHBOARD,
   identityKey,
+  deriveDisplayState,
   type DashboardData,
 } from './dashboardMetricsLoader';
 import {
@@ -130,6 +131,7 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
 
   const [data, setData] = useState<DashboardData>(EMPTY);
   const [dataIdentity, setDataIdentity] = useState<string | null>(null);
+  const [errorIdentity, setErrorIdentity] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const isAdmin = user?.role === 'admin';
@@ -153,12 +155,14 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
       setError(result.message);
       setData(EMPTY);
       setDataIdentity(null);
+      setErrorIdentity(currentIdentity);
       setLoading(false);
       return;
     }
 
     setData(result.data);
     setDataIdentity(currentIdentity);
+    setErrorIdentity(null);
     setLoading(false);
   }, [currentIdentity]);
 
@@ -168,6 +172,7 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
   useEffect(() => {
     setData(EMPTY);
     setDataIdentity(null);
+    setErrorIdentity(null);
     setLoading(true);
     setError('');
     loaderRef.current!.invalidate();
@@ -182,13 +187,9 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
     return () => { loaderRef.current?.invalidate(); };
   }, []);
 
-  // ─── Identity display guard ──────────────────────────────────────────
-  // Prevent previous-user metrics from rendering under a new user's header,
-  // including before effects run. If the loaded data's identity doesn't
-  // match the current identity, show loading state instead.
-  const displayData = dataIdentity === currentIdentity ? data : EMPTY;
-  const showLoading = loading || dataIdentity !== currentIdentity;
-  const showError = error && dataIdentity === null;
+  const { displayData, showLoading, showError } = deriveDisplayState(
+    loading, error, dataIdentity, errorIdentity, currentIdentity, data,
+  );
 
   const funnelTotal = displayData.total_leads || 1;
 

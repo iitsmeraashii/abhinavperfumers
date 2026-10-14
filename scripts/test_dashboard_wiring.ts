@@ -19,6 +19,7 @@ import {
   EMPTY_DASHBOARD,
   identityKey,
   isAuthorized,
+  deriveDisplayState,
   ERR_SIGN_IN,
   ERR_WAITING,
   ERR_UNAVAILABLE,
@@ -46,6 +47,7 @@ export class DashboardWiringHarness {
   // ── State (mirror DashboardPage) ──
   private data: DashboardData = EMPTY_DASHBOARD;
   private dataIdentity: string | null = null;
+  private errorIdentity: string | null = null;
   private loading = true;
   private error = '';
 
@@ -86,12 +88,14 @@ export class DashboardWiringHarness {
       this.error = result.message;
       this.data = EMPTY_DASHBOARD;
       this.dataIdentity = null;
+      this.errorIdentity = this.currentIdentity;
       this.loading = false;
       return;
     }
 
     this.data = result.data;
     this.dataIdentity = this.currentIdentity;
+    this.errorIdentity = null;
     this.loading = false;
   }
 
@@ -100,6 +104,7 @@ export class DashboardWiringHarness {
   triggerEffect(): void {
     this.data = EMPTY_DASHBOARD;
     this.dataIdentity = null;
+    this.errorIdentity = null;
     this.loading = true;
     this.error = '';
     this.loader.invalidate();
@@ -124,9 +129,9 @@ export class DashboardWiringHarness {
   // ── Identity display guard (exact mirror of DashboardPage's derived values) ──
   get state(): HarnessState {
     const currentIdentity = this.currentIdentity;
-    const displayData = this.dataIdentity === currentIdentity ? this.data : EMPTY_DASHBOARD;
-    const showLoading = this.loading || this.dataIdentity !== currentIdentity;
-    const showError = !!this.error && this.dataIdentity === null;
+    const { displayData, showLoading, showError } = deriveDisplayState(
+      this.loading, this.error, this.dataIdentity, this.errorIdentity, currentIdentity, this.data,
+    );
 
     return {
       displayData,

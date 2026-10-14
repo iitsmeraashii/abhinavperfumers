@@ -136,6 +136,13 @@ function isAuthorized() {
 var ERR_SIGN_IN = "Dashboard metrics unavailable: sign-in required.";
 var ERR_WAITING = "Dashboard metrics unavailable: waiting for connection.";
 var ERR_UNAVAILABLE = "Dashboard metrics unavailable. Tap Retry to try again.";
+function deriveDisplayState(loading, error, dataIdentity, errorIdentity, currentIdentity, data) {
+  const displayData = dataIdentity === currentIdentity ? data : EMPTY_DASHBOARD;
+  const isIdentityTransition = dataIdentity !== currentIdentity && errorIdentity !== currentIdentity;
+  const showLoading = loading || currentIdentity !== null && isIdentityTransition;
+  const showError = !!error && currentIdentity !== null && errorIdentity === currentIdentity;
+  return { displayData, showLoading, showError };
+}
 var DashboardMetricsLoader = class {
   generation = 0;
   currentIdentity = null;
@@ -200,6 +207,7 @@ var DashboardWiringHarness = class {
   // ── State (mirror DashboardPage) ──
   data = EMPTY_DASHBOARD;
   dataIdentity = null;
+  errorIdentity = null;
   loading = true;
   error = "";
   // ── Props/inputs (controlled by test) ──
@@ -231,11 +239,13 @@ var DashboardWiringHarness = class {
       this.error = result.message;
       this.data = EMPTY_DASHBOARD;
       this.dataIdentity = null;
+      this.errorIdentity = this.currentIdentity;
       this.loading = false;
       return;
     }
     this.data = result.data;
     this.dataIdentity = this.currentIdentity;
+    this.errorIdentity = null;
     this.loading = false;
   }
   // ── Main effect (exact mirror of DashboardPage's useEffect) ──
@@ -243,6 +253,7 @@ var DashboardWiringHarness = class {
   triggerEffect() {
     this.data = EMPTY_DASHBOARD;
     this.dataIdentity = null;
+    this.errorIdentity = null;
     this.loading = true;
     this.error = "";
     this.loader.invalidate();
@@ -263,9 +274,14 @@ var DashboardWiringHarness = class {
   // ── Identity display guard (exact mirror of DashboardPage's derived values) ──
   get state() {
     const currentIdentity = this.currentIdentity;
-    const displayData = this.dataIdentity === currentIdentity ? this.data : EMPTY_DASHBOARD;
-    const showLoading = this.loading || this.dataIdentity !== currentIdentity;
-    const showError = !!this.error && this.dataIdentity === null;
+    const { displayData, showLoading, showError } = deriveDisplayState(
+      this.loading,
+      this.error,
+      this.dataIdentity,
+      this.errorIdentity,
+      currentIdentity,
+      this.data
+    );
     return {
       displayData,
       showLoading,
@@ -747,6 +763,97 @@ async function main() {
     );
     loader.unmount();
     __resetRpcHandler();
+  }
+  console.log("\n--- deriveDisplayState ---");
+  console.log("TEST: current-user RPC error \u2192 error visible, loading false, Retry enabled");
+  {
+    const s = deriveDisplayState(
+      false,
+      ERR_UNAVAILABLE,
+      null,
+      ADMIN_IDENTITY,
+      ADMIN_IDENTITY,
+      EMPTY_DASHBOARD
+    );
+    assert(s.showError, "error visible");
+    assert(!s.showLoading, "loading false");
+    assert(s.displayData.total_leads === 0, "no metrics shown");
+  }
+  console.log("TEST: Retry in progress \u2192 loading true, Retry disabled");
+  {
+    const s = deriveDisplayState(
+      true,
+      "",
+      null,
+      null,
+      ADMIN_IDENTITY,
+      EMPTY_DASHBOARD
+    );
+    assert(s.showLoading, "loading true");
+    assert(!s.showError, "error not shown during loading");
+  }
+  console.log("TEST: Retry success \u2192 metrics visible, error cleared");
+  {
+    const s = deriveDisplayState(
+      false,
+      "",
+      ADMIN_IDENTITY,
+      null,
+      ADMIN_IDENTITY,
+      VALID_METRICS
+    );
+    assert(!s.showLoading, "loading false");
+    assert(!s.showError, "error cleared");
+    assert(s.displayData.total_leads === 100, "metrics visible");
+  }
+  console.log("TEST: identity change \u2192 old data and old error hidden before effects");
+  {
+    const sData = deriveDisplayState(
+      false,
+      "",
+      ADMIN_IDENTITY,
+      null,
+      REP_IDENTITY,
+      VALID_METRICS
+    );
+    assert(sData.displayData.total_leads === 0, "old data hidden (EMPTY)");
+    assert(sData.showLoading, "loading shown (identity transition)");
+    assert(!sData.showError, "no error during identity transition");
+    const sErr = deriveDisplayState(
+      false,
+      ERR_UNAVAILABLE,
+      null,
+      ADMIN_IDENTITY,
+      REP_IDENTITY,
+      EMPTY_DASHBOARD
+    );
+    assert(!sErr.showError, "old error hidden after identity change");
+    assert(sErr.showLoading, "loading shown (identity transition)");
+  }
+  console.log("TEST: current-identity error after retry start \u2192 error wins over loading");
+  {
+    const s = deriveDisplayState(
+      true,
+      ERR_UNAVAILABLE,
+      null,
+      ADMIN_IDENTITY,
+      ADMIN_IDENTITY,
+      EMPTY_DASHBOARD
+    );
+    assert(s.showLoading, "loading shown during in-flight even with stale error");
+  }
+  console.log("TEST: null currentIdentity (signed out) \u2192 no loading, no error");
+  {
+    const s = deriveDisplayState(
+      false,
+      ERR_UNAVAILABLE,
+      null,
+      null,
+      null,
+      EMPTY_DASHBOARD
+    );
+    assert(!s.showLoading, "no loading when signed out");
+    assert(!s.showError, "no error when signed out");
   }
   console.log("\n--- EMPTY_DASHBOARD ---");
   assert(EMPTY_DASHBOARD.total_leads === 0, "total_leads = 0");
