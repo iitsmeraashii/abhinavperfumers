@@ -1,15 +1,34 @@
-// Test script for DashboardPage metrics loading logic.
-// Run via: npx esbuild test_dashboardMetrics.ts --bundle --platform=node --format=cjs --outfile=test_dashboardMetrics.cjs && node test_dashboardMetrics.cjs
+// Component-level tests for Dashboard loading correctness.
 //
-// Tests the pure functions exported from DashboardPage.tsx:
-//   parseMetricsResponse — validates and normalizes RPC response
-//   getTodayIso — computes browser-local midnight as UTC ISO
+// Exercises the production-used DashboardMetricsLoader controller (the class
+// that DashboardPage delegates to) plus the exported pure functions. Mocks
+// only external boundaries: supabase RPC, authMode, connectivity.
 //
-// Tests the fetch-authorization and stale-response logic via a
-// lightweight harness that simulates the control flow without React.
+// Build & run:
+//   npx esbuild scripts/test_dashboardMetrics.ts --bundle --platform=node --format=cjs \
+//     --alias:supabaseClient=./scripts/test_dashboard_stub_supabase.ts \
+//     --alias:authModeState=./scripts/test_dashboard_stub_authMode.ts \
+//     --alias:connectivityStore=./scripts/test_dashboard_stub_connectivity.ts \
+//     --outfile=scripts/test_dashboardMetrics.cjs && node scripts/test_dashboardMetrics.cjs
 
-import { parseMetricsResponse, getTodayIso } from '../src/DashboardPage';
-import { isCloudSyncAllowed, setAuthModeState } from '../src/authModeState';
+import {
+  DashboardMetricsLoader,
+  parseMetricsResponse,
+  getTodayIso,
+  identityKey,
+  isAuthorized,
+  isValidCount,
+  ERR_SIGN_IN,
+  ERR_WAITING,
+  ERR_UNAVAILABLE,
+  EMPTY_DASHBOARD,
+  type DashboardData,
+} from '../src/dashboardMetricsLoader';
+import { __setRpcHandler, __resetRpcHandler } from './test_dashboard_stub_supabase';
+import { setAuthModeState } from './test_dashboard_stub_authMode';
+import { __setTransportOnline } from './test_dashboard_stub_connectivity';
+
+// ─── Test helpers ────────────────────────────────────────────────────────────
 
 let passed = 0;
 let failed = 0;
@@ -24,431 +43,550 @@ function assert(condition: boolean, message: string): void {
   }
 }
 
-// ─── parseMetricsResponse tests ─────────────────────────────────────────────
-
-console.log('\n--- parseMetricsResponse ---');
-
-// TEST 1: valid single-row response (object, not array)
-console.log('TEST 1: valid object response');
-{
-  const rpcData = {
-    total_leads: 100,
-    leads_today: 10,
-    leads_last_7_days: 50,
-    leads_last_30_days: 80,
-    whatsapp_sent: 30,
-    whatsapp_failed: 5,
-    invalid_leads: 2,
-    new_leads: 40,
-    contacted_leads: 20,
-    qualified_leads: 15,
-    converted_leads: 10,
-    lost_leads: 5,
-    hot_leads: 25,
-    warm_leads: 30,
-    cold_leads: 40,
-    unassigned_temperature_leads: 5,
-  };
-  const result = parseMetricsResponse(rpcData);
-  assert(result !== null, 'TEST 1 — non-null result');
-  assert(result?.total_leads === 100, 'TEST 1 — total_leads = 100');
-  assert(result?.leads_today === 10, 'TEST 1 — leads_today = 10');
-  assert(result?.hot_leads === 25, 'TEST 1 — hot_leads = 25');
+function flushPromises(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-// TEST 2: valid array response (PostgREST may wrap in array)
-console.log('TEST 2: valid array response');
-{
-  const rpcData = [{
-    total_leads: 200,
-    leads_today: 20,
-    leads_last_7_days: 100,
-    leads_last_30_days: 160,
-    whatsapp_sent: 60,
-    whatsapp_failed: 10,
-    invalid_leads: 4,
-    new_leads: 80,
-    contacted_leads: 40,
-    qualified_leads: 30,
-    converted_leads: 20,
-    lost_leads: 10,
-    hot_leads: 50,
-    warm_leads: 60,
-    cold_leads: 80,
-    unassigned_temperature_leads: 10,
-  }];
-  const result = parseMetricsResponse(rpcData);
-  assert(result !== null, 'TEST 2 — non-null result');
-  assert(result?.total_leads === 200, 'TEST 2 — total_leads = 200');
-  assert(result?.converted_leads === 20, 'TEST 2 — converted_leads = 20');
-}
+// ─── Test data ───────────────────────────────────────────────────────────────
 
-// TEST 3: null response → null (not zero counts)
-console.log('TEST 3: null response');
-{
-  const result = parseMetricsResponse(null);
-  assert(result === null, 'TEST 3 — null result for null input');
-}
+const VALID_METRICS = {
+  total_leads: 100, leads_today: 10, leads_last_7_days: 50, leads_last_30_days: 80,
+  whatsapp_sent: 30, whatsapp_failed: 5, invalid_leads: 2,
+  new_leads: 40, contacted_leads: 20, qualified_leads: 15, converted_leads: 10, lost_leads: 5,
+  hot_leads: 25, warm_leads: 30, cold_leads: 40, unassigned_temperature_leads: 5,
+};
 
-// TEST 4: empty array → null (not zero counts)
-console.log('TEST 4: empty array response');
-{
-  const result = parseMetricsResponse([]);
-  assert(result === null, 'TEST 4 — null result for empty array');
-}
+const ZERO_METRICS = {
+  total_leads: 0, leads_today: 0, leads_last_7_days: 0, leads_last_30_days: 0,
+  whatsapp_sent: 0, whatsapp_failed: 0, invalid_leads: 0,
+  new_leads: 0, contacted_leads: 0, qualified_leads: 0, converted_leads: 0, lost_leads: 0,
+  hot_leads: 0, warm_leads: 0, cold_leads: 0, unassigned_temperature_leads: 0,
+};
 
-// TEST 5: undefined response → null
-console.log('TEST 5: undefined response');
-{
-  const result = parseMetricsResponse(undefined);
-  assert(result === null, 'TEST 5 — null result for undefined input');
-}
+const ADMIN_IDENTITY = 'auth-admin-001|admin|ADMIN001';
+const REP_IDENTITY = 'auth-rep-001|sales_rep|REP001';
 
-// TEST 6: response with bigint-like string values → coerced to number
-console.log('TEST 6: bigint-like string values');
-{
-  const rpcData = {
-    total_leads: '150',
-    leads_today: '15',
-    leads_last_7_days: '75',
-    leads_last_30_days: '120',
-    whatsapp_sent: '45',
-    whatsapp_failed: '8',
-    invalid_leads: '3',
-    new_leads: '60',
-    contacted_leads: '30',
-    qualified_leads: '22',
-    converted_leads: '15',
-    lost_leads: '8',
-    hot_leads: '38',
-    warm_leads: '45',
-    cold_leads: '60',
-    unassigned_temperature_leads: '7',
-  };
-  const result = parseMetricsResponse(rpcData);
-  assert(result !== null, 'TEST 6 — non-null result');
-  assert(result?.total_leads === 150, 'TEST 6 — total_leads = 150 (string coerced)');
-  assert(result?.leads_today === 15, 'TEST 6 — leads_today = 15');
-}
-
-// TEST 7: response with missing fields → defaults to 0
-console.log('TEST 7: missing fields default to 0');
-{
-  const rpcData = { total_leads: 50 };
-  const result = parseMetricsResponse(rpcData);
-  assert(result !== null, 'TEST 7 — non-null result');
-  assert(result?.total_leads === 50, 'TEST 7 — total_leads = 50');
-  assert(result?.leads_today === 0, 'TEST 7 — leads_today defaults to 0');
-  assert(result?.hot_leads === 0, 'TEST 7 — hot_leads defaults to 0');
-}
-
-// ─── getTodayIso tests ───────────────────────────────────────────────────────
-
-console.log('\n--- getTodayIso ---');
-
-// TEST 8: getTodayIso returns midnight in local timezone as UTC
-console.log('TEST 8: getTodayIso returns valid ISO string');
-{
-  const now = new Date(2026, 9, 14, 15, 30, 0); // Oct 14, 2026 15:30 local
-  const iso = getTodayIso(now);
-  const parsed = new Date(iso);
-  // Should be midnight local time on the same date
-  const midnightLocal = new Date(2026, 9, 14, 0, 0, 0);
-  assert(parsed.getTime() === midnightLocal.getTime(), 'TEST 8 — ISO equals local midnight timestamp');
-}
-
-// TEST 9: getTodayIso at 00:00 local returns same day midnight
-console.log('TEST 9: getTodayIso at exact midnight');
-{
-  const now = new Date(2026, 0, 1, 0, 0, 0); // Jan 1, 2026 00:00 local
-  const iso = getTodayIso(now);
-  const parsed = new Date(iso);
-  assert(parsed.getTime() === now.getTime(), 'TEST 9 — ISO equals midnight timestamp');
-}
-
-// ─── Authorization gate tests (simulating fetchData control flow) ────────────
-
-console.log('\n--- Authorization gates ---');
-
-// The fetchData function checks isCloudSyncAllowed() before issuing a request.
-// We simulate the same control flow here.
-
-interface SimUser {
-  rep_code: string;
-  role: string;
-  authUserId?: string;
-  name?: string;
-}
-
-interface SimResult {
-  issuedRequest: boolean;
-  errorMessage: string | null;
-}
-
-// Simulates the fetch authorization gate from DashboardPage.fetchData.
-function simulateFetchGate(user: SimUser | null): SimResult {
-  if (!user?.rep_code || !user?.role) {
-    return { issuedRequest: false, errorMessage: 'Dashboard metrics unavailable: sign-in required.' };
-  }
-  if (!isCloudSyncAllowed()) {
-    return { issuedRequest: false, errorMessage: 'Dashboard metrics unavailable: waiting for connection.' };
-  }
-  return { issuedRequest: true, errorMessage: null };
-}
-
-// TEST 10: admin with online auth → request issued
-console.log('TEST 10: admin, online → request issued');
-{
+function setAuthorized(): void {
+  __setTransportOnline(true);
   setAuthModeState('online');
-  const result = simulateFetchGate({ rep_code: 'ADMIN001', role: 'admin' });
-  assert(result.issuedRequest, 'TEST 10 — request issued for admin');
-  assert(result.errorMessage === null, 'TEST 10 — no error for admin');
 }
 
-// TEST 11: sales_rep with online auth → request issued
-console.log('TEST 11: sales_rep, online → request issued');
-{
+function setTransportDown(): void {
+  __setTransportOnline(false);
   setAuthModeState('online');
-  const result = simulateFetchGate({ rep_code: 'REP001', role: 'sales_rep' });
-  assert(result.issuedRequest, 'TEST 11 — request issued for sales_rep');
-  assert(result.errorMessage === null, 'TEST 11 — no error for sales_rep');
 }
 
-// TEST 12: missing identity → fail closed, no request
-console.log('TEST 12: missing identity → no request');
-{
-  setAuthModeState('online');
-  const result = simulateFetchGate(null);
-  assert(!result.issuedRequest, 'TEST 12 — no request for null user');
-  assert(result.errorMessage === 'Dashboard metrics unavailable: sign-in required.', 'TEST 12 — sign-in error message');
-}
-
-// TEST 13: missing rep_code → fail closed
-console.log('TEST 13: missing rep_code → no request');
-{
-  setAuthModeState('online');
-  const result = simulateFetchGate({ rep_code: '', role: 'admin' });
-  assert(!result.issuedRequest, 'TEST 13 — no request for empty rep_code');
-}
-
-// TEST 14: missing role → fail closed
-console.log('TEST 14: missing role → no request');
-{
-  setAuthModeState('online');
-  const result = simulateFetchGate({ rep_code: 'REP001', role: '' });
-  assert(!result.issuedRequest, 'TEST 14 — no request for empty role');
-}
-
-// TEST 15: unsupported role → fail closed
-console.log('TEST 15: unsupported role → no request');
-{
-  setAuthModeState('online');
-  const result = simulateFetchGate({ rep_code: 'REP001', role: 'superadmin' });
-  // The gate checks !user?.role which would pass for 'superadmin',
-  // but the RPC itself would reject it. The frontend gate is for
-  // missing/empty, the RPC handles unsupported roles.
-  // This test documents that the frontend gate allows non-empty roles
-  // through to the RPC, which then rejects.
-  assert(result.issuedRequest, 'TEST 15 — frontend gate passes non-empty role to RPC');
-}
-
-// TEST 16: offline-restored → no request (waiting for connection)
-console.log('TEST 16: offline-restored → no request');
-{
+function setAuthOffline(): void {
+  __setTransportOnline(true);
   setAuthModeState('offline-restored');
-  const result = simulateFetchGate({ rep_code: 'REP001', role: 'sales_rep' });
-  assert(!result.issuedRequest, 'TEST 16 — no request when offline-restored');
-  assert(result.errorMessage === 'Dashboard metrics unavailable: waiting for connection.', 'TEST 16 — waiting-for-connection error');
 }
 
-// TEST 17: unauthenticated → no request
-console.log('TEST 17: unauthenticated → no request');
-{
-  setAuthModeState('unauthenticated');
-  const result = simulateFetchGate({ rep_code: 'REP001', role: 'sales_rep' });
-  assert(!result.issuedRequest, 'TEST 17 — no request when unauthenticated');
-}
+// ─── Main test runner ────────────────────────────────────────────────────────
 
-// ─── Stale-response / generation guard tests ─────────────────────────────────
+async function main(): Promise<void> {
 
-console.log('\n--- Stale-response guards ---');
+  // ═══ Section 1: isValidCount (strict validation primitive) ═════════════════
 
-// Simulates the generation-counter pattern used in DashboardPage.
-function createGenerationGuard() {
-  let generation = 0;
-  return {
-    bump: () => ++generation,
-    current: () => generation,
-    isStale: (g: number) => g !== generation,
-  };
-}
+  console.log('\n--- isValidCount ---');
 
-// TEST 18: identity switch invalidates in-flight request
-console.log('TEST 18: identity switch invalidates in-flight');
-{
-  const guard = createGenerationGuard();
-  const gen1 = guard.bump(); // fetch for user A
-  // Simulate identity switch before response arrives
-  guard.bump();
-  assert(guard.isStale(gen1), 'TEST 18 — original generation is stale after identity switch');
-}
+  assert(isValidCount(0), 'isValidCount(0) = true');
+  assert(isValidCount(100), 'isValidCount(100) = true');
+  assert(isValidCount('42'), 'isValidCount("42") = true');
+  assert(!isValidCount(null), 'isValidCount(null) = false');
+  assert(!isValidCount(undefined), 'isValidCount(undefined) = false');
+  assert(!isValidCount(-1), 'isValidCount(-1) = false');
+  assert(!isValidCount(10.5), 'isValidCount(10.5) = false');
+  assert(!isValidCount(NaN), 'isValidCount(NaN) = false');
+  assert(!isValidCount(Infinity), 'isValidCount(Infinity) = false');
+  assert(!isValidCount(''), 'isValidCount("") = false');
+  assert(!isValidCount('abc'), 'isValidCount("abc") = false');
+  assert(!isValidCount(Number.MAX_SAFE_INTEGER + 1), 'isValidCount(unsafe) = false');
+  assert(!isValidCount({}), 'isValidCount({}) = false');
+  assert(!isValidCount([]), 'isValidCount([]) = false');
 
-// TEST 19: overlapping refresh — later response wins
-console.log('TEST 19: overlapping refresh — later wins');
-{
-  const guard = createGenerationGuard();
-  const gen1 = guard.bump();
-  const gen2 = guard.bump();
-  assert(guard.isStale(gen1), 'TEST 19 — first request is stale');
-  assert(!guard.isStale(gen2), 'TEST 19 — second request is current');
-}
+  // ═══ Section 2: parseMetricsResponse (strict response validation) ══════════
 
-// TEST 20: unmount invalidates (mountedRef = false)
-console.log('TEST 20: unmount prevents publishing');
-{
-  let mounted = true;
-  const guard = createGenerationGuard();
-  const gen = guard.bump();
-  mounted = false; // simulate unmount
-  assert(!guard.isStale(gen) && !mounted, 'TEST 20 — generation ok but mounted=false → discard');
-}
+  console.log('\n--- parseMetricsResponse ---');
 
-// TEST 21: auth loss during request → discard
-console.log('TEST 21: auth loss during request → discard');
-{
-  setAuthModeState('online');
-  const guard = createGenerationGuard();
-  const gen = guard.bump();
-  // Auth is lost while request is in flight
-  setAuthModeState('unauthenticated');
-  const authOk = isCloudSyncAllowed();
-  assert(!authOk, 'TEST 21 — cloud sync not allowed after auth loss');
-  assert(!guard.isStale(gen), 'TEST 21 — generation still matches (not a generation issue)');
-  // The fetchData function would check isCloudSyncAllowed() and discard
-}
+  console.log('TEST: valid object response');
+  {
+    const result = parseMetricsResponse(VALID_METRICS);
+    assert(result !== null, 'non-null for valid object');
+    assert(result?.total_leads === 100, 'total_leads = 100');
+  }
 
-// ─── Reconnect resume test ────────────────────────────────────────────────────
+  console.log('TEST: valid array response');
+  {
+    const result = parseMetricsResponse([VALID_METRICS]);
+    assert(result !== null, 'non-null for valid array');
+    assert(result?.total_leads === 100, 'total_leads = 100');
+  }
 
-console.log('\n--- Reconnect resume ---');
+  console.log('TEST: valid all-zero response');
+  {
+    const result = parseMetricsResponse(ZERO_METRICS);
+    assert(result !== null, 'non-null for all zeros');
+    assert(result?.total_leads === 0, 'total_leads = 0');
+  }
 
-// TEST 22: transition offline-restored → online re-enables fetch
-console.log('TEST 22: reconnect re-enables fetch');
-{
-  setAuthModeState('offline-restored');
-  const result1 = simulateFetchGate({ rep_code: 'REP001', role: 'sales_rep' });
-  assert(!result1.issuedRequest, 'TEST 22 — no request while offline-restored');
+  console.log('TEST: null → null');
+  assert(parseMetricsResponse(null) === null, 'null for null input');
 
-  setAuthModeState('online');
-  const result2 = simulateFetchGate({ rep_code: 'REP001', role: 'sales_rep' });
-  assert(result2.issuedRequest, 'TEST 22 — request issued after reconnect');
-  assert(result2.errorMessage === null, 'TEST 22 — no error after reconnect');
-}
+  console.log('TEST: empty array → null');
+  assert(parseMetricsResponse([]) === null, 'null for empty array');
 
-// TEST 23: authMode transition triggers fetch effect dependency
-console.log('TEST 23: authMode change triggers re-fetch');
-{
-  let fetchCount = 0;
-  const triggerFetch = (mode: string) => {
-    // Simulating: useEffect(() => { ... fetchData() }, [fetchData, authMode])
-    // Each authMode change re-runs the effect
-    fetchCount++;
-  };
-  triggerFetch('offline-restored');
-  triggerFetch('online');
-  assert(fetchCount === 2, 'TEST 23 — effect fired twice (initial + reconnect)');
-}
+  console.log('TEST: missing field → null');
+  {
+    const partial = { ...VALID_METRICS, hot_leads: undefined };
+    assert(parseMetricsResponse(partial) === null, 'null for missing field');
+  }
 
-// ─── RPC error vs. success (no fallback) ──────────────────────────────────────
+  console.log('TEST: null field → null');
+  {
+    const withNull = { ...VALID_METRICS, total_leads: null };
+    assert(parseMetricsResponse(withNull) === null, 'null for null field');
+  }
 
-console.log('\n--- RPC error handling (no fallback) ---');
+  console.log('TEST: negative value → null');
+  {
+    const withNeg = { ...VALID_METRICS, total_leads: -1 };
+    assert(parseMetricsResponse(withNeg) === null, 'null for negative');
+  }
 
-// TEST 24: RPC error → unavailable state, not zero counts
-console.log('TEST 24: RPC error → unavailable, not zero-as-success');
-{
-  const rpcErr = { message: 'function get_dashboard_metrics does not exist', code: '42883' };
-  const rpcData = null;
-  // Simulate the error path in fetchData
-  let errorSet = false;
-  let dataSet = false;
-  if (rpcErr) {
-    errorSet = true;
-    // data stays EMPTY, not set from zero-count response
-  } else {
-    const parsed = parseMetricsResponse(rpcData);
-    if (parsed) {
-      dataSet = true;
+  console.log('TEST: fractional value → null');
+  {
+    const withFrac = { ...VALID_METRICS, total_leads: 10.5 };
+    assert(parseMetricsResponse(withFrac) === null, 'null for fractional');
+  }
+
+  console.log('TEST: NaN → null');
+  {
+    const withNaN = { ...VALID_METRICS, total_leads: NaN };
+    assert(parseMetricsResponse(withNaN) === null, 'null for NaN');
+  }
+
+  console.log('TEST: Infinity → null');
+  {
+    const withInf = { ...VALID_METRICS, total_leads: Infinity };
+    assert(parseMetricsResponse(withInf) === null, 'null for Infinity');
+  }
+
+  console.log('TEST: empty object → null');
+  assert(parseMetricsResponse({}) === null, 'null for empty object');
+
+  console.log('TEST: numeric string values accepted');
+  {
+    const strMetrics: Record<string, unknown> = {};
+    for (const k of Object.keys(VALID_METRICS)) {
+      strMetrics[k] = String(VALID_METRICS[k as keyof typeof VALID_METRICS]);
     }
+    const result = parseMetricsResponse(strMetrics);
+    assert(result !== null, 'non-null for numeric strings');
+    assert(result?.total_leads === 100, 'total_leads = 100 from string');
   }
-  assert(errorSet, 'TEST 24 — error state set on RPC error');
-  assert(!dataSet, 'TEST 24 — no data set on RPC error (no fallback to zero-as-success)');
-}
 
-// TEST 25: missing RPC (error code 42883) → unavailable, no lead_entries fallback
-console.log('TEST 25: missing RPC → no lead_entries fallback');
-{
-  const rpcErr = { message: 'function does not exist', code: '42883' };
-  let wouldFallbackToLeadEntries = false;
-  // The old code had a fallback to supabase.from('lead_entries').select(...)
-  // The new code does NOT. We verify the fallback path is never taken.
-  if (rpcErr) {
-    // New code: set error, done. No fallback.
-  } else {
-    wouldFallbackToLeadEntries = true;
+  console.log('TEST: unsafe integer → null');
+  {
+    const withUnsafe = { ...VALID_METRICS, total_leads: Number.MAX_SAFE_INTEGER + 1 };
+    assert(parseMetricsResponse(withUnsafe) === null, 'null for unsafe integer');
   }
-  assert(!wouldFallbackToLeadEntries, 'TEST 25 — no lead_entries fallback on missing RPC');
-}
 
-// TEST 26: RPC raises exception for unsupported identity → error state
-console.log('TEST 26: RPC identity rejection → error state');
-{
-  const rpcErr = { message: 'Dashboard metrics unavailable: unsupported role', code: 'P0001' };
-  const parsed = parseMetricsResponse(null);
-  let errorSet = false;
-  if (rpcErr) {
-    errorSet = true;
+  // ═══ Section 3: getTodayIso ════════════════════════════════════════════════
+
+  console.log('\n--- getTodayIso ---');
+
+  console.log('TEST: local midnight ISO');
+  {
+    const now = new Date(2026, 9, 14, 15, 30, 0);
+    const iso = getTodayIso(now);
+    const midnight = new Date(2026, 9, 14, 0, 0, 0);
+    assert(new Date(iso).getTime() === midnight.getTime(), 'equals local midnight');
   }
-  assert(errorSet, 'TEST 26 — error state for unsupported identity exception');
-  assert(parsed === null, 'TEST 26 — no data parsed from identity rejection');
+
+  // ═══ Section 4: identityKey ════════════════════════════════════════════════
+
+  console.log('\n--- identityKey ---');
+
+  assert(identityKey({ authUserId: 'a1', role: 'admin', rep_code: 'ADMIN' }) === 'a1|admin|ADMIN', 'admin identity');
+  assert(identityKey({ authUserId: 'r1', role: 'sales_rep', rep_code: 'REP' }) === 'r1|sales_rep|REP', 'rep identity');
+  assert(identityKey(null) === null, 'null user → null');
+  assert(identityKey({ authUserId: '', role: 'admin', rep_code: 'A' }) === null, 'missing authUserId → null');
+  assert(identityKey({ authUserId: 'a', role: '', rep_code: 'A' }) === null, 'missing role → null');
+  assert(identityKey({ authUserId: 'a', role: 'sales_rep', rep_code: '' }) === null, 'rep missing rep_code → null');
+
+  // ═══ Section 5: isAuthorized (dual gate) ═══════════════════════════════════
+
+  console.log('\n--- isAuthorized (dual gate) ---');
+
+  __setTransportOnline(true); setAuthModeState('online');
+  assert(isAuthorized() === true, 'transport up + online → authorized');
+
+  __setTransportOnline(false); setAuthModeState('online');
+  assert(isAuthorized() === false, 'transport down + online → NOT authorized');
+
+  __setTransportOnline(true); setAuthModeState('offline-restored');
+  assert(isAuthorized() === false, 'transport up + offline-restored → NOT authorized');
+
+  __setTransportOnline(true); setAuthModeState('unauthenticated');
+  assert(isAuthorized() === false, 'transport up + unauthenticated → NOT authorized');
+
+  __setTransportOnline(false); setAuthModeState('offline-restored');
+  assert(isAuthorized() === false, 'both down → NOT authorized');
+
+  // ═══ Section 6: DashboardMetricsLoader — success path ══════════════════════
+
+  console.log('\n--- Loader: success path ---');
+
+  console.log('TEST: admin authorized → success with data');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: VALID_METRICS, error: null }));
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'success', 'kind = success');
+    assert((result as { data: DashboardData }).data.total_leads === 100, 'total_leads = 100');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: rep authorized → success with data');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: VALID_METRICS, error: null }));
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(REP_IDENTITY);
+    assert(result.kind === 'success', 'kind = success');
+    assert((result as { data: DashboardData }).data.total_leads === 100, 'total_leads = 100');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: valid all-zero → success (not error)');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: ZERO_METRICS, error: null }));
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'success', 'kind = success for zeros');
+    assert((result as { data: DashboardData }).data.total_leads === 0, 'total_leads = 0');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 7: Loader — missing/invalid identity ══════════════════════════
+
+  console.log('\n--- Loader: missing/invalid identity ---');
+
+  console.log('TEST: null identity → sign-in required error');
+  {
+    setAuthorized();
+    let rpcCalled = false;
+    __setRpcHandler(async () => { rpcCalled = true; return { data: VALID_METRICS, error: null }; });
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(null);
+    assert(result.kind === 'error', 'kind = error');
+    assert((result as { message: string }).message === ERR_SIGN_IN, 'message = sign-in required');
+    assert(!rpcCalled, 'RPC never called');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 8: Loader — transport/auth gate ═══════════════════════════════
+
+  console.log('\n--- Loader: transport/auth gate ---');
+
+  console.log('TEST: transport down → waiting error, no RPC');
+  {
+    setTransportDown();
+    let rpcCalled = false;
+    __setRpcHandler(async () => { rpcCalled = true; return { data: VALID_METRICS, error: null }; });
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'error', 'kind = error');
+    assert((result as { message: string }).message === ERR_WAITING, 'message = waiting');
+    assert(!rpcCalled, 'RPC never called when transport down');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: auth offline-restored → waiting error, no RPC');
+  {
+    setAuthOffline();
+    let rpcCalled = false;
+    __setRpcHandler(async () => { rpcCalled = true; return { data: VALID_METRICS, error: null }; });
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'error', 'kind = error');
+    assert((result as { message: string }).message === ERR_WAITING, 'message = waiting');
+    assert(!rpcCalled, 'RPC never called when offline-restored');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 9: Loader — RPC errors ════════════════════════════════════════
+
+  console.log('\n--- Loader: RPC errors ---');
+
+  console.log('TEST: RPC returns error → unavailable');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({
+      data: null,
+      error: { message: 'function get_dashboard_metrics does not exist', code: '42883' },
+    }));
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'error', 'kind = error');
+    assert((result as { message: string }).message === ERR_UNAVAILABLE, 'message = unavailable');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: RPC throws → unavailable (try/catch)');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => { throw new Error('network failure'); });
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'error', 'kind = error after throw');
+    assert((result as { message: string }).message === ERR_UNAVAILABLE, 'message = unavailable');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: RPC error does NOT become zero-as-success');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: null, error: { message: 'permission denied' } }));
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind !== 'success', 'NOT success');
+    assert(result.kind === 'error', 'kind = error');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 10: Loader — malformed results ════════════════════════════════
+
+  console.log('\n--- Loader: malformed results ---');
+
+  console.log('TEST: empty object → unavailable');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: {}, error: null }));
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'error', 'kind = error for empty object');
+    assert((result as { message: string }).message === ERR_UNAVAILABLE, 'message = unavailable');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: null data, null error → unavailable');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: null, error: null }));
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'error', 'kind = error for null/null');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: negative count → unavailable');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: { ...VALID_METRICS, total_leads: -5 }, error: null }));
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'error', 'kind = error for negative');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: missing field → unavailable');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => ({ data: { ...VALID_METRICS, hot_leads: undefined }, error: null }));
+    const loader = new DashboardMetricsLoader();
+    const result = await loader.load(ADMIN_IDENTITY);
+    assert(result.kind === 'error', 'kind = error for missing field');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 11: Loader — stale-response guard (identity change) ═══════════
+
+  console.log('\n--- Loader: stale-response guard ---');
+
+  console.log('TEST: identity change during in-flight → stale');
+  {
+    setAuthorized();
+    const resolvers: Array<(v: { data: unknown; error: unknown }) => void> = [];
+    __setRpcHandler(async () => new Promise(resolve => { resolvers.push(resolve); }));
+
+    const loader = new DashboardMetricsLoader();
+    const firstPromise = loader.load(ADMIN_IDENTITY);
+    await flushPromises();
+
+    // Invalidate with a new identity before the first resolves.
+    loader.invalidate();
+    const secondPromise = loader.load(REP_IDENTITY);
+    await flushPromises();
+
+    // Resolve both pending RPC calls.
+    resolvers.forEach(r => r({ data: VALID_METRICS, error: null }));
+    const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise]);
+
+    // The first should be stale (generation was invalidated).
+    assert(firstResult.kind === 'stale', 'first result is stale after identity change');
+    // The second should succeed (it's the latest generation).
+    assert(secondResult.kind === 'success', 'second result succeeds after identity change');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: unmount during in-flight → stale');
+  {
+    setAuthorized();
+    __setRpcHandler(async () => new Promise(resolve => {
+      setTimeout(() => resolve({ data: VALID_METRICS, error: null }), 50);
+    }));
+    const loader = new DashboardMetricsLoader();
+    const promise = loader.load(ADMIN_IDENTITY);
+    loader.unmount();
+    const result = await promise;
+    assert(result.kind === 'stale', 'result is stale after unmount');
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: auth loss during in-flight → stale or waiting, not success');
+  {
+    setAuthorized();
+    const resolvers: Array<(v: { data: unknown; error: unknown }) => void> = [];
+    __setRpcHandler(async () => new Promise(resolve => { resolvers.push(resolve); }));
+
+    const loader = new DashboardMetricsLoader();
+    const promise = loader.load(ADMIN_IDENTITY);
+    await flushPromises();
+
+    // Auth is lost while the request is in flight.
+    setAuthModeState('unauthenticated');
+
+    resolvers.forEach(r => r({ data: VALID_METRICS, error: null }));
+    const result = await promise;
+    assert(result.kind !== 'success', 'NOT success after auth loss');
+    assert(result.kind === 'stale' || (result.kind === 'error' && (result as { message: string }).message === ERR_WAITING),
+      'stale or waiting after auth loss');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 12: Loader — overlapping requests ═════════════════════════════
+
+  console.log('\n--- Loader: overlapping requests ---');
+
+  console.log('TEST: overlapping requests — later invalidates earlier');
+  {
+    setAuthorized();
+    let callCount = 0;
+    __setRpcHandler(async () => {
+      callCount++;
+      return { data: { ...VALID_METRICS, total_leads: callCount * 100 }, error: null };
+    });
+
+    const loader = new DashboardMetricsLoader();
+    const first = loader.load(ADMIN_IDENTITY);
+    const second = loader.load(ADMIN_IDENTITY);
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    // The second call increments generation, so the first should be stale.
+    assert(firstResult.kind === 'stale', 'first is stale');
+    assert(secondResult.kind === 'success', 'second succeeds');
+    assert((secondResult as { data: DashboardData }).data.total_leads === 200, 'second has total_leads = 200');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 13: Loader — reconnect resume ═════════════════════════════════
+
+  console.log('\n--- Loader: reconnect resume ---');
+
+  console.log('TEST: offline → online → success');
+  {
+    setTransportDown();
+    __setRpcHandler(async () => ({ data: VALID_METRICS, error: null }));
+    const loader = new DashboardMetricsLoader();
+
+    // First call while offline → waiting error.
+    const offlineResult = await loader.load(ADMIN_IDENTITY);
+    assert(offlineResult.kind === 'error', 'offline → error');
+    assert((offlineResult as { message: string }).message === ERR_WAITING, 'offline → waiting');
+
+    // Now go online.
+    setAuthorized();
+    const onlineResult = await loader.load(ADMIN_IDENTITY);
+    assert(onlineResult.kind === 'success', 'online → success');
+    assert((onlineResult as { data: DashboardData }).data.total_leads === 100, 'online → total_leads = 100');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  console.log('TEST: auth offline-restored → online → success');
+  {
+    setAuthOffline();
+    __setRpcHandler(async () => ({ data: VALID_METRICS, error: null }));
+    const loader = new DashboardMetricsLoader();
+
+    const offlineResult = await loader.load(ADMIN_IDENTITY);
+    assert(offlineResult.kind === 'error', 'offline-restored → error');
+
+    setAuthorized();
+    const onlineResult = await loader.load(ADMIN_IDENTITY);
+    assert(onlineResult.kind === 'success', 'online after offline-restored → success');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 14: Loader — post-publish authorization re-check ═══════════════
+
+  console.log('\n--- Loader: post-publish re-check ---');
+
+  console.log('TEST: transport goes down during in-flight → waiting, not success');
+  {
+    setAuthorized();
+    const resolvers: Array<(v: { data: unknown; error: unknown }) => void> = [];
+    __setRpcHandler(async () => new Promise(resolve => { resolvers.push(resolve); }));
+
+    const loader = new DashboardMetricsLoader();
+    const promise = loader.load(ADMIN_IDENTITY);
+    await flushPromises();
+
+    // Transport goes down while waiting for RPC.
+    setTransportDown();
+    resolvers.forEach(r => r({ data: VALID_METRICS, error: null }));
+    const result = await promise;
+    assert(result.kind !== 'success', 'NOT success after transport down');
+    assert(result.kind === 'stale' || (result.kind === 'error' && (result as { message: string }).message === ERR_WAITING),
+      'stale or waiting after transport down during in-flight');
+    loader.unmount();
+    __resetRpcHandler();
+  }
+
+  // ═══ Section 15: EMPTY_DASHBOARD constant ═══════════════════════════════════
+
+  console.log('\n--- EMPTY_DASHBOARD ---');
+
+  assert(EMPTY_DASHBOARD.total_leads === 0, 'total_leads = 0');
+  assert(Object.values(EMPTY_DASHBOARD).every(v => v === 0), 'all fields are 0');
+
+  // ═══ Summary ═══════════════════════════════════════════════════════════════
+
+  console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
+
+  if (failed > 0) process.exitCode = 1;
 }
 
-// ─── Admin vs rep scope (verifying the RPC SQL logic conceptually) ────────────
-
-console.log('\n--- Admin vs rep scope ---');
-
-// TEST 27: admin scope — WHERE clause is OR admin (no rep filter)
-console.log('TEST 27: admin scope includes all leads');
-{
-  // The RPC does: WHERE v_role = 'admin' OR sales_rep_code = v_rep_code
-  // For admin, v_role = 'admin' → WHERE true for all rows
-  const v_role = 'admin';
-  const v_rep_code = 'ADMIN001';
-  const sampleLeads = [
-    { sales_rep_code: 'REP001' },
-    { sales_rep_code: 'REP002' },
-    { sales_rep_code: 'ADMIN001' },
-  ];
-  const visible = sampleLeads.filter(l => v_role === 'admin' || l.sales_rep_code === v_rep_code);
-  assert(visible.length === 3, 'TEST 27 — admin sees all 3 leads');
-}
-
-// TEST 28: rep scope — WHERE clause filters to own rep_code
-console.log('TEST 28: rep scope filters to own leads');
-{
-  const v_role = 'sales_rep';
-  const v_rep_code = 'REP001';
-  const sampleLeads = [
-    { sales_rep_code: 'REP001' },
-    { sales_rep_code: 'REP002' },
-    { sales_rep_code: 'REP001' },
-  ];
-  const visible = sampleLeads.filter(l => v_role === 'admin' || l.sales_rep_code === v_rep_code);
-  assert(visible.length === 2, 'TEST 28 — rep sees only 2 own leads');
-  assert(visible.every(l => l.sales_rep_code === 'REP001'), 'TEST 28 — all visible leads belong to REP001');
-}
-
-// ─── Summary ─────────────────────────────────────────────────────────────────
-
-console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
-if (failed > 0) {
-  process.exit(1);
-}
+main().catch(err => {
+  console.error('Test runner crashed:', err);
+  process.exitCode = 1;
+});

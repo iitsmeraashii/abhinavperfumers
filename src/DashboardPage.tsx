@@ -1,8 +1,15 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { supabase } from './supabaseClient';
 import { useAuth } from './AuthContext';
-import { isCloudSyncAllowed } from './authModeState';
 import { useOnlineStatus } from './capture/useOnlineStatus';
+import {
+  DashboardMetricsLoader,
+  EMPTY_DASHBOARD,
+  identityKey,
+  ERR_SIGN_IN,
+  ERR_WAITING,
+  ERR_UNAVAILABLE,
+  type DashboardData,
+} from './dashboardMetricsLoader';
 import {
   Users, TrendingUp, Calendar, Clock,
   MessageCircle, AlertCircle, XCircle,
@@ -10,31 +17,7 @@ import {
   Loader2, RefreshCw, ArrowRight, Flame, Sun, Snowflake, HelpCircle,
 } from 'lucide-react';
 
-interface DashboardData {
-  total_leads: number;
-  leads_today: number;
-  leads_last_7_days: number;
-  leads_last_30_days: number;
-  whatsapp_sent: number;
-  whatsapp_failed: number;
-  invalid_leads: number;
-  new_leads: number;
-  contacted_leads: number;
-  qualified_leads: number;
-  converted_leads: number;
-  lost_leads: number;
-  hot_leads: number;
-  warm_leads: number;
-  cold_leads: number;
-  unassigned_temperature_leads: number;
-}
-
-const EMPTY: DashboardData = {
-  total_leads: 0, leads_today: 0, leads_last_7_days: 0, leads_last_30_days: 0,
-  whatsapp_sent: 0, whatsapp_failed: 0, invalid_leads: 0,
-  new_leads: 0, contacted_leads: 0, qualified_leads: 0, converted_leads: 0, lost_leads: 0,
-  hot_leads: 0, warm_leads: 0, cold_leads: 0, unassigned_temperature_leads: 0,
-};
+const EMPTY = EMPTY_DASHBOARD;
 
 function num(n: number) {
   return n.toLocaleString('en-IN');
@@ -139,61 +122,6 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Extracted so tests can import without rendering JSX.
-export interface DashboardMetricsRow {
-  total_leads:                  number;
-  leads_today:                  number;
-  leads_last_7_days:            number;
-  leads_last_30_days:           number;
-  whatsapp_sent:                number;
-  whatsapp_failed:              number;
-  invalid_leads:                number;
-  new_leads:                    number;
-  contacted_leads:              number;
-  qualified_leads:              number;
-  converted_leads:              number;
-  lost_leads:                   number;
-  hot_leads:                    number;
-  warm_leads:                   number;
-  cold_leads:                   number;
-  unassigned_temperature_leads: number;
-}
-
-function rowToData(row: Record<string, unknown>): DashboardData {
-  return {
-    total_leads:                  Number(row.total_leads ?? 0),
-    leads_today:                  Number(row.leads_today ?? 0),
-    leads_last_7_days:            Number(row.leads_last_7_days ?? 0),
-    leads_last_30_days:           Number(row.leads_last_30_days ?? 0),
-    whatsapp_sent:                Number(row.whatsapp_sent ?? 0),
-    whatsapp_failed:              Number(row.whatsapp_failed ?? 0),
-    invalid_leads:                Number(row.invalid_leads ?? 0),
-    new_leads:                    Number(row.new_leads ?? 0),
-    contacted_leads:              Number(row.contacted_leads ?? 0),
-    qualified_leads:              Number(row.qualified_leads ?? 0),
-    converted_leads:              Number(row.converted_leads ?? 0),
-    lost_leads:                   Number(row.lost_leads ?? 0),
-    hot_leads:                    Number(row.hot_leads ?? 0),
-    warm_leads:                   Number(row.warm_leads ?? 0),
-    cold_leads:                   Number(row.cold_leads ?? 0),
-    unassigned_temperature_leads: Number(row.unassigned_temperature_leads ?? 0),
-  };
-}
-
-// Exported for testing — pure function, no side effects.
-export function parseMetricsResponse(rpcData: unknown): DashboardData | null {
-  if (!rpcData) return null;
-  const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
-  if (!row || typeof row !== 'object') return null;
-  return rowToData(row as Record<string, unknown>);
-}
-
-// Exported for testing — computes the browser-local midnight ISO timestamp
-// the same way the original client-side aggregation did.
-export function getTodayIso(now: Date = new Date()): string {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-}
-
 interface DashboardPageProps {
   onNavigateToLeads?: (filter: DashboardFilter) => void;
 }
@@ -206,110 +134,48 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
   const [error, setError] = useState('');
   const isAdmin = user?.role === 'admin';
 
-  // ─── Stale-response guard ────────────────────────────────────────────
-  // Every fetch increments generationRef. When an async response returns,
-  // it checks whether it's still the current generation AND whether the
-  // identity and cloud-sync authorization are still valid. If any of these
-  // changed during the in-flight request, the response is silently discarded.
-  const generationRef = useRef(0);
-  const identityRef = useRef<string | null>(null);
-  const mountedRef = useRef(true);
+  const loaderRef = useRef<DashboardMetricsLoader | null>(null);
+  if (!loaderRef.current) loaderRef.current = new DashboardMetricsLoader();
 
-  // Track the last identity we fetched for, so identity switches invalidate.
-  const currentIdentity = user?.rep_code ?? null;
+  const currentIdentity = identityKey(user);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
-
-  // ─── Reconnect resume ────────────────────────────────────────────────
-  // When the transport comes back online, the AuthContext transitions
-  // authMode from 'offline-restored' → 'online'. We watch authMode as a
-  // dependency of the main fetch effect so the dashboard re-fetches
-  // automatically after authorized reconnect — no polling required.
-  // useOnlineStatus also fires onReconnect for immediate transport-level
-  // resume, but the fetch still gates on isCloudSyncAllowed() to ensure
-  // auth has confirmed 'online' before any request goes out.
-
-  // Subscribe to connectivity for reconnect detection.
-  useOnlineStatus();
+  // Subscribe to transport connectivity. The returned boolean is a reactive
+  // dependency that re-triggers the fetch effect when transport changes.
+  const isOnline = useOnlineStatus();
 
   const fetchData = useCallback(async () => {
-    // ── Fail-closed gate: check BEFORE issuing any request ──
-    if (!user?.rep_code || !user?.role) {
-      setError('Dashboard metrics unavailable: sign-in required.');
-      setData(EMPTY);
-      setLoading(false);
-      return;
-    }
-    if (!isCloudSyncAllowed()) {
-      setError('Dashboard metrics unavailable: waiting for connection.');
-      setData(EMPTY);
-      setLoading(false);
-      return;
-    }
+    const loader = loaderRef.current!;
+    const result = await loader.load(currentIdentity);
 
-    const generation = ++generationRef.current;
-    identityRef.current = currentIdentity;
-    setLoading(true);
-    setError('');
+    if (result.kind === 'stale') return;
 
-    // Compute browser-local midnight ISO — preserves the original
-    // client-side "today" boundary behavior in the RPC.
-    const todayIso = getTodayIso();
-
-    const { data: rpcData, error: rpcErr } = await supabase.rpc(
-      'get_dashboard_metrics',
-      { p_today_iso: todayIso },
-    );
-
-    // ── Re-check authorization BEFORE publishing results ──
-    // If identity changed, auth was lost, or cloud sync is no longer
-    // allowed while the request was in flight, discard the response.
-    if (generation !== generationRef.current) return;
-    if (identityRef.current !== currentIdentity) return;
-    if (!mountedRef.current) return;
-    if (!isCloudSyncAllowed()) {
-      setError('Dashboard metrics unavailable: waiting for connection.');
+    if (result.kind === 'error') {
+      setError(result.message);
       setData(EMPTY);
       setLoading(false);
       return;
     }
 
-    if (rpcErr) {
-      // RPC error (missing function, permission denied, raised exception)
-      // → show unavailable state, never zero counts as success.
-      setError('Dashboard metrics unavailable. Tap Retry to try again.');
-      setData(EMPTY);
-      setLoading(false);
-      return;
-    }
-
-    const parsed = parseMetricsResponse(rpcData);
-    if (!parsed) {
-      setError('Dashboard metrics unavailable. Tap Retry to try again.');
-      setData(EMPTY);
-      setLoading(false);
-      return;
-    }
-
-    // Final staleness check before committing.
-    if (generation !== generationRef.current || !mountedRef.current) return;
-
-    setData(parsed);
+    setData(result.data);
     setLoading(false);
-  }, [user, isAdmin, currentIdentity]);
+  }, [currentIdentity]);
 
   // ─── Main fetch effect ───────────────────────────────────────────────
-  // Fires on mount, identity change, and authMode change (reconnect resume).
-  // Clears stale data and bumps generation before fetching.
+  // Fires on mount, identity change, authMode change (reconnect resume),
+  // and transport change (isOnline from useOnlineStatus).
   useEffect(() => {
     setData(EMPTY);
-    generationRef.current++;
+    setLoading(true);
+    setError('');
+    loaderRef.current!.invalidate();
     fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchData, authMode]);
+  }, [fetchData, authMode, isOnline]);
+
+  // Cleanup on unmount.
+  useEffect(() => {
+    return () => { loaderRef.current?.unmount(); };
+  }, []);
 
   const funnelTotal = data.total_leads || 1;
 
@@ -364,8 +230,6 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
           <Loader2 className="w-6 h-6 text-stone-400 animate-spin" />
         </div>
       ) : error ? (
-        /* When there's an error, don't render the dashboard sections with
-           zero counts — show nothing but the error banner above. */
         null
       ) : (
         <div className="flex flex-col gap-8">
