@@ -218,6 +218,14 @@ export default function DashboardPage({ onNavigateToLeads }: DashboardPageProps)
           <p className="text-xs text-stone-400 mt-0.5">
             {isAdmin ? 'All leads — admin view' : `Your leads — ${user?.rep_code}`}
           </p>
+          <p className="text-xs text-stone-500 mt-1">
+            {(() => {
+              const firstName = (user?.name ?? '').trim().split(/\s+/).find(Boolean);
+              return firstName
+                ? `Hello ${firstName}, hope you're having a great day.`
+                : `Hello, hope you're having a great day.`;
+            })()}
+          </p>
         </div>
         <button
           onClick={fetchData}
