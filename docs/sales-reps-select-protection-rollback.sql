@@ -60,13 +60,26 @@ BEGIN
     RAISE EXCEPTION 'ROLLBACK VERIFICATION FAILED: authenticated lacks SELECT'
       USING ERRCODE = 'check_violation';
   END IF;
-  -- Confirm no lingering column-level grants
+  -- Confirm no lingering column-level grants by inspecting pg_attribute.attacl
+  -- directly with aclexplode.  information_schema.column_privileges may show
+  -- grants implied by the restored table-level SELECT, which would produce a
+  -- false positive.  pg_attribute.attacl stores ONLY explicit column-level
+  -- ACLs, so it accurately reflects whether the proposal's column grants were
+  -- fully removed.
   IF EXISTS (
-    SELECT 1 FROM information_schema.column_privileges
-    WHERE table_schema = 'public' AND table_name = 'sales_representatives'
-      AND grantee IN ('anon', 'authenticated')
+    SELECT 1
+    FROM pg_attribute a
+    WHERE a.attrelid = 'public.sales_representatives'::regclass
+      AND a.attisdropped = false
+      AND a.attacl IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM aclexplode(a.attacl) acl
+        JOIN pg_roles r ON acl.grantee = r.oid
+        WHERE r.rolname IN ('anon', 'authenticated')
+      )
   ) THEN
-    RAISE EXCEPTION 'ROLLBACK VERIFICATION FAILED: column-level grants still exist'
+    RAISE EXCEPTION 'ROLLBACK VERIFICATION FAILED: explicit column-level grants still exist in pg_attribute.attacl'
       USING ERRCODE = 'check_violation';
   END IF;
 END $$;

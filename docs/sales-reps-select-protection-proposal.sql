@@ -32,6 +32,9 @@
 -- =============================================================================
 
 BEGIN;
+SET LOCAL statement_timeout = '30s';
+SET LOCAL lock_timeout = '10s';
+SET LOCAL idle_in_transaction_session_timeout = '60s';
 
 -- ── Step 1: Revoke blanket table-level SELECT from browser roles ─────────────
 --   anon currently has arwdDxtm; we remove only SELECT (r).
