@@ -301,7 +301,8 @@ BEGIN
 
     v_cur_user := current_user;
     v_auth_uid := auth.uid();
-    IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
+    IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
       v_id_res := 'PASS';
       v_id_detail := null;
 
@@ -354,7 +355,8 @@ BEGIN
 
     v_cur_user := current_user;
     v_auth_uid := auth.uid();
-    IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
+    IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
       v_id_res := 'PASS';
       v_id_detail := null;
 
@@ -452,7 +454,8 @@ BEGIN
 
   v_cur_user := current_user;
   v_auth_uid := auth.uid();
-  IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
+  IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
     BEGIN
       SELECT count(*) INTO v_count FROM (
         SELECT id, rep_code, name, email, role, login_enabled, is_active,
@@ -490,7 +493,8 @@ BEGIN
 
   v_cur_user := current_user;
   v_auth_uid := auth.uid();
-  IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
+  IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
     BEGIN
       SELECT count(*) INTO v_count FROM (
         SELECT id, rep_code, name, email, role, login_enabled, is_active,
@@ -528,7 +532,8 @@ BEGIN
 
   v_cur_user := current_user;
   v_auth_uid := auth.uid();
-  IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
+  IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
     BEGIN
       SELECT count(*) INTO v_count FROM (
         SELECT id, rep_code, name, email, phone, is_active, role, default_event_id
@@ -565,7 +570,8 @@ BEGIN
 
   v_cur_user := current_user;
   v_auth_uid := auth.uid();
-  IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
+  IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
     BEGIN
       SELECT count(*) INTO v_count FROM (
         SELECT rep_code, name
@@ -603,7 +609,8 @@ BEGIN
 
   v_cur_user := current_user;
   v_auth_uid := auth.uid();
-  IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
+  IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
     BEGIN
       SELECT count(*) INTO v_count FROM (
         SELECT rep_code, name
@@ -641,7 +648,8 @@ BEGIN
 
   v_cur_user := current_user;
   v_auth_uid := auth.uid();
-  IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
+  IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
     BEGIN
       SELECT count(*) INTO v_count FROM public.get_dashboard_metrics(NULL) sub;
       IF v_count = 1 THEN
@@ -675,7 +683,8 @@ BEGIN
 
   v_cur_user := current_user;
   v_auth_uid := auth.uid();
-  IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
+  IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
     BEGIN
       SELECT count(*) INTO v_count FROM public.get_dashboard_metrics(NULL) sub;
       IF v_count = 1 THEN
@@ -709,7 +718,8 @@ BEGIN
 
   v_cur_user := current_user;
   v_auth_uid := auth.uid();
-  IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
+  IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_admin_uid::uuid THEN
     BEGIN
       SELECT count(*) INTO v_count FROM public.leads_list_view;
       v_res := 'PASS';
@@ -738,7 +748,8 @@ BEGIN
 
   v_cur_user := current_user;
   v_auth_uid := auth.uid();
-  IF v_cur_user <> 'authenticated' OR v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
+  IF v_cur_user = 'authenticated'
+       AND v_auth_uid IS NOT DISTINCT FROM v_rep_uid::uuid THEN
     BEGIN
       SELECT count(*) INTO v_count FROM public.leads_list_view;
       v_res := 'PASS';
@@ -896,7 +907,7 @@ BEGIN
 
   -- Failed
   SELECT array_agg(test_name ORDER BY test_name) INTO v_failed
-  FROM _validation_results WHERE result = 'FAIL' AND test_name <> 'overall';
+  FROM _validation_results WHERE result IS DISTINCT FROM 'PASS' AND test_name <> 'overall';
 
   v_all_pass := (v_missing IS NULL) AND (v_unexpected IS NULL) AND (v_dup IS NULL) AND (v_failed IS NULL) AND (v_actual_count > 0);
 
