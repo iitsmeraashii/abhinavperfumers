@@ -1,9 +1,9 @@
 -- Migration: 20261014120000_create_dashboard_metrics_rpc.sql
--- Status: PREPARED but NOT APPLIED (Supabase MCP apply_migration denied permission)
+-- Status: PREPARED but NOT APPLIED
 --
--- This file contains the full SQL for review. Once the MCP permission
--- issue is resolved, apply via mcp__supabase__apply_migration with
--- filename "20261014120000_create_dashboard_metrics_rpc".
+-- This file contains the full SQL for review. Once approved, apply via
+-- mcp__supabase__apply_migration with filename
+-- "20261014120000_create_dashboard_metrics_rpc".
 
 /*
 # Create get_dashboard_metrics RPC
@@ -18,13 +18,14 @@ in JavaScript.
 1. Derives the caller's role and rep_code from auth.uid() via the
    authoritative sales_representatives table — never trusts
    caller-supplied scope parameters.
-2. Admins: aggregates all lead_entries.
-3. Sales reps: aggregates only lead_entries where sales_rep_code
-   matches their own rep_code.
-4. Missing identity, unsupported role, or inactive rep: raises an
-   explicit exception so the caller receives a clear error rather
-   than zero counts masquerading as a successful result.
-5. Returns a single row with 16 count columns matching the existing
+2. Requires an active, login-enabled sales-representative profile.
+3. Rejects missing/ambiguous profiles and unsupported roles explicitly
+   via RAISE EXCEPTION.
+4. Rejects missing/blank rep_code for sales_rep explicitly.
+5. Admins: aggregates all lead_entries visible under RLS.
+   Sales reps: explicitly filters to their own rep_code
+   (defense-in-depth alongside RLS).
+6. Returns a single row with 16 count columns matching the existing
    DashboardData interface.
 
 ## Security
@@ -36,6 +37,13 @@ in JavaScript.
 - Role/rep_code derived server-side from auth.uid() — the frontend
   cannot inject a different scope.
 
+## Metric semantics preserved
+- system_status and lead_status are uppercased before comparison to
+  tolerate mixed-case values in the database.
+- lead_temperature is trimmed before classification into Hot/Warm/Cold.
+- The unassigned bucket catches NULL, empty, and any value not in
+  (Hot, Warm, Cold) after trimming.
+
 ## Today's boundary — browser-local-day preservation
 The original client-side code computed `todayStart` in the browser:
   new Date(year, month, day).toISOString()
@@ -43,13 +51,7 @@ which is midnight in the browser's local timezone, converted to UTC.
 For example, if the browser is in IST (UTC+5:30), "today" starts at
 18:30 UTC of the previous day.
 
-The RPC uses `CURRENT_DATE` which is midnight in the database server's
-timezone. The Supabase database is configured in UTC, so CURRENT_DATE
-is midnight UTC. This means "today" in the RPC starts at midnight UTC,
-not midnight browser-local.
-
-To preserve the original browser-local-day behavior exactly, the
-frontend passes a `p_today_iso` parameter — an ISO 8601 timestamp
+The frontend passes a `p_today_iso` parameter — an ISO 8601 timestamp
 representing midnight in the browser's local timezone, converted to
 UTC (exactly what the old client-side code computed). The RPC compares
 created_at >= p_today_iso::timestamptz instead of using CURRENT_DATE.
@@ -59,19 +61,10 @@ so they are computed as `now() - interval '7 days'` and
 `now() - interval '30 days'` in the database, matching the old
 client-side `Date.getTime() - N * 24 * 60 * 60 * 1000` computation.
 
-## Important notes
-1. The function reads sales_representatives directly. Because it is
-   SECURITY INVOKER, the RLS policy "Auth users can read own rep row"
-   ensures the caller can only see their own profile row. An admin
-   also only sees their own row (role='admin'), which is sufficient
-   to determine that they should get unscoped counts.
-2. The lead_entries aggregation runs under the caller's RLS policies,
-   so a sales rep automatically only sees their own leads even before
-   the explicit rep_code filter. The explicit filter is defense-in-depth.
-3. The function accepts a single optional parameter p_today_iso (text,
-   default NULL). When NULL, falls back to CURRENT_DATE for backward
-   compatibility. When provided (normal case), uses the browser-local
-   midnight boundary.
+## Contract
+  get_dashboard_metrics(p_today_iso text DEFAULT NULL)
+  RETURNS TABLE (16 bigint columns)
+  SECURITY INVOKER, LANGUAGE plpgsql, SET search_path = public, pg_temp
 */
 
 CREATE OR REPLACE FUNCTION public.get_dashboard_metrics(p_today_iso text DEFAULT NULL)
@@ -101,24 +94,49 @@ DECLARE
   v_rep_code   text;
   v_role       text;
   v_today_date timestamptz;
+  v_match_count integer;
 BEGIN
   -- Derive role and rep_code from the authoritative profile.
-  -- RLS on sales_representatives ensures only the caller's own row is visible.
+  -- RLS on sales_representatives ensures only the caller's own row is visible
+  -- (auth.uid() = auth_user_id policy), plus active reps visible to all
+  -- authenticated users.
+  -- We require both is_active = true AND login_enabled = true so that
+  -- disabled or deactivated reps cannot retrieve metrics.
   SELECT sr.rep_code, sr.role
     INTO v_rep_code, v_role
   FROM sales_representatives sr
   WHERE sr.auth_user_id = auth.uid()
     AND sr.is_active = true
+    AND sr.login_enabled = true
   LIMIT 1;
 
-  -- Reject missing or unsupported identity explicitly.
+  -- Get the match count to detect ambiguous profiles.
+  SELECT count(*)
+    INTO v_match_count
+  FROM sales_representatives sr
+  WHERE sr.auth_user_id = auth.uid()
+    AND sr.is_active = true
+    AND sr.login_enabled = true;
+
+  -- Reject missing identity explicitly.
   -- The caller receives a PostgREST error, not zero counts.
   IF v_role IS NULL THEN
-    RAISE EXCEPTION 'Dashboard metrics unavailable: no active sales representative profile for the authenticated user';
+    RAISE EXCEPTION 'Dashboard metrics unavailable: no active, login-enabled sales representative profile for the authenticated user';
   END IF;
 
+  -- Reject ambiguous profiles (more than one row matching).
+  IF v_match_count > 1 THEN
+    RAISE EXCEPTION 'Dashboard metrics unavailable: ambiguous sales representative profile for user %', auth.uid();
+  END IF;
+
+  -- Reject unsupported roles explicitly.
   IF v_role NOT IN ('admin', 'sales_rep') THEN
     RAISE EXCEPTION 'Dashboard metrics unavailable: unsupported role "%" for user %', v_role, auth.uid();
+  END IF;
+
+  -- Reject missing/blank rep_code for sales_rep.
+  IF v_role = 'sales_rep' AND (v_rep_code IS NULL OR btrim(v_rep_code) = '') THEN
+    RAISE EXCEPTION 'Dashboard metrics unavailable: sales_rep profile has no rep_code for user %', auth.uid();
   END IF;
 
   -- Determine the "today" boundary.
@@ -134,24 +152,28 @@ BEGIN
   -- Single aggregation query with conditional scope.
   -- For admins: no rep_code filter (all leads visible under RLS).
   -- For sales reps: explicit rep_code filter (defense-in-depth alongside RLS).
+  --
+  -- system_status and lead_status are uppercased before comparison to
+  -- tolerate mixed-case values.
+  -- lead_temperature is trimmed (btrim) before classification.
   RETURN QUERY
   SELECT
     count(*),
     count(*) FILTER (WHERE created_at >= v_today_date),
     count(*) FILTER (WHERE created_at >= now() - interval '7 days'),
     count(*) FILTER (WHERE created_at >= now() - interval '30 days'),
-    count(*) FILTER (WHERE system_status = 'WHATSAPP_SENT'),
-    count(*) FILTER (WHERE system_status = 'WHATSAPP_FAILED'),
-    count(*) FILTER (WHERE system_status = 'INVALID_LEAD'),
-    count(*) FILTER (WHERE lead_status = 'NEW'),
-    count(*) FILTER (WHERE lead_status = 'CONTACTED'),
-    count(*) FILTER (WHERE lead_status = 'QUALIFIED'),
-    count(*) FILTER (WHERE lead_status = 'CONVERTED'),
-    count(*) FILTER (WHERE lead_status = 'LOST'),
-    count(*) FILTER (WHERE lead_temperature = 'Hot'),
-    count(*) FILTER (WHERE lead_temperature = 'Warm'),
-    count(*) FILTER (WHERE lead_temperature = 'Cold'),
-    count(*) FILTER (WHERE lead_temperature IS NULL OR lead_temperature NOT IN ('Hot','Warm','Cold'))
+    count(*) FILTER (WHERE upper(system_status) = 'WHATSAPP_SENT'),
+    count(*) FILTER (WHERE upper(system_status) = 'WHATSAPP_FAILED'),
+    count(*) FILTER (WHERE upper(system_status) = 'INVALID_LEAD'),
+    count(*) FILTER (WHERE upper(lead_status) = 'NEW'),
+    count(*) FILTER (WHERE upper(lead_status) = 'CONTACTED'),
+    count(*) FILTER (WHERE upper(lead_status) = 'QUALIFIED'),
+    count(*) FILTER (WHERE upper(lead_status) = 'CONVERTED'),
+    count(*) FILTER (WHERE upper(lead_status) = 'LOST'),
+    count(*) FILTER (WHERE btrim(lead_temperature) = 'Hot'),
+    count(*) FILTER (WHERE btrim(lead_temperature) = 'Warm'),
+    count(*) FILTER (WHERE btrim(lead_temperature) = 'Cold'),
+    count(*) FILTER (WHERE lead_temperature IS NULL OR btrim(lead_temperature) NOT IN ('Hot','Warm','Cold'))
   FROM lead_entries
   WHERE v_role = 'admin' OR sales_rep_code = v_rep_code;
 END;
