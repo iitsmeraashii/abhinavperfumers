@@ -30,6 +30,13 @@ import {
   ERR_UNREAD_WAITING,
 } from './unreadConversationsLoader';
 import {
+  InvalidLeadsLoader,
+  deriveInvalidLeadsTileState,
+  type InvalidLeadsCountResult,
+  ERR_INVALID_SIGN_IN,
+  ERR_INVALID_WAITING,
+} from './invalidLeadsLoader';
+import {
   Users, TrendingUp, Calendar, Clock,
   MessageCircle, AlertCircle, XCircle,
   PhoneCall, Star, CheckCircle2, HeartCrack,
@@ -147,6 +154,7 @@ interface DashboardPageProps {
   onNavigateToFollowUps?: () => void;
   onNavigateToConversations?: () => void;
   onNavigateToConversationsUnread?: () => void;
+  onNavigateToInvalidLeads?: () => void;
 }
 
 interface FollowUpAttentionTileProps {
@@ -312,7 +320,59 @@ function UnreadConversationsAttentionTile({ phase, count, onNavigate, onRetry }:
   );
 }
 
-export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps, onNavigateToConversations, onNavigateToConversationsUnread }: DashboardPageProps) {
+function InvalidLeadsAttentionTile({ phase, count, onNavigate, onRetry }: FollowUpAttentionTileProps) {
+  const handleClick = phase === 'error' ? onRetry : phase === 'success' ? onNavigate : undefined;
+  const clickable = !!handleClick;
+
+  return (
+    <div
+      className={`rounded-xl border px-5 py-4 flex items-center gap-4 transition-all duration-150
+        ${clickable ? 'cursor-pointer hover:border-amber-300 hover:shadow-md active:scale-[0.98]' : ''}
+        bg-amber-50 border-amber-100`}
+      onClick={clickable ? handleClick : undefined}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') handleClick?.(); } : undefined}
+    >
+      <div className="mt-0.5 flex-shrink-0 text-amber-600">
+        <XCircle className="w-5 h-5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-amber-700 font-medium mb-1">Invalid Leads</p>
+        {phase === 'loading' ? (
+          <div className="flex items-center gap-2">
+            <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+            <span className="text-sm text-amber-500">Loading…</span>
+          </div>
+        ) : phase === 'error' ? (
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400" />
+            <span className="text-sm text-red-500">Couldn't load — tap to retry</span>
+          </div>
+        ) : phase === 'unavailable' ? (
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-stone-400" />
+            <span className="text-sm text-stone-500">Unavailable</span>
+          </div>
+        ) : (
+          <>
+            <p className="text-2xl font-bold tabular-nums leading-none text-amber-800">
+              {count}
+            </p>
+            <p className="text-xs text-amber-500 mt-1">
+              {count === 1 ? 'lead marked invalid' : 'leads marked invalid'}
+            </p>
+          </>
+        )}
+      </div>
+      {clickable && (
+        <ArrowRight className="w-3.5 h-3.5 text-amber-300 self-center flex-shrink-0 mt-0.5" />
+      )}
+    </div>
+  );
+}
+
+export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps, onNavigateToConversations, onNavigateToConversationsUnread, onNavigateToInvalidLeads }: DashboardPageProps) {
   const { user, authMode } = useAuth();
   const nav = (f: DashboardFilter) => onNavigateToLeads?.(f);
   const currentIdentity = identityKey(user);
@@ -353,6 +413,15 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
   const [ucError, setUcError] = useState(false);
   const [ucUnavailable, setUcUnavailable] = useState(false);
   const [ucIdentity, setUcIdentity] = useState<string | null>(null);
+
+  const ilLoaderRef = useRef<InvalidLeadsLoader | null>(null);
+  if (!ilLoaderRef.current) ilLoaderRef.current = new InvalidLeadsLoader();
+
+  const [ilCount, setIlCount] = useState<number | null>(null);
+  const [ilLoading, setIlLoading] = useState(true);
+  const [ilError, setIlError] = useState(false);
+  const [ilUnavailable, setIlUnavailable] = useState(false);
+  const [ilIdentity, setIlIdentity] = useState<string | null>(null);
 
   // Subscribe to transport connectivity. The returned boolean is a reactive
   // dependency that re-triggers the fetch effect when transport changes.
@@ -439,6 +508,33 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     setUcLoading(false);
   }, [currentIdentity, user]);
 
+  const fetchInvalidLeadsCount = useCallback(async () => {
+    const loader = ilLoaderRef.current!;
+    setIlLoading(true);
+    setIlError(false);
+    setIlUnavailable(false);
+    const result: InvalidLeadsCountResult = await loader.load(currentIdentity, user);
+
+    if (result.kind === 'stale') return;
+
+    if (result.kind === 'error') {
+      if (result.message === ERR_INVALID_SIGN_IN || result.message === ERR_INVALID_WAITING) {
+        setIlCount(null);
+        setIlUnavailable(true);
+      } else {
+        setIlError(true);
+        setIlCount(null);
+      }
+      setIlIdentity(currentIdentity);
+      setIlLoading(false);
+      return;
+    }
+
+    setIlCount(result.count);
+    setIlIdentity(currentIdentity);
+    setIlLoading(false);
+  }, [currentIdentity, user]);
+
   const fetchData = useCallback(async () => {
     const loader = loaderRef.current!;
     setLoading(true);
@@ -497,8 +593,16 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     setUcLoading(true);
     ucLoaderRef.current!.invalidate();
     fetchUnreadCount();
+
+    setIlCount(null);
+    setIlIdentity(null);
+    setIlError(false);
+    setIlUnavailable(false);
+    setIlLoading(true);
+    ilLoaderRef.current!.invalidate();
+    fetchInvalidLeadsCount();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchData, fetchFollowUpCount, fetchSamplesOpenCount, fetchUnreadCount, authMode, isOnline]);
+  }, [fetchData, fetchFollowUpCount, fetchSamplesOpenCount, fetchUnreadCount, fetchInvalidLeadsCount, authMode, isOnline]);
 
   // Cleanup on unmount — invalidate only, don't permanently unmount.
   // In StrictMode, setup→cleanup→setup reuses the same loader instance;
@@ -509,6 +613,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
       fuLoaderRef.current?.invalidate();
       soLoaderRef.current?.invalidate();
       ucLoaderRef.current?.invalidate();
+      ilLoaderRef.current?.invalidate();
     };
   }, []);
 
@@ -537,7 +642,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
             </p>
           </div>
           <button
-            onClick={() => { fetchData(); fetchFollowUpCount(); fetchSamplesOpenCount(); fetchUnreadCount(); }}
+            onClick={() => { fetchData(); fetchFollowUpCount(); fetchSamplesOpenCount(); fetchUnreadCount(); fetchInvalidLeadsCount(); }}
             disabled={showLoading}
             className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 transition disabled:opacity-50 self-start sm:self-auto flex-shrink-0"
           >
@@ -602,6 +707,20 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
                     count={ucTile.count}
                     onNavigate={ucTile.canNavigate ? onNavigateToConversationsUnread : undefined}
                     onRetry={ucTile.canRetry ? fetchUnreadCount : undefined}
+                  />
+                );
+              })()}
+              {(() => {
+                const ilTile = deriveInvalidLeadsTileState(
+                  ilLoading, ilError, ilUnavailable, ilCount, ilIdentity, currentIdentity,
+                );
+                if (!ilTile) return null;
+                return (
+                  <InvalidLeadsAttentionTile
+                    phase={ilTile.phase}
+                    count={ilTile.count}
+                    onNavigate={ilTile.canNavigate ? onNavigateToInvalidLeads : undefined}
+                    onRetry={ilTile.canRetry ? fetchInvalidLeadsCount : undefined}
                   />
                 );
               })()}

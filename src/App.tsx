@@ -499,6 +499,17 @@ function Layout() {
     window.history.pushState({}, '', url.toString());
   }
 
+  function handleNavigateToInvalidLeads() {
+    setLeadsEventFilter(undefined);
+    setLeadsInitialFilters({ systemStatus: 'INVALID_LEAD' });
+    setTab('leads');
+    localStorage.setItem('activeTab', 'leads');
+    setSelectedLeadId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
   async function handleLogout() {
     clearEvent(); // clear in-memory event state immediately
     await logout();
@@ -645,7 +656,7 @@ function Layout() {
         ) : (
           <>
             {tab === 'dashboard' && !selectedLeadId && (
-              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} onNavigateToConversations={handleNavigateToConversationsSamplesOpen} onNavigateToConversationsUnread={handleNavigateToConversationsUnread} />
+              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} onNavigateToConversations={handleNavigateToConversationsSamplesOpen} onNavigateToConversationsUnread={handleNavigateToConversationsUnread} onNavigateToInvalidLeads={handleNavigateToInvalidLeads} />
             )}
             {tab === 'events' && isAdmin && !selectedLeadId && (
               <EventsPage onViewLeads={handleViewLeads} />
