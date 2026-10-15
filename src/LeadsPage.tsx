@@ -91,6 +91,7 @@ const STATUS_OPTIONS: { label: string; value: string }[] = [
   { label: 'New',       value: 'NEW' },
   { label: 'Contacted', value: 'CONTACTED' },
   { label: 'Samples Sent', value: 'QUALIFIED' },
+  { label: 'Review Required', value: 'REQUIRES_REVIEW' },
   { label: 'Lost',      value: 'LOST' },
   { label: 'Converted', value: 'CONVERTED' },
 ];

@@ -510,6 +510,17 @@ function Layout() {
     window.history.pushState({}, '', url.toString());
   }
 
+  function handleNavigateToRequiresReview() {
+    setLeadsEventFilter(undefined);
+    setLeadsInitialFilters({ leadStatus: 'REQUIRES_REVIEW' });
+    setTab('leads');
+    localStorage.setItem('activeTab', 'leads');
+    setSelectedLeadId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
   async function handleLogout() {
     clearEvent(); // clear in-memory event state immediately
     await logout();
@@ -656,7 +667,7 @@ function Layout() {
         ) : (
           <>
             {tab === 'dashboard' && !selectedLeadId && (
-              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} onNavigateToConversations={handleNavigateToConversationsSamplesOpen} onNavigateToConversationsUnread={handleNavigateToConversationsUnread} onNavigateToInvalidLeads={handleNavigateToInvalidLeads} />
+              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} onNavigateToConversations={handleNavigateToConversationsSamplesOpen} onNavigateToConversationsUnread={handleNavigateToConversationsUnread} onNavigateToInvalidLeads={handleNavigateToInvalidLeads} onNavigateToRequiresReview={handleNavigateToRequiresReview} />
             )}
             {tab === 'events' && isAdmin && !selectedLeadId && (
               <EventsPage onViewLeads={handleViewLeads} />

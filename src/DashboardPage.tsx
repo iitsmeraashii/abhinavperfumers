@@ -37,11 +37,18 @@ import {
   ERR_INVALID_WAITING,
 } from './invalidLeadsLoader';
 import {
+  RequiresReviewLoader,
+  deriveRequiresReviewTileState,
+  type RequiresReviewCountResult,
+  ERR_REVIEW_SIGN_IN,
+  ERR_REVIEW_WAITING,
+} from './requiresReviewLoader';
+import {
   Users, TrendingUp, Calendar, Clock,
   MessageCircle, AlertCircle, XCircle,
   PhoneCall, Star, CheckCircle2, HeartCrack,
   Loader2, RefreshCw, ArrowRight, Flame, Sun, Snowflake, HelpCircle, UserX,
-  CalendarClock, FlaskConical,
+  CalendarClock, FlaskConical, ShieldAlert,
 } from 'lucide-react';
 
 const EMPTY = EMPTY_DASHBOARD;
@@ -155,6 +162,7 @@ interface DashboardPageProps {
   onNavigateToConversations?: () => void;
   onNavigateToConversationsUnread?: () => void;
   onNavigateToInvalidLeads?: () => void;
+  onNavigateToRequiresReview?: () => void;
 }
 
 interface FollowUpAttentionTileProps {
@@ -372,7 +380,59 @@ function InvalidLeadsAttentionTile({ phase, count, onNavigate, onRetry }: Follow
   );
 }
 
-export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps, onNavigateToConversations, onNavigateToConversationsUnread, onNavigateToInvalidLeads }: DashboardPageProps) {
+function RequiresReviewAttentionTile({ phase, count, onNavigate, onRetry }: FollowUpAttentionTileProps) {
+  const handleClick = phase === 'error' ? onRetry : phase === 'success' ? onNavigate : undefined;
+  const clickable = !!handleClick;
+
+  return (
+    <div
+      className={`rounded-xl border px-5 py-4 flex items-center gap-4 transition-all duration-150
+        ${clickable ? 'cursor-pointer hover:border-amber-300 hover:shadow-md active:scale-[0.98]' : ''}
+        bg-amber-50 border-amber-100`}
+      onClick={clickable ? handleClick : undefined}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') handleClick?.(); } : undefined}
+    >
+      <div className="mt-0.5 flex-shrink-0 text-amber-600">
+        <ShieldAlert className="w-5 h-5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-amber-700 font-medium mb-1">Requires Review</p>
+        {phase === 'loading' ? (
+          <div className="flex items-center gap-2">
+            <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+            <span className="text-sm text-amber-500">Loading…</span>
+          </div>
+        ) : phase === 'error' ? (
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400" />
+            <span className="text-sm text-red-500">Couldn't load — tap to retry</span>
+          </div>
+        ) : phase === 'unavailable' ? (
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-stone-400" />
+            <span className="text-sm text-stone-500">Unavailable</span>
+          </div>
+        ) : (
+          <>
+            <p className="text-2xl font-bold tabular-nums leading-none text-amber-800">
+              {count}
+            </p>
+            <p className="text-xs text-amber-500 mt-1">
+              {count === 1 ? 'lead awaiting review' : 'leads awaiting review'}
+            </p>
+          </>
+        )}
+      </div>
+      {clickable && (
+        <ArrowRight className="w-3.5 h-3.5 text-amber-300 self-center flex-shrink-0 mt-0.5" />
+      )}
+    </div>
+  );
+}
+
+export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps, onNavigateToConversations, onNavigateToConversationsUnread, onNavigateToInvalidLeads, onNavigateToRequiresReview }: DashboardPageProps) {
   const { user, authMode } = useAuth();
   const nav = (f: DashboardFilter) => onNavigateToLeads?.(f);
   const currentIdentity = identityKey(user);
@@ -422,6 +482,15 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
   const [ilError, setIlError] = useState(false);
   const [ilUnavailable, setIlUnavailable] = useState(false);
   const [ilIdentity, setIlIdentity] = useState<string | null>(null);
+
+  const rrLoaderRef = useRef<RequiresReviewLoader | null>(null);
+  if (!rrLoaderRef.current) rrLoaderRef.current = new RequiresReviewLoader();
+
+  const [rrCount, setRrCount] = useState<number | null>(null);
+  const [rrLoading, setRrLoading] = useState(true);
+  const [rrError, setRrError] = useState(false);
+  const [rrUnavailable, setRrUnavailable] = useState(false);
+  const [rrIdentity, setRrIdentity] = useState<string | null>(null);
 
   // Subscribe to transport connectivity. The returned boolean is a reactive
   // dependency that re-triggers the fetch effect when transport changes.
@@ -535,6 +604,33 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     setIlLoading(false);
   }, [currentIdentity, user]);
 
+  const fetchRequiresReviewCount = useCallback(async () => {
+    const loader = rrLoaderRef.current!;
+    setRrLoading(true);
+    setRrError(false);
+    setRrUnavailable(false);
+    const result: RequiresReviewCountResult = await loader.load(currentIdentity, user);
+
+    if (result.kind === 'stale') return;
+
+    if (result.kind === 'error') {
+      if (result.message === ERR_REVIEW_SIGN_IN || result.message === ERR_REVIEW_WAITING) {
+        setRrCount(null);
+        setRrUnavailable(true);
+      } else {
+        setRrError(true);
+        setRrCount(null);
+      }
+      setRrIdentity(currentIdentity);
+      setRrLoading(false);
+      return;
+    }
+
+    setRrCount(result.count);
+    setRrIdentity(currentIdentity);
+    setRrLoading(false);
+  }, [currentIdentity, user]);
+
   const fetchData = useCallback(async () => {
     const loader = loaderRef.current!;
     setLoading(true);
@@ -601,8 +697,16 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     setIlLoading(true);
     ilLoaderRef.current!.invalidate();
     fetchInvalidLeadsCount();
+
+    setRrCount(null);
+    setRrIdentity(null);
+    setRrError(false);
+    setRrUnavailable(false);
+    setRrLoading(true);
+    rrLoaderRef.current!.invalidate();
+    fetchRequiresReviewCount();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchData, fetchFollowUpCount, fetchSamplesOpenCount, fetchUnreadCount, fetchInvalidLeadsCount, authMode, isOnline]);
+  }, [fetchData, fetchFollowUpCount, fetchSamplesOpenCount, fetchUnreadCount, fetchInvalidLeadsCount, fetchRequiresReviewCount, authMode, isOnline]);
 
   // Cleanup on unmount — invalidate only, don't permanently unmount.
   // In StrictMode, setup→cleanup→setup reuses the same loader instance;
@@ -614,6 +718,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
       soLoaderRef.current?.invalidate();
       ucLoaderRef.current?.invalidate();
       ilLoaderRef.current?.invalidate();
+      rrLoaderRef.current?.invalidate();
     };
   }, []);
 
@@ -642,7 +747,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
             </p>
           </div>
           <button
-            onClick={() => { fetchData(); fetchFollowUpCount(); fetchSamplesOpenCount(); fetchUnreadCount(); fetchInvalidLeadsCount(); }}
+            onClick={() => { fetchData(); fetchFollowUpCount(); fetchSamplesOpenCount(); fetchUnreadCount(); fetchInvalidLeadsCount(); fetchRequiresReviewCount(); }}
             disabled={showLoading}
             className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 transition disabled:opacity-50 self-start sm:self-auto flex-shrink-0"
           >
@@ -721,6 +826,20 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
                     count={ilTile.count}
                     onNavigate={ilTile.canNavigate ? onNavigateToInvalidLeads : undefined}
                     onRetry={ilTile.canRetry ? fetchInvalidLeadsCount : undefined}
+                  />
+                );
+              })()}
+              {(() => {
+                const rrTile = deriveRequiresReviewTileState(
+                  rrLoading, rrError, rrUnavailable, rrCount, rrIdentity, currentIdentity,
+                );
+                if (!rrTile) return null;
+                return (
+                  <RequiresReviewAttentionTile
+                    phase={rrTile.phase}
+                    count={rrTile.count}
+                    onNavigate={rrTile.canNavigate ? onNavigateToRequiresReview : undefined}
+                    onRetry={rrTile.canRetry ? fetchRequiresReviewCount : undefined}
                   />
                 );
               })()}
