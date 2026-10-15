@@ -52,7 +52,7 @@ type ConversationRow = Conversation & {
   samples: SamplesInfo | null;
 };
 
-type ConversationFilter = 'all' | 'unread' | 'unmatched' | 'linked' | 'window_open' | 'window_expired';
+export type ConversationFilter = 'all' | 'unread' | 'unmatched' | 'linked' | 'window_open' | 'window_expired';
 type SamplesFilter = 'all' | 'open' | 'processed' | 'not_requested';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -125,9 +125,10 @@ function buildMessagePreview(msg: LatestMessage): string {
 interface ConversationsPageProps {
   onSelectConversation?: (conversationId: string) => void;
   initialSamplesFilter?: SamplesFilter;
+  initialFilter?: ConversationFilter;
 }
 
-export default function ConversationsPage({ onSelectConversation, initialSamplesFilter }: ConversationsPageProps) {
+export default function ConversationsPage({ onSelectConversation, initialSamplesFilter, initialFilter }: ConversationsPageProps) {
   const [rows, setRows] = useState<ConversationRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -136,7 +137,7 @@ export default function ConversationsPage({ onSelectConversation, initialSamples
 
   const [searchInput, setSearchInput] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
-  const [activeFilter, setActiveFilter] = useState<ConversationFilter>('all');
+  const [activeFilter, setActiveFilter] = useState<ConversationFilter>(initialFilter ?? 'all');
   const [samplesFilter, setSamplesFilter] = useState<SamplesFilter>(initialSamplesFilter ?? 'all');
   const [samplesDropdownOpen, setSamplesDropdownOpen] = useState(false);
 

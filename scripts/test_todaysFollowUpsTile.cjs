@@ -32,6 +32,10 @@ var supabase = {
         filters.push({ method: "gte", column, value });
         return chain;
       },
+      gt(column, value) {
+        filters.push({ method: "gt", column, value });
+        return chain;
+      },
       lt(column, value) {
         filters.push({ method: "lt", column, value });
         return chain;

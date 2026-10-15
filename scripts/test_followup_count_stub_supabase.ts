@@ -13,7 +13,7 @@ type FromHandler = (table: string, selectArg: string, selectOpts: Record<string,
   Promise<{ count: number | null; error: unknown; data: unknown }>;
 
 export interface FilterEntry {
-  method: 'eq' | 'gte' | 'lt';
+  method: 'eq' | 'gte' | 'gt' | 'lt';
   column: string;
   value: string;
 }
@@ -60,6 +60,10 @@ export const supabase = {
       },
       gte(column: string, value: string) {
         filters.push({ method: 'gte', column, value });
+        return chain;
+      },
+      gt(column: string, value: string) {
+        filters.push({ method: 'gt', column, value });
         return chain;
       },
       lt(column: string, value: string) {

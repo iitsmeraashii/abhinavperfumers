@@ -16,7 +16,7 @@ import CaptureLeadPage from './CaptureLeadPage';
 import LeadQueuePage from './LeadQueuePage';
 import MyAccountPage from './MyAccountPage';
 import SalesRepsPage from './SalesRepsPage';
-import ConversationsPage from './ConversationsPage';
+import ConversationsPage, { type ConversationFilter } from './ConversationsPage';
 import ConversationDetailPage from './ConversationDetailPage';
 import WhatsAppAssetsPage from './WhatsAppAssetsPage';
 import FollowUpsPage from './FollowUpsPage';
@@ -350,6 +350,7 @@ function Layout() {
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
   const [followupsInitialFilter, setFollowupsInitialFilter] = useState<'today' | undefined>(undefined);
   const [conversationsInitialSamples, setConversationsInitialSamples] = useState<'open' | undefined>(undefined);
+  const [conversationsInitialFilter, setConversationsInitialFilter] = useState<ConversationFilter | undefined>(undefined);
   const [moreDrawerOpen,     setMoreDrawerOpen]     = useState(false);
   const [resumeDraftId,      setResumeDraftId]      = useState<string | null>(null);
 
@@ -416,6 +417,7 @@ function Layout() {
     setLeadsInitialFilters(undefined);
     setFollowupsInitialFilter(undefined);
     setConversationsInitialSamples(undefined);
+    setConversationsInitialFilter(undefined);
   }
 
   function handleOpenFollowUpComplete(id: string) {
@@ -475,6 +477,19 @@ function Layout() {
 
   function handleNavigateToConversationsSamplesOpen() {
     setConversationsInitialSamples('open');
+    setConversationsInitialFilter(undefined);
+    setTab('conversations');
+    localStorage.setItem('activeTab', 'conversations');
+    setSelectedLeadId(null);
+    setSelectedConversationId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
+  function handleNavigateToConversationsUnread() {
+    setConversationsInitialSamples(undefined);
+    setConversationsInitialFilter('unread');
     setTab('conversations');
     localStorage.setItem('activeTab', 'conversations');
     setSelectedLeadId(null);
@@ -630,7 +645,7 @@ function Layout() {
         ) : (
           <>
             {tab === 'dashboard' && !selectedLeadId && (
-              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} onNavigateToConversations={handleNavigateToConversationsSamplesOpen} />
+              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} onNavigateToConversations={handleNavigateToConversationsSamplesOpen} onNavigateToConversationsUnread={handleNavigateToConversationsUnread} />
             )}
             {tab === 'events' && isAdmin && !selectedLeadId && (
               <EventsPage onViewLeads={handleViewLeads} />
@@ -654,9 +669,10 @@ function Layout() {
             )}
             {tab === 'conversations' && !selectedLeadId && !selectedConversationId && (
               <ConversationsPage
-                key={`conv-${conversationsRefreshKey}-${conversationsInitialSamples ?? 'default'}`}
+                key={`conv-${conversationsRefreshKey}-${conversationsInitialSamples ?? 'default'}-${conversationsInitialFilter ?? 'default'}`}
                 onSelectConversation={handleSelectConversation}
                 initialSamplesFilter={conversationsInitialSamples}
+                initialFilter={conversationsInitialFilter}
               />
             )}
             {tab === 'conversations' && !selectedLeadId && selectedConversationId && (
