@@ -1,3 +1,4 @@
+import { WHATSAPP_STATUS_OPTIONS, normalizeWhatsAppStatuses, buildLeadFilterOr } from './whatsappStatusFilter';
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { supabase } from './supabaseClient';
 import { useAuth } from './AuthContext';
@@ -38,6 +39,7 @@ interface SalesRep {
 type DateFilter = 'today' | '7days' | '30days' | null;
 
 interface AdvancedFilters {
+  whatsappStatuses: string[];
   leadType: string;
   temperature: string;
   state: string;
@@ -50,6 +52,7 @@ interface AdvancedFilters {
 }
 
 const EMPTY_ADVANCED: AdvancedFilters = {
+  whatsappStatuses: [],
   leadType: '',
   temperature: '',
   state: '',
@@ -125,7 +128,7 @@ function getDateFilterStart(filter: DateFilter): string | null {
 
 function countActiveAdvanced(f: AdvancedFilters): number {
   return [f.leadType, f.temperature, f.state, f.country, f.application, f.systemStatus, f.dateFrom, f.dateTo]
-    .filter(Boolean).length;
+    .filter(Boolean).length + (f.whatsappStatuses.length ? 1 : 0);
 }
 
 interface SelectFieldProps {
@@ -156,6 +159,10 @@ function SelectField({ label, value, onChange, options, placeholder = 'Any' }: S
 
 // ── URL helpers ──────────────────────────────────────────────────────────────
 
+function normalizeSystemStatus(value: unknown): string {
+  return value === 'INVALID_LEAD' ? 'INVALID_LEAD' : '';
+}
+
 function readParams(): {
   page: number;
   search: string;
@@ -185,7 +192,8 @@ function readParams(): {
       country: p.get('country') ?? '',
       application: p.get('application') ?? '',
       leadStatus: p.get('leadStatus') ?? '',
-      systemStatus: p.get('systemStatus') ?? '',
+      systemStatus: normalizeSystemStatus(p.get('systemStatus')),
+      whatsappStatuses: normalizeWhatsAppStatuses(p.getAll('whatsappStatus')),
       dateFrom: p.get('dateFrom') ?? '',
       dateTo: p.get('dateTo') ?? '',
     },
@@ -218,7 +226,9 @@ function buildParams(
   set('country', adv.country);
   set('application', adv.application);
   set('leadStatus', adv.leadStatus);
-  set('systemStatus', adv.systemStatus);
+  set('systemStatus', normalizeSystemStatus(adv.systemStatus));
+  p.delete('whatsappStatus');
+  normalizeWhatsAppStatuses(adv.whatsappStatuses).forEach(value => p.append('whatsappStatus', value));
   set('dateFrom', adv.dateFrom);
   set('dateTo', adv.dateTo);
 
@@ -234,6 +244,7 @@ function pushParams(params: URLSearchParams) {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export interface LeadsInitialFilters {
+  whatsappStatuses?: string[];
   dateFilter?: 'today' | '7days' | '30days';
   systemStatus?: string;
   leadStatus?: string;
@@ -275,7 +286,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   // Advanced filters — system_status and temperature come in via initialFilters
   const initAdv: AdvancedFilters = {
     ...init.adv,
-    ...(initialFilters?.systemStatus ? { systemStatus: initialFilters.systemStatus } : {}),
+    whatsappStatuses: normalizeWhatsAppStatuses(initialFilters?.whatsappStatuses ?? init.adv.whatsappStatuses),
+    systemStatus: normalizeSystemStatus(initialFilters?.systemStatus ?? init.adv.systemStatus),
     ...(initialFilters?.temperature ? { temperature: initialFilters.temperature } : {}),
   };
 
@@ -416,14 +428,13 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (eventFilt) query = query.eq('event_code', eventFilt);
 
     if (adv.leadType) query = query.eq('lead_type', adv.leadType);
-    if (adv.temperature === '__unassigned__') query = query.or('lead_temperature.is.null,lead_temperature.eq.');
-    else if (adv.temperature) query = query.eq('lead_temperature', adv.temperature);
-    if (adv.state === '__unassigned__') query = query.or('state.is.null,state.eq.');
-    else if (adv.state) query = query.eq('state', adv.state);
-    if (adv.country === '__unassigned__') query = query.or('country.is.null,country.eq.');
-    else if (adv.country) query = query.eq('country', adv.country);
+    if (adv.temperature && adv.temperature !== '__unassigned__') query = query.eq('lead_temperature', adv.temperature);
+    if (adv.state && adv.state !== '__unassigned__') query = query.eq('state', adv.state);
+    if (adv.country && adv.country !== '__unassigned__') query = query.eq('country', adv.country);
     if (adv.application) query = query.ilike('application', `%${adv.application}%`);
     if (adv.systemStatus) query = query.eq('system_status', adv.systemStatus);
+    const combinedOr = buildLeadFilterOr(adv);
+    if (combinedOr) query = query.or(combinedOr);
     const effectiveStatus = statusFilt || adv.leadStatus;
     if (effectiveStatus) query = query.eq('lead_status', effectiveStatus);
     if (adv.dateFrom) query = query.gte('created_at', new Date(adv.dateFrom).toISOString());
@@ -489,13 +500,13 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (quickDateStart) query = query.gte('created_at', quickDateStart);
     if (eventFilter) query = query.eq('event_code', eventFilter);
     if (applied.leadType) query = query.eq('lead_type', applied.leadType);
-    if (applied.temperature === '__unassigned__') query = query.or('lead_temperature.is.null,lead_temperature.eq.');
-    else if (applied.temperature) query = query.eq('lead_temperature', applied.temperature);
-    if (applied.state === '__unassigned__') query = query.or('state.is.null,state.eq.');
-    else if (applied.state) query = query.eq('state', applied.state);
-    if (applied.country === '__unassigned__') query = query.or('country.is.null,country.eq.');
-    else if (applied.country) query = query.eq('country', applied.country);
+    if (applied.temperature && applied.temperature !== '__unassigned__') query = query.eq('lead_temperature', applied.temperature);
+    if (applied.state && applied.state !== '__unassigned__') query = query.eq('state', applied.state);
+    if (applied.country && applied.country !== '__unassigned__') query = query.eq('country', applied.country);
     if (applied.application) query = query.ilike('application', `%${applied.application}%`);
+    if (applied.systemStatus) query = query.eq('system_status', applied.systemStatus);
+    const combinedOr = buildLeadFilterOr(applied);
+    if (combinedOr) query = query.or(combinedOr);
     if (applied.dateFrom) query = query.gte('created_at', new Date(applied.dateFrom).toISOString());
     if (applied.dateTo) {
       const end = new Date(applied.dateTo);
@@ -632,7 +643,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     setPage(0);
     setPanelOpen(false);
   }
-  function patchDraft(key: keyof AdvancedFilters, value: string) {
+  function patchDraft<K extends keyof AdvancedFilters>(key: K, value: AdvancedFilters[K]) {
     setDraft(prev => ({ ...prev, [key]: value }));
   }
 
@@ -642,13 +653,14 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     applied.state ? { label: `State: ${applied.state === '__unassigned__' ? 'UNASSIGNED' : applied.state}`, key: 'state' } : null,
     applied.country ? { label: `Country: ${applied.country === '__unassigned__' ? 'UNASSIGNED' : applied.country}`, key: 'country' } : null,
     applied.application ? { label: `App: ${applied.application}`, key: 'application' } : null,
-    applied.systemStatus ? { label: `System: ${applied.systemStatus.replace(/_/g, ' ')}`, key: 'systemStatus' } : null,
+    applied.whatsappStatuses.length ? { label: `WhatsApp: ${WHATSAPP_STATUS_OPTIONS.filter(option => applied.whatsappStatuses.includes(option.value)).map(option => option.label).join(', ')}`, key: 'whatsappStatuses' } : null,
+    applied.systemStatus ? { label: 'Invalid leads only', key: 'systemStatus' } : null,
     applied.dateFrom ? { label: `From: ${applied.dateFrom}`, key: 'dateFrom' } : null,
     applied.dateTo ? { label: `To: ${applied.dateTo}`, key: 'dateTo' } : null,
   ].filter(Boolean) as { label: string; key: keyof AdvancedFilters }[];
 
   function removeAdvancedChip(key: keyof AdvancedFilters) {
-    const next = { ...applied, [key]: '' };
+    const next = { ...applied, [key]: key === 'whatsappStatuses' ? [] : '' };
     setApplied(next);
     setDraft(next);
     setPage(0);
@@ -1007,8 +1019,6 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
                   const rowBg =
                     isReviewRequired                          ? 'bg-amber-50 hover:bg-amber-100' :
                     lead.system_status === 'INVALID_LEAD'    ? 'bg-red-50 hover:bg-red-100' :
-                    lead.system_status === 'WHATSAPP_FAILED' ? 'bg-yellow-50 hover:bg-yellow-100' :
-                    lead.system_status === 'WHATSAPP_SENT'   ? 'bg-green-50 hover:bg-green-100' :
                     'bg-white hover:bg-stone-50';
                   const isSelected = selectedIds.has(lead.id);
                   return (
@@ -1233,17 +1243,35 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
                 options={applicationOptions.map(a => ({ label: a, value: a }))}
               />
 
-              <SelectField
-                label="System Status"
-                value={draft.systemStatus}
-                onChange={v => patchDraft('systemStatus', v)}
-                options={[
-                  { label: 'Created', value: 'CREATED' },
-                  { label: 'WhatsApp Sent', value: 'WHATSAPP_SENT' },
-                  { label: 'WhatsApp Failed', value: 'WHATSAPP_FAILED' },
-                  { label: 'Invalid Lead', value: 'INVALID_LEAD' },
-                ]}
-              />
+              <fieldset className="flex flex-col gap-2">
+                <legend className="mb-2 text-xs font-medium text-stone-500 uppercase tracking-wide">WhatsApp status</legend>
+                <p className="text-xs text-stone-500">Initial outreach status. Not set does not mean a message was required.</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {WHATSAPP_STATUS_OPTIONS.map(option => (
+                    <label key={option.value} className="flex items-center gap-2 text-sm text-stone-700">
+                      <input
+                        type="checkbox"
+                        checked={draft.whatsappStatuses.includes(option.value)}
+                        onChange={e => patchDraft('whatsappStatuses', e.target.checked
+                          ? normalizeWhatsAppStatuses([...draft.whatsappStatuses, option.value])
+                          : draft.whatsappStatuses.filter(value => value !== option.value))}
+                        className="h-4 w-4 rounded border-stone-300 accent-amber-600"
+                      />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+
+              <label className="flex items-center gap-2 text-sm text-stone-700">
+                <input
+                  type="checkbox"
+                  checked={draft.systemStatus === 'INVALID_LEAD'}
+                  onChange={e => patchDraft('systemStatus', e.target.checked ? 'INVALID_LEAD' : '')}
+                  className="h-4 w-4 rounded border-stone-300 accent-amber-600"
+                />
+                Invalid leads only
+              </label>
 
               <div className="flex flex-col gap-3">
                 <span className="text-xs font-medium text-stone-500 uppercase tracking-wide">Custom Date Range</span>

@@ -1,3 +1,4 @@
+import DashboardWhatsAppSection from './DashboardWhatsAppSection';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { useOnlineStatus } from './capture/useOnlineStatus';
@@ -63,6 +64,7 @@ function pct(part: number, total: number) {
 }
 
 export interface DashboardFilter {
+  whatsappStatuses?: string[];
   dateFilter?: 'today' | '7days' | '30days';
   systemStatus?: string;
   leadStatus?: string;
@@ -437,6 +439,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
   const nav = (f: DashboardFilter) => onNavigateToLeads?.(f);
   const currentIdentity = identityKey(user);
 
+  const [whatsappRefresh, setWhatsappRefresh] = useState(0);
   const [data, setData] = useState<DashboardData>(EMPTY);
   const [dataIdentity, setDataIdentity] = useState<string | null>(null);
   const [errorIdentity, setErrorIdentity] = useState<string | null>(null);
@@ -747,7 +750,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
             </p>
           </div>
           <button
-            onClick={() => { fetchData(); fetchFollowUpCount(); fetchSamplesOpenCount(); fetchUnreadCount(); fetchInvalidLeadsCount(); fetchRequiresReviewCount(); }}
+            onClick={() => { setWhatsappRefresh(value => value + 1); fetchData(); fetchFollowUpCount(); fetchSamplesOpenCount(); fetchUnreadCount(); fetchInvalidLeadsCount(); fetchRequiresReviewCount(); }}
             disabled={showLoading}
             className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 transition disabled:opacity-50 self-start sm:self-auto flex-shrink-0"
           >
@@ -878,21 +881,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
             </div>
           </section>
 
-          {/* ── Middle: WhatsApp & system ── */}
-          <section>
-            <SectionLabel>System Status</SectionLabel>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <KpiCard icon={<MessageCircle className="w-5 h-5" />} label="WhatsApp Sent"   value={displayData.whatsapp_sent}   color="green"
-                sub={`${pct(displayData.whatsapp_sent, displayData.total_leads)}% of total`}
-                onClick={() => nav({ systemStatus: 'WHATSAPP_SENT' })} />
-              <KpiCard icon={<AlertCircle className="w-5 h-5" />}   label="WhatsApp Failed" value={displayData.whatsapp_failed}  color="red"
-                sub={`${pct(displayData.whatsapp_failed, displayData.total_leads)}% of total`}
-                onClick={() => nav({ systemStatus: 'WHATSAPP_FAILED' })} />
-              <KpiCard icon={<XCircle className="w-5 h-5" />}       label="Invalid Leads"   value={displayData.invalid_leads}   color="stone"
-                sub={`${pct(displayData.invalid_leads, displayData.total_leads)}% of total`}
-                onClick={() => nav({ systemStatus: 'INVALID_LEAD' })} />
-            </div>
-          </section>
+          <DashboardWhatsAppSection refresh={whatsappRefresh} onNavigate={statuses => nav({ whatsappStatuses: statuses })} />
 
           {/* ── Bottom: Lead status ── */}
           <section>
