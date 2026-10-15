@@ -16,7 +16,7 @@ import CaptureLeadPage from './CaptureLeadPage';
 import LeadQueuePage from './LeadQueuePage';
 import MyAccountPage from './MyAccountPage';
 import SalesRepsPage from './SalesRepsPage';
-import ConversationsPage from './ConversationsPage';
+import ConversationsPage, { type ConversationFilter } from './ConversationsPage';
 import ConversationDetailPage from './ConversationDetailPage';
 import WhatsAppAssetsPage from './WhatsAppAssetsPage';
 import FollowUpsPage from './FollowUpsPage';
@@ -42,7 +42,7 @@ interface MobileTab {
 }
 
 const MOBILE_TABS: MobileTab[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-5 h-5" />, adminOnly: true },
+  { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard className="w-5 h-5" /> },
   { id: 'leads',     label: 'Leads',     icon: <List className="w-5 h-5" /> },
   { id: 'capture',   label: 'Capture',   icon: <PlusCircle className="w-5 h-5" />, emphasize: true },
   { id: 'queue',          label: 'Queue',         icon: <Layers className="w-5 h-5" /> },
@@ -336,7 +336,7 @@ function Layout() {
 
   const [tab,                setTab]                = useState<Tab>(() => {
     const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'whatsapp_assets', 'followups', 'account'];
-    const repTabs: Tab[]   = ['leads', 'capture', 'queue', 'conversations', 'followups', 'account'];
+    const repTabs: Tab[]   = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'followups', 'account'];
     const allowed = isAdmin ? adminTabs : repTabs;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
     if (saved && allowed.includes(saved)) return saved;
@@ -348,6 +348,9 @@ function Layout() {
   const [leadsEventFilter,   setLeadsEventFilter]   = useState<string | undefined>(undefined);
   const [leadsInitialFilters,setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
+  const [followupsInitialFilter, setFollowupsInitialFilter] = useState<'today' | undefined>(undefined);
+  const [conversationsInitialSamples, setConversationsInitialSamples] = useState<'open' | undefined>(undefined);
+  const [conversationsInitialFilter, setConversationsInitialFilter] = useState<ConversationFilter | undefined>(undefined);
   const [moreDrawerOpen,     setMoreDrawerOpen]     = useState(false);
   const [resumeDraftId,      setResumeDraftId]      = useState<string | null>(null);
 
@@ -412,6 +415,9 @@ function Layout() {
     window.history.pushState({}, '', url.toString());
     setLeadsEventFilter(undefined);
     setLeadsInitialFilters(undefined);
+    setFollowupsInitialFilter(undefined);
+    setConversationsInitialSamples(undefined);
+    setConversationsInitialFilter(undefined);
   }
 
   function handleOpenFollowUpComplete(id: string) {
@@ -459,6 +465,62 @@ function Layout() {
     window.history.pushState({}, '', url.toString());
   }
 
+  function handleNavigateToFollowUps() {
+    setFollowupsInitialFilter('today');
+    setTab('followups');
+    localStorage.setItem('activeTab', 'followups');
+    setSelectedLeadId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
+  function handleNavigateToConversationsSamplesOpen() {
+    setConversationsInitialSamples('open');
+    setConversationsInitialFilter(undefined);
+    setTab('conversations');
+    localStorage.setItem('activeTab', 'conversations');
+    setSelectedLeadId(null);
+    setSelectedConversationId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
+  function handleNavigateToConversationsUnread() {
+    setConversationsInitialSamples(undefined);
+    setConversationsInitialFilter('unread');
+    setTab('conversations');
+    localStorage.setItem('activeTab', 'conversations');
+    setSelectedLeadId(null);
+    setSelectedConversationId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
+  function handleNavigateToInvalidLeads() {
+    setLeadsEventFilter(undefined);
+    setLeadsInitialFilters({ systemStatus: 'INVALID_LEAD' });
+    setTab('leads');
+    localStorage.setItem('activeTab', 'leads');
+    setSelectedLeadId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
+  function handleNavigateToRequiresReview() {
+    setLeadsEventFilter(undefined);
+    setLeadsInitialFilters({ leadStatus: 'REQUIRES_REVIEW' });
+    setTab('leads');
+    localStorage.setItem('activeTab', 'leads');
+    setSelectedLeadId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
   async function handleLogout() {
     clearEvent(); // clear in-memory event state immediately
     await logout();
@@ -484,15 +546,13 @@ function Layout() {
             <p className="text-xs text-stone-500">Sales Portal</p>
           </div>
           <nav className="flex items-stretch gap-1">
-            {isAdmin && (
-              <button
-                onClick={() => handleTabChange('dashboard')}
-                className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
-                  ${tab === 'dashboard' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
-              >
-                <LayoutDashboard className="w-4 h-4" /> Dashboard
-              </button>
-            )}
+            <button
+              onClick={() => handleTabChange('dashboard')}
+              className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
+                ${tab === 'dashboard' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
+            >
+              <LayoutDashboard className="w-4 h-4" /> Dashboard
+            </button>
             <button
               onClick={() => handleTabChange('leads')}
               className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
@@ -606,8 +666,8 @@ function Layout() {
           <MyAccountPage onBack={() => handleTabChange(isAdmin ? 'dashboard' : 'capture')} />
         ) : (
           <>
-            {tab === 'dashboard' && isAdmin && !selectedLeadId && (
-              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} />
+            {tab === 'dashboard' && !selectedLeadId && (
+              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} onNavigateToConversations={handleNavigateToConversationsSamplesOpen} onNavigateToConversationsUnread={handleNavigateToConversationsUnread} onNavigateToInvalidLeads={handleNavigateToInvalidLeads} onNavigateToRequiresReview={handleNavigateToRequiresReview} />
             )}
             {tab === 'events' && isAdmin && !selectedLeadId && (
               <EventsPage onViewLeads={handleViewLeads} />
@@ -627,12 +687,14 @@ function Layout() {
               />
             )}
             {tab === 'followups' && !selectedLeadId && (
-              <FollowUpsPage onSelectLead={handleSelectLead} onOpenFollowUpComplete={handleOpenFollowUpComplete} />
+              <FollowUpsPage key={followupsInitialFilter ?? 'default'} onSelectLead={handleSelectLead} onOpenFollowUpComplete={handleOpenFollowUpComplete} initialDateFilter={followupsInitialFilter} />
             )}
             {tab === 'conversations' && !selectedLeadId && !selectedConversationId && (
               <ConversationsPage
-                key={`conv-${conversationsRefreshKey}`}
+                key={`conv-${conversationsRefreshKey}-${conversationsInitialSamples ?? 'default'}-${conversationsInitialFilter ?? 'default'}`}
                 onSelectConversation={handleSelectConversation}
+                initialSamplesFilter={conversationsInitialSamples}
+                initialFilter={conversationsInitialFilter}
               />
             )}
             {tab === 'conversations' && !selectedLeadId && selectedConversationId && (

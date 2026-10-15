@@ -91,6 +91,7 @@ const STATUS_OPTIONS: { label: string; value: string }[] = [
   { label: 'New',       value: 'NEW' },
   { label: 'Contacted', value: 'CONTACTED' },
   { label: 'Samples Sent', value: 'QUALIFIED' },
+  { label: 'Review Required', value: 'REQUIRES_REVIEW' },
   { label: 'Lost',      value: 'LOST' },
   { label: 'Converted', value: 'CONVERTED' },
 ];
@@ -1230,6 +1231,18 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
                 value={draft.application}
                 onChange={v => patchDraft('application', v)}
                 options={applicationOptions.map(a => ({ label: a, value: a }))}
+              />
+
+              <SelectField
+                label="System Status"
+                value={draft.systemStatus}
+                onChange={v => patchDraft('systemStatus', v)}
+                options={[
+                  { label: 'Created', value: 'CREATED' },
+                  { label: 'WhatsApp Sent', value: 'WHATSAPP_SENT' },
+                  { label: 'WhatsApp Failed', value: 'WHATSAPP_FAILED' },
+                  { label: 'Invalid Lead', value: 'INVALID_LEAD' },
+                ]}
               />
 
               <div className="flex flex-col gap-3">

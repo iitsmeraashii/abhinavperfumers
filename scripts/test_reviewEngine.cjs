@@ -1,3 +1,122 @@
+const _g = globalThis;
+if (!_g.localStorage) { const _s = {}; _g.localStorage = { getItem: (k) => _s[k] ?? null, setItem: (k, v) => { _s[k] = v; }, removeItem: (k) => { delete _s[k]; } }; }
+if (!_g.navigator) _g.navigator = { onLine: true };
+if (!_g.window) _g.window = _g;
+
+// src/capture/priceRangeCacheStorage.ts
+var BUILTIN_PRICE_RANGE_VALUES = ["INR", "USD", "<", ">", "=", "-"];
+var writes = Promise.resolve();
+
+// src/connectivity/connectivityStore.ts
+function createConnectivityStore(provider, initial = true) {
+  let online = initial;
+  let activated = false;
+  let revision = 0;
+  let generation = 0;
+  let stop;
+  let running = false;
+  const listeners = /* @__PURE__ */ new Set();
+  const publish = (value) => {
+    if (online === value) return;
+    online = value;
+    listeners.forEach((listener) => {
+      try {
+        listener();
+      } catch {
+      }
+    });
+  };
+  const reconcile = () => {
+    const token = ++revision;
+    const lifecycle = generation;
+    try {
+      const result = provider.readStatus();
+      if (typeof result === "boolean") {
+        if (token === revision && lifecycle === generation) publish(result);
+      } else void result.then((value) => {
+        if (token === revision && lifecycle === generation) publish(value);
+      }).catch(() => {
+      });
+    } catch {
+    }
+  };
+  return {
+    // Pure reads, including before activation and after cleanup.
+    getSnapshot: () => online,
+    configureProvider(nextProvider, seed) {
+      if (activated) throw new Error("Connectivity provider must be configured before first activation");
+      provider = nextProvider;
+      online = seed;
+      initial = seed;
+    },
+    getServerSnapshot: () => initial,
+    subscribe(listener) {
+      listeners.add(listener);
+      if (!running) {
+        activated = true;
+        running = true;
+        const lifecycle = ++generation;
+        try {
+          stop = provider.subscribe((value) => {
+            if (lifecycle !== generation) return;
+            ++revision;
+            publish(value);
+          }, () => {
+            if (lifecycle === generation) reconcile();
+          });
+        } catch {
+        }
+        reconcile();
+      }
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        listeners.delete(listener);
+        if (!listeners.size) {
+          ++generation;
+          ++revision;
+          running = false;
+          stop?.();
+          stop = void 0;
+        }
+      };
+    }
+  };
+}
+function readBrowserConnectivity() {
+  return typeof navigator === "undefined" || navigator.onLine !== false;
+}
+function createBrowserConnectivityProvider() {
+  return {
+    readStatus: readBrowserConnectivity,
+    subscribe(_onChange, reconcile) {
+      if (typeof window === "undefined") return () => {
+      };
+      const onOnline = () => reconcile();
+      const onOffline = () => reconcile();
+      const onVisible = () => {
+        if (typeof document === "undefined" || document.visibilityState === "visible") reconcile();
+      };
+      window.addEventListener("online", onOnline);
+      window.addEventListener("offline", onOffline);
+      window.addEventListener("focus", onVisible);
+      if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
+      return () => {
+        window.removeEventListener("online", onOnline);
+        window.removeEventListener("offline", onOffline);
+        window.removeEventListener("focus", onVisible);
+        if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
+      };
+    }
+  };
+}
+var connectivityStore = createConnectivityStore(createBrowserConnectivityProvider(), readBrowserConnectivity());
+var isTransportOnline = connectivityStore.getSnapshot;
+
+// src/runtime/priceRangeConfiguration.ts
+var snapshot = { values: [], quickValues: [...BUILTIN_PRICE_RANGE_VALUES], loading: false, error: null };
+
 // src/runtime/runtimeConfiguration.ts
 var DEFAULT_REVIEW_CONFIG = {
   minimumConfidence: 75

@@ -7,7 +7,6 @@ const supabaseStubPlugin = {
     });
   },
 };
-
 require('esbuild').build({
   entryPoints: ['scripts/test_reviewEngine.ts'],
   bundle: true,
