@@ -16,11 +16,18 @@ import {
   ERR_FOLLOWUP_WAITING,
 } from './todaysFollowUpsLoader';
 import {
+  SamplesOpenLoader,
+  deriveSamplesOpenTileState,
+  type SamplesOpenCountResult,
+  ERR_SAMPLES_SIGN_IN,
+  ERR_SAMPLES_WAITING,
+} from './samplesOpenLoader';
+import {
   Users, TrendingUp, Calendar, Clock,
   MessageCircle, AlertCircle, XCircle,
   PhoneCall, Star, CheckCircle2, HeartCrack,
   Loader2, RefreshCw, ArrowRight, Flame, Sun, Snowflake, HelpCircle, UserX,
-  CalendarClock,
+  CalendarClock, FlaskConical,
 } from 'lucide-react';
 
 const EMPTY = EMPTY_DASHBOARD;
@@ -131,6 +138,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 interface DashboardPageProps {
   onNavigateToLeads?: (filter: DashboardFilter) => void;
   onNavigateToFollowUps?: () => void;
+  onNavigateToConversations?: () => void;
 }
 
 interface FollowUpAttentionTileProps {
@@ -192,7 +200,59 @@ function FollowUpAttentionTile({ phase, count, onNavigate, onRetry }: FollowUpAt
   );
 }
 
-export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps }: DashboardPageProps) {
+function SamplesOpenAttentionTile({ phase, count, onNavigate, onRetry }: FollowUpAttentionTileProps) {
+  const handleClick = phase === 'error' ? onRetry : phase === 'success' ? onNavigate : undefined;
+  const clickable = !!handleClick;
+
+  return (
+    <div
+      className={`rounded-xl border px-5 py-4 flex items-center gap-4 transition-all duration-150
+        ${clickable ? 'cursor-pointer hover:border-amber-300 hover:shadow-md active:scale-[0.98]' : ''}
+        bg-amber-50 border-amber-100`}
+      onClick={clickable ? handleClick : undefined}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') handleClick?.(); } : undefined}
+    >
+      <div className="mt-0.5 flex-shrink-0 text-amber-600">
+        <FlaskConical className="w-5 h-5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-amber-700 font-medium mb-1">Samples: Open</p>
+        {phase === 'loading' ? (
+          <div className="flex items-center gap-2">
+            <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+            <span className="text-sm text-amber-500">Loading…</span>
+          </div>
+        ) : phase === 'error' ? (
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400" />
+            <span className="text-sm text-red-500">Couldn't load — tap to retry</span>
+          </div>
+        ) : phase === 'unavailable' ? (
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-stone-400" />
+            <span className="text-sm text-stone-500">Unavailable</span>
+          </div>
+        ) : (
+          <>
+            <p className="text-2xl font-bold tabular-nums leading-none text-amber-800">
+              {count}
+            </p>
+            <p className="text-xs text-amber-500 mt-1">
+              {count === 1 ? 'conversation with open samples request' : 'conversations with open samples requests'}
+            </p>
+          </>
+        )}
+      </div>
+      {clickable && (
+        <ArrowRight className="w-3.5 h-3.5 text-amber-300 self-center flex-shrink-0 mt-0.5" />
+      )}
+    </div>
+  );
+}
+
+export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps, onNavigateToConversations }: DashboardPageProps) {
   const { user, authMode } = useAuth();
   const nav = (f: DashboardFilter) => onNavigateToLeads?.(f);
   const currentIdentity = identityKey(user);
@@ -215,6 +275,15 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
   const [fuError, setFuError] = useState(false);
   const [fuUnavailable, setFuUnavailable] = useState(false);
   const [fuIdentity, setFuIdentity] = useState<string | null>(null);
+
+  const soLoaderRef = useRef<SamplesOpenLoader | null>(null);
+  if (!soLoaderRef.current) soLoaderRef.current = new SamplesOpenLoader();
+
+  const [soCount, setSoCount] = useState<number | null>(null);
+  const [soLoading, setSoLoading] = useState(true);
+  const [soError, setSoError] = useState(false);
+  const [soUnavailable, setSoUnavailable] = useState(false);
+  const [soIdentity, setSoIdentity] = useState<string | null>(null);
 
   // Subscribe to transport connectivity. The returned boolean is a reactive
   // dependency that re-triggers the fetch effect when transport changes.
@@ -245,6 +314,33 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     setFuCount(result.count);
     setFuIdentity(currentIdentity);
     setFuLoading(false);
+  }, [currentIdentity, user]);
+
+  const fetchSamplesOpenCount = useCallback(async () => {
+    const loader = soLoaderRef.current!;
+    setSoLoading(true);
+    setSoError(false);
+    setSoUnavailable(false);
+    const result: SamplesOpenCountResult = await loader.load(currentIdentity, user);
+
+    if (result.kind === 'stale') return;
+
+    if (result.kind === 'error') {
+      if (result.message === ERR_SAMPLES_SIGN_IN || result.message === ERR_SAMPLES_WAITING) {
+        setSoCount(null);
+        setSoUnavailable(true);
+      } else {
+        setSoError(true);
+        setSoCount(null);
+      }
+      setSoIdentity(currentIdentity);
+      setSoLoading(false);
+      return;
+    }
+
+    setSoCount(result.count);
+    setSoIdentity(currentIdentity);
+    setSoLoading(false);
   }, [currentIdentity, user]);
 
   const fetchData = useCallback(async () => {
@@ -289,8 +385,16 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     setFuLoading(true);
     fuLoaderRef.current!.invalidate();
     fetchFollowUpCount();
+
+    setSoCount(null);
+    setSoIdentity(null);
+    setSoError(false);
+    setSoUnavailable(false);
+    setSoLoading(true);
+    soLoaderRef.current!.invalidate();
+    fetchSamplesOpenCount();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchData, fetchFollowUpCount, authMode, isOnline]);
+  }, [fetchData, fetchFollowUpCount, fetchSamplesOpenCount, authMode, isOnline]);
 
   // Cleanup on unmount — invalidate only, don't permanently unmount.
   // In StrictMode, setup→cleanup→setup reuses the same loader instance;
@@ -299,6 +403,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     return () => {
       loaderRef.current?.invalidate();
       fuLoaderRef.current?.invalidate();
+      soLoaderRef.current?.invalidate();
     };
   }, []);
 
@@ -327,7 +432,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
             </p>
           </div>
           <button
-            onClick={() => { fetchData(); fetchFollowUpCount(); }}
+            onClick={() => { fetchData(); fetchFollowUpCount(); fetchSamplesOpenCount(); }}
             disabled={showLoading}
             className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 transition disabled:opacity-50 self-start sm:self-auto flex-shrink-0"
           >
@@ -360,15 +465,28 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
           fuLoading, fuError, fuUnavailable, fuCount, fuIdentity, currentIdentity,
         );
         if (!tile) return null;
+        const soTile = deriveSamplesOpenTileState(
+          soLoading, soError, soUnavailable, soCount, soIdentity, currentIdentity,
+        );
         return (
           <section className="mb-6">
             <SectionLabel>Needs your attention</SectionLabel>
-            <FollowUpAttentionTile
-              phase={tile.phase}
-              count={tile.count}
-              onNavigate={tile.canNavigate ? onNavigateToFollowUps : undefined}
-              onRetry={tile.canRetry ? fetchFollowUpCount : undefined}
-            />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <FollowUpAttentionTile
+                phase={tile.phase}
+                count={tile.count}
+                onNavigate={tile.canNavigate ? onNavigateToFollowUps : undefined}
+                onRetry={tile.canRetry ? fetchFollowUpCount : undefined}
+              />
+              {soTile && (
+                <SamplesOpenAttentionTile
+                  phase={soTile.phase}
+                  count={soTile.count}
+                  onNavigate={soTile.canNavigate ? onNavigateToConversations : undefined}
+                  onRetry={soTile.canRetry ? fetchSamplesOpenCount : undefined}
+                />
+              )}
+            </div>
           </section>
         );
       })()}

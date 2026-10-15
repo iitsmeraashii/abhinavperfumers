@@ -349,6 +349,7 @@ function Layout() {
   const [leadsInitialFilters,setLeadsInitialFilters] = useState<LeadsInitialFilters | undefined>(undefined);
   const [followUpModalId,    setFollowUpModalId]    = useState<string | null>(initialFollowUp);
   const [followupsInitialFilter, setFollowupsInitialFilter] = useState<'today' | undefined>(undefined);
+  const [conversationsInitialSamples, setConversationsInitialSamples] = useState<'open' | undefined>(undefined);
   const [moreDrawerOpen,     setMoreDrawerOpen]     = useState(false);
   const [resumeDraftId,      setResumeDraftId]      = useState<string | null>(null);
 
@@ -414,6 +415,7 @@ function Layout() {
     setLeadsEventFilter(undefined);
     setLeadsInitialFilters(undefined);
     setFollowupsInitialFilter(undefined);
+    setConversationsInitialSamples(undefined);
   }
 
   function handleOpenFollowUpComplete(id: string) {
@@ -466,6 +468,17 @@ function Layout() {
     setTab('followups');
     localStorage.setItem('activeTab', 'followups');
     setSelectedLeadId(null);
+    const url = new URL(window.location.href);
+    url.search = '';
+    window.history.pushState({}, '', url.toString());
+  }
+
+  function handleNavigateToConversationsSamplesOpen() {
+    setConversationsInitialSamples('open');
+    setTab('conversations');
+    localStorage.setItem('activeTab', 'conversations');
+    setSelectedLeadId(null);
+    setSelectedConversationId(null);
     const url = new URL(window.location.href);
     url.search = '';
     window.history.pushState({}, '', url.toString());
@@ -617,7 +630,7 @@ function Layout() {
         ) : (
           <>
             {tab === 'dashboard' && !selectedLeadId && (
-              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} />
+              <DashboardPage onNavigateToLeads={handleNavigateFromDashboard} onNavigateToFollowUps={handleNavigateToFollowUps} onNavigateToConversations={handleNavigateToConversationsSamplesOpen} />
             )}
             {tab === 'events' && isAdmin && !selectedLeadId && (
               <EventsPage onViewLeads={handleViewLeads} />
@@ -641,8 +654,9 @@ function Layout() {
             )}
             {tab === 'conversations' && !selectedLeadId && !selectedConversationId && (
               <ConversationsPage
-                key={`conv-${conversationsRefreshKey}`}
+                key={`conv-${conversationsRefreshKey}-${conversationsInitialSamples ?? 'default'}`}
                 onSelectConversation={handleSelectConversation}
+                initialSamplesFilter={conversationsInitialSamples}
               />
             )}
             {tab === 'conversations' && !selectedLeadId && selectedConversationId && (

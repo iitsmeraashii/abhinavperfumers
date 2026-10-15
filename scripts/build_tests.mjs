@@ -112,3 +112,25 @@ if (!_g.window) _g.window = _g;`,
 });
 
 console.log('Test bundle built: scripts/test_followUpTileRegression.cjs');
+
+await build({
+  entryPoints: ['scripts/test_samplesOpenTile.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  outfile: 'scripts/test_samplesOpenTile.cjs',
+  plugins: [makeAliasPlugin(FOLLOWUP_STUBS)],
+  define: {
+    'import.meta.env.VITE_SUPABASE_URL': '"http://localhost"',
+    'import.meta.env.VITE_SUPABASE_ANON_KEY': '"anon-key"',
+    'import.meta.env.VITE_APP_NAME': '"Test"',
+  },
+  banner: {
+    js: `const _g = globalThis;
+if (!_g.localStorage) { const _s = {}; _g.localStorage = { getItem: (k) => _s[k] ?? null, setItem: (k, v) => { _s[k] = v; }, removeItem: (k) => { delete _s[k]; } }; }
+if (!_g.navigator) _g.navigator = { onLine: true };
+if (!_g.window) _g.window = _g;`,
+  },
+});
+
+console.log('Test bundle built: scripts/test_samplesOpenTile.cjs');
