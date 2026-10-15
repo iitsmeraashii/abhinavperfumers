@@ -1,296 +1,372 @@
--- ════════════════════════════════════════════════════════════════════════════
 -- UNEXECUTED — REVIEW ONLY
 --
--- Proposal: Append whatsapp_status to public.leads_list_view
--- Status:   NOT APPLIED. Do not run without explicit approval.
---
 -- Purpose:
---   Expose lead_entries.whatsapp_status through leads_list_view so the
---   Leads page can apply a server-side multi-select filter on that column
---   without downloading all rows to the browser.
+-- Append whatsapp_status to public.leads_list_view.
 --
--- Confirmed live-database facts:
---   • public.lead_entries.whatsapp_status  — text, nullable
---   • public.leads_list_view owner         — postgres
---   • View options                         — security_invoker = true
---   • ACL                                  —
---       postgres      = arwdDxtm/postgres
---       authenticated = arwdDxtm/postgres
---       service_role  = arwdDxtm/postgres
---   • Existing view definition (exact column order):
---       SELECT
---         id, client_name, company, phones[1] AS phone, event_code,
---         sales_rep_code, lead_type, lead_temperature, state, application,
---         lead_status, system_status, created_at, search_text, country
---       FROM public.lead_entries;
+-- Scope:
+-- No application-data changes, grants, ownership changes, RLS changes,
+-- or changes to capture, queue, ALPE, promotion, or sending workflows.
 --
--- What this migration does:
---   1. CREATE OR REPLACE VIEW with the identical column list and order,
---      appending whatsapp_status as the final column.
---   2. Metadata assertions (pre and post) to verify column order, types,
---      owner, security option, and ACL are preserved.
+-- Execute the entire transaction together.
+-- If execution fails or is interrupted, issue ROLLBACK in the SAME
+-- database session, or confirm that the connection has terminated.
 --
--- What this migration does NOT do:
---   • Does NOT DROP the view (no DROP VIEW).
---   • Does NOT use CASCADE.
---   • Does NOT change ownership.
---   • Does NOT issue GRANT or REVOKE.
---   • Does NOT modify lead_entries or any other table.
---   • Does NOT modify data, RLS policies, other views, functions, capture,
---     queue, ALPE, promotion, auth, or n8n workflows.
--- ════════════════════════════════════════════════════════════════════════════
+-- Preconditions deliberately reject an already-updated view.
+--
+-- A frontend build does not validate this SQL.
 
 BEGIN;
 
-  -- Short transaction-local timeouts so a blocked DDL fails fast rather than
-  -- hanging the connection.
-  SET LOCAL lock_timeout  = '3s';
-  SET LOCAL statement_timeout = '10s';
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '10s';
+SET LOCAL idle_in_transaction_session_timeout = '30s';
 
-  -- ── Pre-condition assertions ──────────────────────────────────────────────
+DO $migration$
+DECLARE
+  v_view_oid         oid;
+  v_source_oid       oid;
+  v_owner_before     oid;
+  v_owner_after      oid;
+  v_acl_before       aclitem[];
+  v_acl_after        aclitem[];
+  v_options_before   text[];
+  v_options_after    text[];
+  v_columns_before   jsonb;
+  v_columns_after    jsonb;
+  v_names            text[];
+  v_types            text[];
+  v_security_invoker boolean;
+  v_column_count     bigint;
 
-  -- Assert the source column exists and is text.
-  ASSERT EXISTS (
+  v_expected_names CONSTANT text[] := ARRAY[
+    'id',
+    'client_name',
+    'company',
+    'phone',
+    'event_code',
+    'sales_rep_code',
+    'lead_type',
+    'lead_temperature',
+    'state',
+    'application',
+    'lead_status',
+    'system_status',
+    'created_at',
+    'search_text',
+    'country'
+  ]::text[];
+
+  v_expected_types CONSTANT text[] := ARRAY[
+    'text',
+    'text',
+    'text',
+    'text',
+    'text',
+    'text',
+    'text',
+    'text',
+    'text',
+    'text',
+    'text',
+    'text',
+    'timestamp without time zone',
+    'text',
+    'text'
+  ]::text[];
+BEGIN
+  -- Locate the existing ordinary view.
+  SELECT c.oid, c.relowner, c.relacl, c.reloptions
+    INTO v_view_oid, v_owner_before, v_acl_before, v_options_before
+  FROM pg_catalog.pg_class AS c
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public'
+    AND c.relname = 'leads_list_view'
+    AND c.relkind = 'v';
+
+  IF v_view_oid IS NULL THEN
+    RAISE EXCEPTION
+      'Precondition failed: public.leads_list_view is missing or is not an ordinary view';
+  END IF;
+
+  IF pg_catalog.pg_get_userbyid(v_owner_before)
+       IS DISTINCT FROM 'postgres' THEN
+    RAISE EXCEPTION
+      'Precondition failed: unexpected view owner';
+  END IF;
+
+  SELECT o.option_value::boolean
+    INTO v_security_invoker
+  FROM pg_catalog.pg_options_to_table(v_options_before) AS o
+  WHERE o.option_name = 'security_invoker';
+
+  IF v_security_invoker IS DISTINCT FROM true THEN
+    RAISE EXCEPTION
+      'Precondition failed: security_invoker must already be true';
+  END IF;
+
+  -- Confirm the source column exists and has the expected type.
+  v_source_oid := pg_catalog.to_regclass('public.lead_entries');
+
+  IF v_source_oid IS NULL THEN
+    RAISE EXCEPTION
+      'Precondition failed: public.lead_entries is missing';
+  END IF;
+
+  IF NOT EXISTS (
     SELECT 1
-    FROM pg_attribute
-    WHERE attrelid = 'public.lead_entries'::regclass
-      AND attname  = 'whatsapp_status'
-      AND NOT attisdropped
-  ), 'Pre-condition failed: lead_entries.whatsapp_status does not exist';
+    FROM pg_catalog.pg_attribute AS a
+    WHERE a.attrelid = v_source_oid
+      AND a.attnum > 0
+      AND NOT a.attisdropped
+      AND a.attname = 'whatsapp_status'
+      AND a.atttypid = 'pg_catalog.text'::regtype
+      AND a.atttypmod = -1
+  ) THEN
+    RAISE EXCEPTION
+      'Precondition failed: lead_entries.whatsapp_status must exist as text';
+  END IF;
 
-  ASSERT EXISTS (
-    SELECT 1
-    FROM pg_attribute
-    WHERE attrelid = 'public.lead_entries'::regclass
-      AND attname  = 'whatsapp_status'
-      AND format_type(atttypid, atttypmod) = 'text'
-      AND NOT attisdropped
-  ), 'Pre-condition failed: lead_entries.whatsapp_status is not type text';
-
-  -- Assert the view exists with security_invoker = true.
-  ASSERT (
-    SELECT bool setting
-    FROM pg_catalog.pg_views v
-    JOIN pg_catalog.pg_namespace n ON n.oid = v.schemaname::regnamespace::oid
-    WHERE n.nspname = 'public' AND v.viewname = 'leads_list_view'
-  ) IS NOT NULL
-  , 'Pre-condition failed: public.leads_list_view does not exist';
-
-  -- Assert current column count is 15 (so we know we are appending to the
-  -- expected baseline, not a stale or already-modified view).
-  ASSERT (
-    SELECT count(*)
-    FROM pg_attribute
-    WHERE attrelid = 'public.leads_list_view'::regclass
-      AND attnum > 0
-      AND NOT attisdropped
-  ) = 15
-  , 'Pre-condition failed: leads_list_view has unexpected column count (expected 15)';
-
-  -- Assert existing columns are in the expected order.
-  ASSERT (
-    SELECT string_agg(attname, ',' ORDER BY attnum)
-    FROM pg_attribute
-    WHERE attrelid = 'public.leads_list_view'::regclass
-      AND attnum > 0
-      AND NOT attisdropped
-  ) = 'id,client_name,company,phone,event_code,sales_rep_code,lead_type,lead_temperature,state,application,lead_status,system_status,created_at,search_text,country'
-  , 'Pre-condition failed: leads_list_view column names or order do not match expected baseline';
-
-  -- ── DDL: CREATE OR REPLACE VIEW ───────────────────────────────────────────
-  --
-  -- Every existing expression, column name, type, and position is preserved
-  -- exactly.  whatsapp_status is appended as the final (16th) column only.
-
-  CREATE OR REPLACE VIEW public.leads_list_view
-    WITH (security_invoker = true)
-  AS
+  -- Validate the confirmed baseline and snapshot original attributes.
   SELECT
-    id,
-    client_name,
-    company,
-    phones[1] AS phone,
-    event_code,
-    sales_rep_code,
-    lead_type,
-    lead_temperature,
-    state,
-    application,
-    lead_status,
-    system_status,
-    created_at,
-    search_text,
-    country,
-    whatsapp_status
-  FROM public.lead_entries;
+    count(*),
+    array_agg(a.attname::text ORDER BY a.attnum),
+    array_agg(
+      pg_catalog.format_type(a.atttypid, a.atttypmod)
+      ORDER BY a.attnum
+    ),
+    jsonb_agg(
+      jsonb_build_object(
+        'position', a.attnum,
+        'name', a.attname,
+        'type_oid', a.atttypid,
+        'typmod', a.atttypmod,
+        'collation', a.attcollation,
+        'not_null', a.attnotnull,
+        'column_acl', a.attacl::text,
+        'options', a.attoptions
+      )
+      ORDER BY a.attnum
+    )
+  INTO
+    v_column_count,
+    v_names,
+    v_types,
+    v_columns_before
+  FROM pg_catalog.pg_attribute AS a
+  WHERE a.attrelid = v_view_oid
+    AND a.attnum > 0
+    AND NOT a.attisdropped;
 
-  -- ── Post-condition assertions ─────────────────────────────────────────────
+  IF v_column_count IS DISTINCT FROM 15::bigint
+     OR v_names IS DISTINCT FROM v_expected_names
+     OR v_types IS DISTINCT FROM v_expected_types THEN
+    RAISE EXCEPTION
+      'Precondition failed: view columns do not match the confirmed 15-column baseline';
+  END IF;
 
-  -- Assert column count is now 16.
-  ASSERT (
-    SELECT count(*)
-    FROM pg_attribute
-    WHERE attrelid = 'public.leads_list_view'::regclass
-      AND attnum > 0
-      AND NOT attisdropped
-  ) = 16
-  , 'Post-condition failed: leads_list_view column count is not 16';
+  -- This definition matches the supplied live baseline.
+  -- Existing expressions and order are retained; only the final column
+  -- is added. Catalog checks below verify structural preservation.
+  EXECUTE $view$
+    CREATE OR REPLACE VIEW public.leads_list_view
+      WITH (security_invoker = true)
+    AS
+    SELECT
+      id,
+      client_name,
+      company,
+      phones[1] AS phone,
+      event_code,
+      sales_rep_code,
+      lead_type,
+      lead_temperature,
+      state,
+      application,
+      lead_status,
+      system_status,
+      created_at,
+      search_text,
+      country,
+      whatsapp_status
+    FROM public.lead_entries
+  $view$;
 
-  -- Assert the first 15 columns are unchanged.
-  ASSERT (
-    SELECT string_agg(attname, ',' ORDER BY attnum)
-    FROM pg_attribute
-    WHERE attrelid = 'public.leads_list_view'::regclass
-      AND attnum BETWEEN 1 AND 15
-      AND NOT attisdropped
-  ) = 'id,client_name,company,phone,event_code,sales_rep_code,lead_type,lead_temperature,state,application,lead_status,system_status,created_at,search_text,country'
-  , 'Post-condition failed: original columns changed';
+  IF pg_catalog.to_regclass('public.leads_list_view')::oid
+       IS DISTINCT FROM v_view_oid THEN
+    RAISE EXCEPTION
+      'Postcondition failed: view identity changed';
+  END IF;
 
-  -- Assert the 16th column is whatsapp_status with type text.
-  ASSERT (
-    SELECT attname
-    FROM pg_attribute
-    WHERE attrelid = 'public.leads_list_view'::regclass
-      AND attnum = 16
-      AND NOT attisdropped
-  ) = 'whatsapp_status'
-  , 'Post-condition failed: 16th column is not whatsapp_status';
+  SELECT c.relowner, c.relacl, c.reloptions
+    INTO v_owner_after, v_acl_after, v_options_after
+  FROM pg_catalog.pg_class AS c
+  WHERE c.oid = v_view_oid
+    AND c.relkind = 'v';
 
-  ASSERT (
-    SELECT format_type(atttypid, atttypmod)
-    FROM pg_attribute
-    WHERE attrelid = 'public.leads_list_view'::regclass
-      AND attnum = 16
-      AND NOT attisdropped
-  ) = 'text'
-  , 'Post-condition failed: whatsapp_status column is not type text';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'Postcondition failed: view is missing';
+  END IF;
 
-  -- Assert owner is still postgres.
-  ASSERT (
-    SELECT rolname
-    FROM pg_class c
-    WHERE c.oid = 'public.leads_list_view'::regclass
-  ) = 'postgres'
-  , 'Post-condition failed: view owner changed';
+  IF v_owner_after IS DISTINCT FROM v_owner_before THEN
+    RAISE EXCEPTION
+      'Postcondition failed: view owner changed';
+  END IF;
 
-  -- Assert security_invoker is still true.
-  ASSERT (
-    SELECT COALESCE(
-      (SELECT setting::bool
-       FROM pg_catalog.pg_options_to_table(c.reloptions)
-       WHERE option_name = 'security_invoker'),
-      false)
-    FROM pg_class c
-    WHERE c.oid = 'public.leads_list_view'::regclass
-  ) IS TRUE
-  , 'Post-condition failed: security_invoker is not true';
+  -- Exact comparison covers the complete explicit ACL, including
+  -- grantors, grantees, privileges and grant options.
+  IF v_acl_after IS DISTINCT FROM v_acl_before THEN
+    RAISE EXCEPTION
+      'Postcondition failed: view ACL changed';
+  END IF;
 
-  -- Assert ACL is preserved (authenticated still has arwdDxtm).
-  ASSERT (
-    SELECT count(*) = 1
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    LEFT JOIN pg_authid a ON a.oid = c.relacl[1].grantor
-    WHERE c.oid = 'public.leads_list_view'::regclass
-      AND has_table_privilege('authenticated'::regrole,
-           'public.leads_list_view'::regclass, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+  -- Compare options independent of array ordering.
+  IF (
+    SELECT array_agg(x ORDER BY x)
+    FROM unnest(v_options_after) AS t(x)
+  ) IS DISTINCT FROM (
+    SELECT array_agg(x ORDER BY x)
+    FROM unnest(v_options_before) AS t(x)
+  ) THEN
+    RAISE EXCEPTION
+      'Postcondition failed: view options changed';
+  END IF;
+
+  SELECT o.option_value::boolean
+    INTO v_security_invoker
+  FROM pg_catalog.pg_options_to_table(v_options_after) AS o
+  WHERE o.option_name = 'security_invoker';
+
+  IF v_security_invoker IS DISTINCT FROM true THEN
+    RAISE EXCEPTION
+      'Postcondition failed: security_invoker is not true';
+  END IF;
+
+  SELECT count(*)
+    INTO v_column_count
+  FROM pg_catalog.pg_attribute AS a
+  WHERE a.attrelid = v_view_oid
+    AND a.attnum > 0
+    AND NOT a.attisdropped;
+
+  IF v_column_count IS DISTINCT FROM 16::bigint THEN
+    RAISE EXCEPTION
+      'Postcondition failed: expected exactly 16 columns';
+  END IF;
+
+  SELECT jsonb_agg(
+    jsonb_build_object(
+      'position', a.attnum,
+      'name', a.attname,
+      'type_oid', a.atttypid,
+      'typmod', a.atttypmod,
+      'collation', a.attcollation,
+      'not_null', a.attnotnull,
+      'column_acl', a.attacl::text,
+      'options', a.attoptions
+    )
+    ORDER BY a.attnum
   )
-  , 'Post-condition failed: authenticated role ACL not preserved';
+  INTO v_columns_after
+  FROM pg_catalog.pg_attribute AS a
+  WHERE a.attrelid = v_view_oid
+    AND a.attnum BETWEEN 1 AND 15
+    AND NOT a.attisdropped;
+
+  IF v_columns_after IS DISTINCT FROM v_columns_before THEN
+    RAISE EXCEPTION
+      'Postcondition failed: original column attributes changed';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS a
+    WHERE a.attrelid = v_view_oid
+      AND a.attnum = 16
+      AND NOT a.attisdropped
+      AND a.attname = 'whatsapp_status'
+      AND a.atttypid = 'pg_catalog.text'::regtype
+      AND a.atttypmod = -1
+  ) THEN
+    RAISE EXCEPTION
+      'Postcondition failed: column 16 must be whatsapp_status text';
+  END IF;
+END;
+$migration$;
 
 COMMIT;
 
--- ════════════════════════════════════════════════════════════════════════════
--- READ-ONLY VERIFICATION QUERIES (run after applying, not part of migration)
--- ════════════════════════════════════════════════════════════════════════════
+-- READ-ONLY VERIFICATION
+-- These queries run after COMMIT. A failure here does not roll back
+-- the committed change. Required preservation checks ran above.
 
--- 1. Column order and types
+-- 1. Column order and types.
 SELECT
-  a.attnum,
-  a.attname,
-  format_type(a.atttypid, a.atttypmod) AS column_type,
-  a.attnotnull
-FROM pg_attribute a
+  a.attnum AS ordinal_position,
+  a.attname AS column_name,
+  pg_catalog.format_type(a.atttypid, a.atttypmod) AS column_type
+FROM pg_catalog.pg_attribute AS a
 WHERE a.attrelid = 'public.leads_list_view'::regclass
   AND a.attnum > 0
   AND NOT a.attisdropped
 ORDER BY a.attnum;
 
--- 2. Owner and security_invoker option
+-- 2. Owner and security settings.
 SELECT
-  c.relname,
-  r.rolname AS owner,
-  (SELECT setting::bool
-   FROM pg_options_to_table(c.reloptions)
-   WHERE option_name = 'security_invoker') AS security_invoker
-FROM pg_class c
-JOIN pg_authid r ON r.oid = c.relowner
+  pg_catalog.pg_get_userbyid(c.relowner) AS owner_name,
+  c.reloptions,
+  (
+    SELECT o.option_value::boolean
+    FROM pg_catalog.pg_options_to_table(c.reloptions) AS o
+    WHERE o.option_name = 'security_invoker'
+  ) AS security_invoker
+FROM pg_catalog.pg_class AS c
 WHERE c.oid = 'public.leads_list_view'::regclass;
 
--- 3. ACL (privileges)
+-- 3. Complete effective ACL representation.
 SELECT
-  grantee::regrole::text AS grantee,
-  privilege_type
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-, aclexplode(c.relacl) AS acl
+  pg_catalog.pg_get_userbyid(a.grantor) AS grantor,
+  CASE
+    WHEN a.grantee = 0 THEN 'PUBLIC'
+    ELSE pg_catalog.pg_get_userbyid(a.grantee)
+  END AS grantee,
+  a.privilege_type,
+  a.is_grantable
+FROM pg_catalog.pg_class AS c
+CROSS JOIN LATERAL pg_catalog.aclexplode(
+  COALESCE(
+    c.relacl,
+    pg_catalog.acldefault('r', c.relowner)
+  )
+) AS a
 WHERE c.oid = 'public.leads_list_view'::regclass
-ORDER BY grantee, privilege_type;
+ORDER BY grantee, privilege_type, grantor;
 
--- 4. Spot-check: confirm the column is queryable
-SELECT whatsapp_status, count(*)
+-- 4. Confirm the new column resolves without returning lead data.
+SELECT whatsapp_status
 FROM public.leads_list_view
-GROUP BY whatsapp_status
-ORDER BY count(*) DESC;
+LIMIT 0;
 
--- ════════════════════════════════════════════════════════════════════════════
--- ROLLBACK LIMITATIONS
--- ════════════════════════════════════════════════════════════════════════════
+-- ROLLBACK / COMPATIBILITY NOTES
 --
--- • BEFORE COMMIT: issuing ROLLBACK instead of COMMIT undoes the CREATE OR
---   REPLACE VIEW entirely; the view reverts to its prior definition with no
---   side effects.
+-- Before COMMIT:
+-- ROLLBACK in the same session reverses this transaction.
 --
--- • AFTER COMMIT / DEPLOYMENT: CREATE OR REPLACE VIEW cannot remove an
---   appended column. There is no ALTER VIEW ... DROP COLUMN in PostgreSQL.
---   The only way to remove whatsapp_status from the view would be to
---   DROP VIEW public.leads_list_view CASCADE and recreate it without the
---   column. That is a destructive operation: CASCADE drops all dependent
---   objects (other views, policies, grants referencing the view), and
---   requires re-granting privileges manually. It should NOT be used as an
---   automatic rollback.
+-- After COMMIT:
+-- CREATE OR REPLACE VIEW cannot remove an existing trailing column.
+-- If the UI change is reverted, leave this additive column in place.
+-- Do not automatically drop/recreate the view.
 --
--- • SAFE REVERT STRATEGY: If the UI change is reverted (the multi-select
---   filter is removed), the extra whatsapp_status column can remain in the
---   view with no impact — no existing SELECT * consumer breaks because the
---   column is purely additive at the end. The column will simply be unused
---   until the UI is re-enabled or a future intentional DROP/CREATE migration
---   removes it.
+-- Existing inspected frontend consumers read named object properties.
+-- An added response property does not change those property reads.
+-- TypeScript interfaces do not remove extra fields at runtime.
 --
--- ════════════════════════════════════════════════════════════════════════════
--- DEPENDENCIES AND SELECT * CONSUMERS
--- ════════════════════════════════════════════════════════════════════════════
+-- Repository inspection is not a complete live-database dependency
+-- audit. Compatibility of unknown external consumers, particularly
+-- positional or whole-row consumers, has not been established.
 --
--- The following code paths use SELECT * or rely on the view's column set.
--- Adding a trailing column is safe for all of them, but they are listed
--- for completeness:
---
--- 1. src/LeadsPage.tsx — fetchLeads():
---      .from('leads_list_view').select('*', { count: 'exact' })
---    The Lead interface does not include whatsapp_status, so the extra
---    column is ignored by the runtime. No breakage.
---
--- 2. src/LeadsPage.tsx — exportCSV():
---      .from('lead_entries').select('id, ..., whatsapp_status, ...')
---    This queries lead_entries directly (not the view) and already
---    references whatsapp_status. No change needed.
---
--- 3. src/LeadDetailPage.tsx — fetches from lead_entries with select('*'),
---    not from leads_list_view. Not affected by this view change.
---
--- 4. Supabase-generated TypeScript types (if auto-generated from the
---    schema) may pick up the new column. This is additive and safe.
---
--- 5. No other views, functions, or RPCs reference leads_list_view in
---    a way that would break from an appended column (verified by grep
---    across migrations and source).
--- ════════════════════════════════════════════════════════════════════════════
+-- Preconditions validate structure, owner and security settings.
+-- They do not prove that an independently modified live view still has
+-- the same SQL expressions. The replacement definition above relies on
+-- the live definition supplied for this review; if that definition has
+-- changed since then, review the new definition before execution.
