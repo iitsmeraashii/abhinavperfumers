@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from './supabaseClient';
 import { useAuth } from './AuthContext';
 import { formatDateTime } from './utils/dateFormat';
 import {
   Bell, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight,
-  Loader2, AlertCircle, Building2,
+  Loader2, AlertCircle, Building2, UserCircle,
 } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -86,6 +86,8 @@ export default function FollowUpsPage({ onSelectLead, onOpenFollowUpComplete, in
   const [total, setTotal] = useState(0);
   const [dateFilter, setDateFilter] = useState<DateFilter>(initialDateFilter ?? 'all');
   const [completingId, setCompletingId] = useState<string | null>(null);
+  const [repNames, setRepNames] = useState<Record<string, string>>({});
+  const repNamesEpoch = useRef(0);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -139,6 +141,45 @@ export default function FollowUpsPage({ onSelectLead, onOpenFollowUpComplete, in
   useEffect(() => {
     fetchPage(page, dateFilter);
   }, [page, dateFilter, fetchPage]);
+
+  // Admin-only: batch-resolve rep codes to names for the current page's rows.
+  // Includes inactive reps since existing leads may still be assigned to them.
+  useEffect(() => {
+    if (user?.role !== 'admin') {
+      setRepNames({});
+      return;
+    }
+
+    const codes = Array.from(new Set(
+      rows
+        .map(r => r.lead_entries?.sales_rep_code)
+        .filter((c): c is string => !!c)
+    ));
+    if (codes.length === 0) {
+      setRepNames({});
+      return;
+    }
+
+    const epoch = ++repNamesEpoch.current;
+
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('sales_representatives')
+          .select('rep_code, name')
+          .in('rep_code', codes);
+        if (epoch !== repNamesEpoch.current) return;
+        const map: Record<string, string> = {};
+        for (const r of data ?? []) {
+          if (r.rep_code && r.name) map[r.rep_code] = r.name;
+        }
+        setRepNames(map);
+      } catch {
+        if (epoch !== repNamesEpoch.current) return;
+        setRepNames({});
+      }
+    })();
+  }, [rows, user?.role]);
 
   function handleFilterChange(f: DateFilter) {
     if (f === dateFilter) return;
@@ -310,6 +351,21 @@ export default function FollowUpsPage({ onSelectLead, onOpenFollowUpComplete, in
                         <span className="truncate">{lead.company}</span>
                       </div>
                     )}
+
+                    {user?.role === 'admin' && (() => {
+                      const repCode = lead?.sales_rep_code;
+                      const assignee = repCode
+                        ? (repNames[repCode] ?? repCode)
+                        : 'Unassigned';
+                      return (
+                        <div className="flex items-center gap-1.5 text-xs text-stone-400 mb-1.5">
+                          <UserCircle className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">
+                            Assigned to: <span className="text-stone-600 font-medium">{assignee}</span>
+                          </span>
+                        </div>
+                      );
+                    })()}
 
                     {fu.note && (
                       <p className="text-sm text-stone-600 leading-relaxed mb-2 line-clamp-2">{fu.note}</p>
