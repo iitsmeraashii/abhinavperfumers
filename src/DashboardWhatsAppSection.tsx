@@ -1,3 +1,4 @@
+import type { DashboardDateBounds } from './dashboardDateRange';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, MessageCircle } from 'lucide-react';
 import { useAuth } from './AuthContext';
@@ -9,8 +10,9 @@ import { parseWhatsAppCounts } from './dashboardWhatsAppCounts';
 
 type Result = { key: string; counts: Record<string, number> | null; error: boolean };
 
-export default function DashboardWhatsAppSection({ refresh, onNavigate }: {
+export default function DashboardWhatsAppSection({ refresh, onNavigate, bounds }: {
   refresh: number;
+  bounds?: DashboardDateBounds;
   onNavigate: (statuses: string[]) => void;
 }) {
   const { user, authMode } = useAuth();
@@ -20,7 +22,7 @@ export default function DashboardWhatsAppSection({ refresh, onNavigate }: {
   const [retry, setRetry] = useState(0);
   const [result, setResult] = useState<Result | null>(null);
   const generation = useRef(0);
-  const key = `${identity}|${authMode}|${online}|${refresh}|${retry}`;
+  const key = `${identity}|${authMode}|${online}|${refresh}|${retry}|${bounds?.from}|${bounds?.before}`;
   const liveKey = useRef(key);
   liveKey.current = key;
 
@@ -32,7 +34,9 @@ export default function DashboardWhatsAppSection({ refresh, onNavigate }: {
     setResult(null);
     void (async () => {
       try {
-        const { data, error } = await supabase.rpc('get_dashboard_whatsapp_status_counts');
+        const { data, error } = await (bounds
+          ? supabase.rpc('get_dashboard_whatsapp_status_counts_range', { p_from: bounds.from, p_before: bounds.before })
+          : supabase.rpc('get_dashboard_whatsapp_status_counts'));
         if (!current()) return;
         const counts = error ? null : parseWhatsAppCounts(data);
         setResult({ key, counts, error: !counts });
@@ -48,7 +52,7 @@ export default function DashboardWhatsAppSection({ refresh, onNavigate }: {
   return (
     <section aria-label="WhatsApp outreach status">
       <h2 className="text-xs font-semibold text-stone-400 uppercase tracking-widest mb-2">WhatsApp outreach status</h2>
-      <p className="text-xs text-stone-500 mb-4">All-time initial outreach status. Not set may mean no template is configured or sending has not started; it does not mean delivery failed.</p>
+      <p className="text-xs text-stone-500 mb-4">{bounds ? 'Initial outreach status for leads created in the selected period.' : 'All-time initial outreach status.'} Not set may mean no template is configured or sending has not started; it does not mean delivery failed.</p>
       {!allowed ? <p className="text-sm text-stone-500">Available when connected and signed in online.</p>
         : !currentResult ? <p role="status" className="text-sm text-stone-500">Loading WhatsApp status…</p>
         : currentResult.error ? <div role="alert" className="text-sm text-red-600">

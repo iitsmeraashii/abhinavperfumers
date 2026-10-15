@@ -1,3 +1,4 @@
+import { localDateBoundary } from './dashboardDateRange';
 import { WHATSAPP_STATUS_OPTIONS, normalizeWhatsAppStatuses, buildLeadFilterOr } from './whatsappStatusFilter';
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { supabase } from './supabaseClient';
@@ -244,6 +245,8 @@ function pushParams(params: URLSearchParams) {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export interface LeadsInitialFilters {
+  dateFrom?: string;
+  dateTo?: string;
   whatsappStatuses?: string[];
   dateFilter?: 'today' | '7days' | '30days';
   systemStatus?: string;
@@ -286,6 +289,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   // Advanced filters — system_status and temperature come in via initialFilters
   const initAdv: AdvancedFilters = {
     ...init.adv,
+    dateFrom: initialFilters?.dateFrom ?? init.adv.dateFrom,
+    dateTo: initialFilters?.dateTo ?? init.adv.dateTo,
     whatsappStatuses: normalizeWhatsAppStatuses(initialFilters?.whatsappStatuses ?? init.adv.whatsappStatuses),
     systemStatus: normalizeSystemStatus(initialFilters?.systemStatus ?? init.adv.systemStatus),
     ...(initialFilters?.temperature ? { temperature: initialFilters.temperature } : {}),
@@ -437,12 +442,10 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (combinedOr) query = query.or(combinedOr);
     const effectiveStatus = statusFilt || adv.leadStatus;
     if (effectiveStatus) query = query.eq('lead_status', effectiveStatus);
-    if (adv.dateFrom) query = query.gte('created_at', new Date(adv.dateFrom).toISOString());
-    if (adv.dateTo) {
-      const end = new Date(adv.dateTo);
-      end.setHours(23, 59, 59, 999);
-      query = query.lte('created_at', end.toISOString());
-    }
+    const dateStart = localDateBoundary(adv.dateFrom);
+    const before = localDateBoundary(adv.dateTo, true);
+    if (dateStart) query = query.gte('created_at', dateStart);
+    if (before) query = query.lt('created_at', before);
 
     const { data, error, count } = await query;
 
@@ -507,12 +510,10 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (applied.systemStatus) query = query.eq('system_status', applied.systemStatus);
     const combinedOr = buildLeadFilterOr(applied);
     if (combinedOr) query = query.or(combinedOr);
-    if (applied.dateFrom) query = query.gte('created_at', new Date(applied.dateFrom).toISOString());
-    if (applied.dateTo) {
-      const end = new Date(applied.dateTo);
-      end.setHours(23, 59, 59, 999);
-      query = query.lte('created_at', end.toISOString());
-    }
+    const dateStart = localDateBoundary(applied.dateFrom);
+    const before = localDateBoundary(applied.dateTo, true);
+    if (dateStart) query = query.gte('created_at', dateStart);
+    if (before) query = query.lt('created_at', before);
 
     const { data, error } = await query;
     setExporting(false);

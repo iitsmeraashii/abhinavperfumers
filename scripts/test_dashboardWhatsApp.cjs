@@ -32,11 +32,11 @@ const Component = load('src/DashboardWhatsAppSection.tsx', {
   react, 'react/jsx-runtime': { jsx, jsxs: jsx }, 'lucide-react': { ArrowRight: 'arrow', MessageCircle: 'message' },
   './AuthContext': { useAuth: () => auth }, './capture/useOnlineStatus': { useOnlineStatus: () => online },
   './dashboardMetricsLoader': { identityKey: user => user?.id ?? null, isAuthorized: () => online && auth.authMode === 'online' },
-  './supabaseClient': { supabase: { rpc: name => { assert.equal(name, 'get_dashboard_whatsapp_status_counts'); calls++; return new Promise(resolve => pending.push(resolve)); } } },
+  './supabaseClient': { supabase: { rpc: (name, args) => { assert.equal(name, bounds ? 'get_dashboard_whatsapp_status_counts_range' : 'get_dashboard_whatsapp_status_counts'); if (bounds) { assert.equal(args.p_from, bounds.from); assert.equal(args.p_before, bounds.before); } calls++; return new Promise(resolve => pending.push(resolve)); } } },
   './whatsappStatusFilter': options, './dashboardWhatsAppCounts': parser,
 }).default;
-let refresh = 0, navigated;
-function render() { cursor = 0; const tree = Component({ refresh, onNavigate: statuses => navigated = statuses }); const effects = queued; queued = []; effects.forEach(fn => fn()); return tree; }
+let refresh = 0, navigated, bounds;
+function render() { cursor = 0; const tree = Component({ refresh, bounds, onNavigate: statuses => navigated = statuses }); const effects = queued; queued = []; effects.forEach(fn => fn()); return tree; }
 function nodes(tree) { if (!tree || typeof tree !== 'object') return []; return [tree, ...[tree.props?.children].flat(Infinity).flatMap(nodes)]; }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 (async () => {
@@ -59,6 +59,15 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   auth.authMode = 'online'; render(); assert.equal(calls, 5);
   auth.user = null; assert.equal(render(), null);
   pending.shift()({ data: counts, error: null }); await tick(); assert.equal(render(), null);
+  auth.user = { id: 'C' };
+  bounds = { from: '2026-10-01T00:00:00Z', before: '2026-10-17T00:00:00Z' };
+  render(); assert.equal(calls, 6);
+  bounds = { from: '2026-10-10T00:00:00Z', before: '2026-10-17T00:00:00Z' };
+  render(); assert.equal(calls, 7);
+  pending.shift()({ data: counts, error: null }); await tick();
+  assert.equal(nodes(render()).filter(node => node.type === 'button').length, 0);
+  pending.shift()({ data: counts, error: null }); await tick();
+  assert.equal(nodes(render()).filter(node => node.type === 'button').length, 8);
   const dashboard = fs.readFileSync(path.join(root, 'src/DashboardPage.tsx'), 'utf8');
   assert.ok(!dashboard.includes('<SectionLabel>System Status</SectionLabel>'));
   const leads = fs.readFileSync(path.join(root, 'src/LeadsPage.tsx'), 'utf8');

@@ -1,5 +1,6 @@
+import { DASHBOARD_RANGES, getDashboardDateBounds, type DashboardRange } from './dashboardDateRange';
 import DashboardWhatsAppSection from './DashboardWhatsAppSection';
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useAuth } from './AuthContext';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import {
@@ -45,7 +46,7 @@ import {
   ERR_REVIEW_WAITING,
 } from './requiresReviewLoader';
 import {
-  Users, TrendingUp, Calendar, Clock,
+  Users,
   MessageCircle, AlertCircle, XCircle,
   PhoneCall, Star, CheckCircle2, HeartCrack,
   Loader2, RefreshCw, ArrowRight, Flame, Sun, Snowflake, HelpCircle, UserX,
@@ -64,6 +65,8 @@ function pct(part: number, total: number) {
 }
 
 export interface DashboardFilter {
+  dateFrom?: string;
+  dateTo?: string;
   whatsappStatuses?: string[];
   dateFilter?: 'today' | '7days' | '30days';
   systemStatus?: string;
@@ -107,46 +110,6 @@ function KpiCard({ icon, label, value, color, sub, onClick }: KpiCardProps) {
       </div>
       {clickable && (
         <ArrowRight className="w-3.5 h-3.5 text-stone-300 self-center flex-shrink-0 mt-0.5" />
-      )}
-    </div>
-  );
-}
-
-interface FunnelStepProps {
-  label: string;
-  value: number;
-  total: number;
-  color: string;
-  bar: string;
-  isLast?: boolean;
-  onClick?: () => void;
-}
-
-function FunnelStep({ label, value, total, color, bar, isLast, onClick }: FunnelStepProps) {
-  const width = pct(value, total);
-  return (
-    <div
-      className={`flex-1 min-w-0 rounded-lg p-2 -m-2 transition-all duration-150 ${onClick ? 'cursor-pointer hover:bg-stone-50 active:scale-[0.98]' : ''}`}
-      onClick={onClick}
-      role={onClick ? 'button' : undefined}
-      tabIndex={onClick ? 0 : undefined}
-      onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') onClick(); } : undefined}
-    >
-      <div className="flex items-end justify-between mb-1.5">
-        <span className={`text-xs font-semibold ${color}`}>{label}</span>
-        <span className="text-xs text-stone-500 tabular-nums">{num(value)}</span>
-      </div>
-      <div className="h-2 rounded-full bg-stone-100 overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all duration-700 ${bar}`}
-          style={{ width: `${width}%` }}
-        />
-      </div>
-      <p className="text-xs text-stone-400 mt-1 tabular-nums">{width}% of total</p>
-      {!isLast && (
-        <div className="hidden sm:flex justify-end pr-1 mt-1">
-          <ArrowRight className="w-3.5 h-3.5 text-stone-300" />
-        </div>
       )}
     </div>
   );
@@ -436,10 +399,16 @@ function RequiresReviewAttentionTile({ phase, count, onNavigate, onRetry }: Foll
 
 export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps, onNavigateToConversations, onNavigateToConversationsUnread, onNavigateToInvalidLeads, onNavigateToRequiresReview }: DashboardPageProps) {
   const { user, authMode } = useAuth();
-  const nav = (f: DashboardFilter) => onNavigateToLeads?.(f);
+  const [analyticsRange, setAnalyticsRange] = useState<DashboardRange>('30days');
+  const [rangeRefresh, setRangeRefresh] = useState(0);
+  const bounds = useMemo(() => getDashboardDateBounds(analyticsRange), [analyticsRange, rangeRefresh]);
+  const nav = (f: DashboardFilter) => onNavigateToLeads?.({ dateFrom: bounds.dateFrom, dateTo: bounds.dateTo, ...f });
   const currentIdentity = identityKey(user);
 
   const [whatsappRefresh, setWhatsappRefresh] = useState(0);
+  const analyticsIdentity = currentIdentity ? `${currentIdentity}|${bounds.from}|${bounds.before}` : null;
+  const analyticsIdentityRef = useRef(analyticsIdentity);
+  analyticsIdentityRef.current = analyticsIdentity;
   const [data, setData] = useState<DashboardData>(EMPTY);
   const [dataIdentity, setDataIdentity] = useState<string | null>(null);
   const [errorIdentity, setErrorIdentity] = useState<string | null>(null);
@@ -638,24 +607,24 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     const loader = loaderRef.current!;
     setLoading(true);
     setError('');
-    const result = await loader.load(currentIdentity);
+    const result = await loader.load(currentIdentity, bounds);
 
-    if (result.kind === 'stale') return;
+    if (result.kind === 'stale' || analyticsIdentityRef.current !== analyticsIdentity) return;
 
     if (result.kind === 'error') {
       setError(result.message);
       setData(EMPTY);
       setDataIdentity(null);
-      setErrorIdentity(currentIdentity);
+      setErrorIdentity(analyticsIdentity);
       setLoading(false);
       return;
     }
 
     setData(result.data);
-    setDataIdentity(currentIdentity);
+    setDataIdentity(analyticsIdentity);
     setErrorIdentity(null);
     setLoading(false);
-  }, [currentIdentity]);
+  }, [currentIdentity, analyticsIdentity, bounds]);
 
   // ─── Main fetch effect ───────────────────────────────────────────────
   // Fires on mount, identity change, authMode change (reconnect resume),
@@ -669,6 +638,10 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     loaderRef.current!.invalidate();
     fetchData();
 
+  }, [fetchData, authMode, isOnline]);
+
+  // Attention counts always reflect current work, independent of analytics dates.
+  useEffect(() => {
     setFuCount(null);
     setFuIdentity(null);
     setFuError(false);
@@ -709,7 +682,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
     rrLoaderRef.current!.invalidate();
     fetchRequiresReviewCount();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchData, fetchFollowUpCount, fetchSamplesOpenCount, fetchUnreadCount, fetchInvalidLeadsCount, fetchRequiresReviewCount, authMode, isOnline]);
+  }, [fetchFollowUpCount, fetchSamplesOpenCount, fetchUnreadCount, fetchInvalidLeadsCount, fetchRequiresReviewCount, authMode, isOnline]);
 
   // Cleanup on unmount — invalidate only, don't permanently unmount.
   // In StrictMode, setup→cleanup→setup reuses the same loader instance;
@@ -726,10 +699,9 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
   }, []);
 
   const { displayData, showLoading, showError, showUnavailable } = deriveDisplayState(
-    loading, error, dataIdentity, errorIdentity, currentIdentity, data,
+    loading, error, dataIdentity, errorIdentity, analyticsIdentity, data,
   );
 
-  const funnelTotal = displayData.total_leads || 1;
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
@@ -750,7 +722,7 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
             </p>
           </div>
           <button
-            onClick={() => { setWhatsappRefresh(value => value + 1); fetchData(); fetchFollowUpCount(); fetchSamplesOpenCount(); fetchUnreadCount(); fetchInvalidLeadsCount(); fetchRequiresReviewCount(); }}
+            onClick={() => { setWhatsappRefresh(value => value + 1); setRangeRefresh(value => value + 1); fetchFollowUpCount(); fetchSamplesOpenCount(); fetchUnreadCount(); fetchInvalidLeadsCount(); fetchRequiresReviewCount(); }}
             disabled={showLoading}
             className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 transition disabled:opacity-50 self-start sm:self-auto flex-shrink-0"
           >
@@ -851,6 +823,19 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
         );
       })()}
 
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
+        <div>
+          <h2 className="text-sm font-semibold text-stone-700">Lead analytics</h2>
+          <p className="text-xs text-stone-500">Current status of leads created in the selected period. Attention items above always show current work.</p>
+        </div>
+        <label className="text-sm text-stone-600 flex items-center gap-2">
+          Date range
+          <select value={analyticsRange} onChange={e => setAnalyticsRange(e.target.value as DashboardRange)} className="rounded-lg border border-stone-200 bg-white px-3 py-2">
+            {DASHBOARD_RANGES.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+      </div>
+
       {showLoading ? (
         <div className="flex items-center justify-center py-24">
           <Loader2 className="w-6 h-6 text-stone-400 animate-spin" />
@@ -869,19 +854,13 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
           {/* ── Top: Lead volume ── */}
           <section>
             <SectionLabel>Lead Volume</SectionLabel>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <KpiCard icon={<Users className="w-5 h-5" />}      label="Total Leads"  value={displayData.total_leads}        color="blue"
+            <div className="max-w-sm">
+              <KpiCard icon={<Users className="w-5 h-5" />} label="Leads in selected period" value={displayData.total_leads} color="blue"
                 onClick={() => nav({})} />
-              <KpiCard icon={<TrendingUp className="w-5 h-5" />} label="Today"        value={displayData.leads_today}        color="blue" sub="since midnight"
-                onClick={() => nav({ dateFilter: 'today' })} />
-              <KpiCard icon={<Calendar className="w-5 h-5" />}   label="Last 7 Days"  value={displayData.leads_last_7_days}  color="blue"
-                onClick={() => nav({ dateFilter: '7days' })} />
-              <KpiCard icon={<Clock className="w-5 h-5" />}      label="Last 30 Days" value={displayData.leads_last_30_days} color="blue"
-                onClick={() => nav({ dateFilter: '30days' })} />
             </div>
           </section>
 
-          <DashboardWhatsAppSection refresh={whatsappRefresh} onNavigate={statuses => nav({ whatsappStatuses: statuses })} />
+          <DashboardWhatsAppSection bounds={bounds} refresh={whatsappRefresh} onNavigate={statuses => nav({ whatsappStatuses: statuses })} />
 
           {/* ── Bottom: Lead status ── */}
           <section>
@@ -921,38 +900,6 @@ export default function DashboardPage({ onNavigateToLeads, onNavigateToFollowUps
             </div>
           </section>
 
-          {/* ── Funnel ── */}
-          <section>
-            <SectionLabel>Sales Funnel</SectionLabel>
-            <div className="bg-white border border-stone-200 rounded-xl px-6 py-5">
-              <div className="flex flex-col sm:flex-row gap-6">
-                <FunnelStep label="New"       value={displayData.new_leads}       total={funnelTotal} color="text-blue-600"   bar="bg-blue-400"
-                  onClick={() => nav({ leadStatus: 'NEW' })} />
-                <FunnelStep label="Contacted" value={displayData.contacted_leads} total={funnelTotal} color="text-yellow-600" bar="bg-yellow-400"
-                  onClick={() => nav({ leadStatus: 'CONTACTED' })} />
-                <FunnelStep label="Samples Sent" value={displayData.qualified_leads} total={funnelTotal} color="text-teal-600"   bar="bg-teal-400"
-                  onClick={() => nav({ leadStatus: 'QUALIFIED' })} />
-                <FunnelStep label="Converted" value={displayData.converted_leads} total={funnelTotal} color="text-green-600"  bar="bg-green-400" isLast
-                  onClick={() => nav({ leadStatus: 'CONVERTED' })} />
-              </div>
-
-              {/* Conversion rate summary */}
-              <div className="mt-5 pt-4 border-t border-stone-100 flex flex-wrap gap-x-6 gap-y-1">
-                <span className="text-xs text-stone-400">
-                  Contact rate: <strong className="text-stone-600">{pct(displayData.contacted_leads, displayData.new_leads || 1)}%</strong>
-                </span>
-                <span className="text-xs text-stone-400">
-                  Sample rate: <strong className="text-stone-600">{pct(displayData.qualified_leads, displayData.contacted_leads || 1)}%</strong>
-                </span>
-                <span className="text-xs text-stone-400">
-                  Close rate: <strong className="text-stone-600">{pct(displayData.converted_leads, displayData.qualified_leads || 1)}%</strong>
-                </span>
-                <span className="text-xs text-stone-400">
-                  Overall conversion: <strong className="text-green-600">{pct(displayData.converted_leads, displayData.total_leads)}%</strong>
-                </span>
-              </div>
-            </div>
-          </section>
 
         </div>
       )}

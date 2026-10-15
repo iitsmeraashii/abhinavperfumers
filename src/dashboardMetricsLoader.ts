@@ -1,3 +1,4 @@
+import type { DashboardDateBounds } from './dashboardDateRange';
 // Dashboard metrics loading controller — extracted from DashboardPage for
 // testability. Encapsulates the async fetch lifecycle: generation guards,
 // identity invalidation, try/catch, strict validation, and authorization
@@ -165,7 +166,7 @@ export class DashboardMetricsLoader {
    *
    * The caller MUST check `kind === 'stale'` and NOT update state.
    */
-  async load(identity: string | null): Promise<LoadResult> {
+  async load(identity: string | null, bounds?: DashboardDateBounds): Promise<LoadResult> {
     if (!this.mounted) return { kind: 'stale' };
 
     if (!identity) {
@@ -183,7 +184,9 @@ export class DashboardMetricsLoader {
     let rpcErr: unknown = null;
 
     try {
-      const result = await supabase.rpc('get_dashboard_metrics', { p_today_iso: getTodayIso() });
+      const result = bounds
+        ? await supabase.rpc('get_dashboard_metrics_range', { p_from: bounds.from, p_before: bounds.before })
+        : await supabase.rpc('get_dashboard_metrics', { p_today_iso: getTodayIso() });
       rpcData = result.data;
       rpcErr = result.error;
     } catch {
