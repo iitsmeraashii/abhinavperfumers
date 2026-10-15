@@ -1232,6 +1232,18 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
                 options={applicationOptions.map(a => ({ label: a, value: a }))}
               />
 
+              <SelectField
+                label="System Status"
+                value={draft.systemStatus}
+                onChange={v => patchDraft('systemStatus', v)}
+                options={[
+                  { label: 'Created', value: 'CREATED' },
+                  { label: 'WhatsApp Sent', value: 'WHATSAPP_SENT' },
+                  { label: 'WhatsApp Failed', value: 'WHATSAPP_FAILED' },
+                  { label: 'Invalid Lead', value: 'INVALID_LEAD' },
+                ]}
+              />
+
               <div className="flex flex-col gap-3">
                 <span className="text-xs font-medium text-stone-500 uppercase tracking-wide">Custom Date Range</span>
                 <div className="flex flex-col gap-1">
