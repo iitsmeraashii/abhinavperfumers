@@ -64,6 +64,7 @@ interface LeadDetail {
   capture_session_id: string | null;
   is_reviewed: boolean;
   whatsapp_opt_out: boolean;
+  whatsapp_reached: boolean | null;
 }
 
 interface EventInfo {
@@ -2144,6 +2145,22 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
                 )}
               </div>
             </div>
+            {lead.whatsapp_reached === true && (
+              <div className="flex items-start gap-3 py-2.5 min-w-[200px]">
+                <span className="mt-0.5 text-green-600"><CheckCircle2 className="w-3.5 h-3.5" /></span>
+                <div>
+                  <p className="text-xs text-stone-400 mb-1">Verification</p>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-green-50 text-green-700 border border-green-200">
+                    <CheckCircle2 className="w-3 h-3" />
+                    WhatsApp verified
+                  </span>
+                  <p className="text-xs text-stone-400 mt-1 max-w-[260px]">
+                    WhatsApp delivery was confirmed for this lead. This does not verify
+                    the customer's identity or a subsequently changed phone number.
+                  </p>
+                </div>
+              </div>
+            )}
             <div className="flex items-start gap-3 py-2.5 min-w-[160px]">
               <span className="mt-0.5 text-stone-400"><RefreshCw className="w-3.5 h-3.5" /></span>
               <div>
