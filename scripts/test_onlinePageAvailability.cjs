@@ -41,7 +41,7 @@ const has = (tree, name) => nodes(tree).some(node => node.type === './' + name);
 function reset(tab, search = '') { slots = []; store.activeTab = tab; location.search = search; location.href = 'https://example.test/' + search; }
 const cloudPages = {
   dashboard: 'DashboardPage', leads: 'LeadsPage', conversations: 'ConversationsPage',
-  events: 'EventsPage', notifications: 'SystemNotificationsPage', salesreps: 'SalesRepsPage',
+  events: 'EventsPage', salesreps: 'SalesRepsPage',
   whatsapp_assets: 'WhatsAppAssetsPage', followups: 'FollowUpsPage', account: 'MyAccountPage',
 };
 for (const [tab, page] of Object.entries(cloudPages)) {

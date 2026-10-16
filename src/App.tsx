@@ -12,7 +12,6 @@ import LeadDetailPage from './LeadDetailPage';
 import DashboardPage from './DashboardPage';
 import type { DashboardFilter } from './DashboardPage';
 import EventsPage from './EventsPage';
-import SystemNotificationsPage from './SystemNotificationsPage';
 import FollowUpCompleteModal from './FollowUpCompleteModal';
 import CaptureLeadPage from './CaptureLeadPage';
 import LeadQueuePage from './LeadQueuePage';
@@ -31,7 +30,7 @@ import {
   MoreHorizontal, X, User, ChevronDown, Layers, Users, MessageCircle, Package,
 } from 'lucide-react';
 
-type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'notifications' | 'salesreps' | 'whatsapp_assets' | 'followups' | 'account';
+type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'salesreps' | 'whatsapp_assets' | 'followups' | 'account';
 
 // ─── Mobile bottom nav tabs ───────────────────────────────────────────────────
 
@@ -142,7 +141,7 @@ interface MobileNavProps {
 
 function MobileBottomNav({ tab, isAdmin, onTabChange, onMorePress }: MobileNavProps) {
   const visibleTabs = MOBILE_TABS.filter(t => !t.adminOnly || isAdmin);
-  const moreActive  = tab === 'notifications' || tab === 'salesreps' || tab === 'whatsapp_assets' || tab === 'followups' || tab === 'account';
+  const moreActive  = tab === 'salesreps' || tab === 'whatsapp_assets' || tab === 'followups' || tab === 'account';
 
   return (
     <nav
@@ -246,7 +245,6 @@ function MobileMoreDrawer({
     { id: 'account', label: 'My Account', icon: <User className="w-5 h-5" /> },
     ...(isAdmin
       ? [
-          { id: 'notifications' as Tab, label: 'Notifications', icon: <Bell className="w-5 h-5" /> },
           { id: 'salesreps' as Tab,      label: 'Sales Reps',     icon: <Users className="w-5 h-5" /> },
           { id: 'whatsapp_assets' as Tab, label: 'WhatsApp Assets', icon: <Package className="w-5 h-5" /> },
         ]
@@ -339,7 +337,7 @@ function Layout() {
   const initialFollowUp = params.get('followup');
 
   const [tab,                setTab]                = useState<Tab>(() => {
-    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'whatsapp_assets', 'followups', 'account'];
+    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'salesreps', 'whatsapp_assets', 'followups', 'account'];
     const repTabs: Tab[]   = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'followups', 'account'];
     const allowed = isAdmin ? adminTabs : repTabs;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
@@ -605,15 +603,6 @@ function Layout() {
             )}
             {isAdmin && (
               <button
-                onClick={() => handleTabChange('notifications')}
-                className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
-                  ${tab === 'notifications' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
-              >
-                <Bell className="w-4 h-4" /> Notifications
-              </button>
-            )}
-            {isAdmin && (
-              <button
                 onClick={() => handleTabChange('salesreps')}
                 className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
                   ${tab === 'salesreps' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
@@ -680,7 +669,6 @@ function Layout() {
             {tab === 'events' && isAdmin && !selectedLeadId && (
               <EventsPage onViewLeads={handleViewLeads} />
             )}
-            {tab === 'notifications' && isAdmin && !selectedLeadId && <SystemNotificationsPage />}
             {tab === 'salesreps' && isAdmin && !selectedLeadId && <SalesRepsPage />}
             {tab === 'whatsapp_assets' && isAdmin && !selectedLeadId && <WhatsAppAssetsPage />}
             {tab === 'capture' && !selectedLeadId && <CaptureLeadPage key={resumeDraftId ?? 'capture'} resumeDraftId={resumeDraftId} />}
