@@ -1,4 +1,6 @@
 import { connectivityStore } from './connectivity/connectivityStore';
+import { useOnlineStatus } from './capture/useOnlineStatus';
+import OnlinePageUnavailable from './OnlinePageUnavailable';
 import { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './AuthContext';
 import { useAlpeScheduler } from './alpe/useAlpeScheduler';
@@ -313,6 +315,8 @@ function MobileMoreDrawer({
 
 function Layout() {
   const { user, logout, authMode } = useAuth();
+  const online = useOnlineStatus();
+  const onlinePagesAvailable = online && authMode === 'online';
   useAlpeScheduler(user?.authUserId, authMode);
 
   // Flush the offline pending_ops queue once when authoritative auth succeeds.
@@ -407,6 +411,7 @@ function Layout() {
     setTab(t);
     setSelectedLeadId(null);
     setSelectedConversationId(null);
+    setFollowUpModalId(null);
     setMoreDrawerOpen(false);
     if (t !== 'capture') setResumeDraftId(null);
     localStorage.setItem('activeTab', t);
@@ -663,7 +668,9 @@ function Layout() {
 
       {/* ── Page content ── */}
       <main className="pb-mobile-nav lg:pb-0">
-        {tab === 'account' ? (
+        {!onlinePagesAvailable && (selectedLeadId || (tab !== 'capture' && tab !== 'queue')) ? (
+          <OnlinePageUnavailable online={online} onCapture={() => handleTabChange('capture')} onQueue={() => handleTabChange('queue')} />
+        ) : tab === 'account' ? (
           <MyAccountPage onBack={() => handleTabChange(isAdmin ? 'dashboard' : 'capture')} />
         ) : (
           <>
@@ -744,11 +751,17 @@ function Layout() {
         />
       )}
 
-      {followUpModalId && (
+      {followUpModalId && onlinePagesAvailable && (
         <FollowUpCompleteModal
           followUpId={followUpModalId}
           onClose={handleCloseFollowUpModal}
         />
+      )}
+      {followUpModalId && !onlinePagesAvailable && (
+        <div role="dialog" aria-modal="true" aria-label="Follow-up unavailable" className="fixed inset-0 z-50 overflow-y-auto bg-stone-50">
+          <button type="button" onClick={handleCloseFollowUpModal} className="m-4 rounded-lg border border-stone-300 bg-white px-4 py-2 text-sm text-stone-700">Close</button>
+          <OnlinePageUnavailable online={online} onCapture={() => handleTabChange('capture')} onQueue={() => handleTabChange('queue')} />
+        </div>
       )}
     </div>
   );
