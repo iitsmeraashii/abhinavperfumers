@@ -1,0 +1,11 @@
+@keyframes event-overview-fill {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+.event-overview .event-overview-fill {
+  transform-origin: left;
+  animation: event-overview-fill 420ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .event-overview .event-overview-fill { animation: none; }
+}

@@ -21,10 +21,11 @@ export function buildLeadFilterOr(filters: {
   temperature: string;
   state: string;
   country: string;
+  repFilter?: string;
 }): string | null {
   const groups: string[] = [];
   for (const [column, value] of [
-    ['lead_temperature', filters.temperature], ['state', filters.state], ['country', filters.country],
+    ['lead_temperature', filters.temperature], ['state', filters.state], ['country', filters.country], ['sales_rep_code', filters.repFilter],
   ]) {
     if (value === '__unassigned__') groups.push(`or(${column}.is.null,${column}.eq.)`);
   }

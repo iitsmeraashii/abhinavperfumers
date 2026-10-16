@@ -434,14 +434,15 @@ function Layout() {
     window.history.replaceState({}, '', url.toString());
   }
 
-  function handleViewLeads(eventCode: string) {
+  function handleViewLeads(eventCode: string, filters?: LeadsInitialFilters) {
     setLeadsEventFilter(eventCode);
-    setLeadsInitialFilters(undefined);
+    setLeadsInitialFilters(filters);
     setTab('leads');
     localStorage.setItem('activeTab', 'leads');
     setSelectedLeadId(null);
     const url = new URL(window.location.href);
-    url.searchParams.delete('lead');
+    url.search = '';
+    setSelectedConversationId(null);
     window.history.pushState({}, '', url.toString());
   }
 

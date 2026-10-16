@@ -1,9 +1,15 @@
+import EventOverview from './EventOverview';
+import { EventRequestGate } from './eventOverviewModel';
+import { useAuth } from './AuthContext';
+import { useOnlineStatus } from './capture/useOnlineStatus';
+import { identityKey, isAuthorized } from './dashboardMetricsLoader';
+import type { LeadsInitialFilters } from './LeadsPage';
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from './supabaseClient';
 import {
   CalendarDays, MapPin, Plus, Loader2, AlertCircle, CheckCircle2,
-  X, Save, Lock, Info, Trash2, Users, TrendingUp,
-  ThermometerSun, BarChart2, ArrowRight, Globe, ChevronLeft,
+  X, Save, Lock, Info, Trash2, Users,
+  ArrowRight, ChevronLeft,
   MessageCircle, Image as ImageIcon, Upload, Search, ChevronDown,
 } from 'lucide-react';
 import { formatDateShort } from './utils/dateFormat';
@@ -74,30 +80,6 @@ interface FormState {
   whatsapp_image_url: string;
 }
 
-interface Metrics {
-  total: number;
-  contacted: number;
-  converted: number;
-  lost: number;
-  invalid: number;
-  hot: number;
-  warm: number;
-  cold: number;
-  unassigned: number;
-}
-
-interface RepRow {
-  rep_code: string;
-  rep_name: string;
-  total: number;
-  contacted: number;
-  converted: number;
-  lost: number;
-}
-
-interface StateRow { state: string; count: number; }
-interface DayRow { day: string; count: number; }
-
 interface EventListItem extends Event { lead_count: number; }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -158,11 +140,6 @@ function formChanged(a: FormState, b: FormState) {
 
 function fmt(d: string | null) {
   return formatDateShort(d) ?? '—';
-}
-
-function pct(n: number, total: number) {
-  if (!total) return '0%';
-  return `${Math.round((n / total) * 100)}%`;
 }
 
 // ─── Small UI components ───────────────────────────────────────────────────────
@@ -241,10 +218,22 @@ function Field({ label, required, error, children }: {
 // ─── Main Page ─────────────────────────────────────────────────────────────────
 
 interface EventsPageProps {
-  onViewLeads?: (eventCode: string) => void;
+  onViewLeads?: (eventCode: string, filters?: LeadsInitialFilters) => void;
 }
 
 export default function EventsPage({ onViewLeads }: EventsPageProps) {
+  const { user, authMode } = useAuth();
+  const online = useOnlineStatus();
+  const identity = identityKey(user);
+  const allowed = !!identity && user?.role === 'admin' && online && authMode === 'online' && isAuthorized();
+  const liveIdentity = useRef(identity); liveIdentity.current = identity;
+  const listGate = useRef(new EventRequestGate());
+  const detailGate = useRef(new EventRequestGate());
+  const selectedRef = useRef<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState(false);
+  const [detailKey, setDetailKey] = useState<string | null>(null);
+  const [listError, setListError] = useState(false);
   const isMobile = useIsMobile();
   const [mobileShowDetail, setMobileShowDetail] = useState(false);
 
@@ -280,13 +269,6 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
   // Also check if the stored template name implies image header even if template list isn't loaded
   const waStoredNeedsImage = waSelected && !waSelectedTemplate && !!form.whatsapp_image_url;
 
-  // Analytics
-  const [metrics, setMetrics] = useState<Metrics | null>(null);
-  const [repRows, setRepRows] = useState<RepRow[]>([]);
-  const [stateRows, setStateRows] = useState<StateRow[]>([]);
-  const [dayRows, setDayRows] = useState<DayRow[]>([]);
-  const [loadingMetrics, setLoadingMetrics] = useState(false);
-
   const listRef = useRef<HTMLUListElement>(null);
 
   const showToast = useCallback((message: string, type: 'success' | 'error') => {
@@ -295,16 +277,25 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
 
-  async function fetchEvents(tab: EventStatus) {
+  const fetchEvents = useCallback(async (tab: EventStatus) => {
+    const ticket = listGate.current.begin();
+    setEvents([]);
+    setListError(false);
+    if (!allowed) { setLoadingList(false); return; }
     setLoadingList(true);
-    const { data } = await supabase
-      .from('event_list_view')
-      .select('id, event_code, name, location, start_date, end_date, status, lead_count')
-      .eq('status', tab)
-      .order('start_date', { ascending: false });
-    setEvents((data ?? []) as EventListItem[]);
-    setLoadingList(false);
-  }
+    const current = () => listGate.current.current(ticket) && liveIdentity.current === identity && isAuthorized();
+    try {
+      const { data, error } = await supabase
+        .from('event_list_view')
+        .select('id, event_code, name, location, start_date, end_date, status, lead_count')
+        .eq('status', tab)
+        .order('start_date', { ascending: false });
+      if (!current()) return;
+      setListError(!!error || !Array.isArray(data));
+      setEvents(error ? [] : (data ?? []) as EventListItem[]);
+    } catch { if (current()) setListError(true); }
+    finally { if (current()) setLoadingList(false); }
+  }, [allowed, identity]);
 
   async function fetchWaTemplates(after?: string) {
     if (!after) setWaLoading(true);
@@ -399,102 +390,23 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
     setForm(f => ({ ...f, whatsapp_image_url: '' }));
   }
 
-  async function fetchAnalytics(eventCode: string) {
-    setLoadingMetrics(true);
-    setMetrics(null);
-    setRepRows([]);
-    setStateRows([]);
-    setDayRows([]);
-
-    const [metricsRes, unassignedRes, repRes, stateRes, dayRes] = await Promise.all([
-      supabase
-        .from('event_metrics_view')
-        .select('total_leads, contacted_leads, converted_leads, lost_leads, invalid_leads, hot_leads, warm_leads, cold_leads')
-        .eq('event_code', eventCode)
-        .maybeSingle(),
-      supabase
-        .from('lead_entries')
-        .select('id', { count: 'exact', head: true })
-        .eq('event_code', eventCode)
-        .or('lead_temperature.is.null,lead_temperature.eq.'),
-      supabase
-        .from('event_sales_performance_view')
-        .select('sales_rep_code, sales_rep_name, total_leads, contacted, converted, lost')
-        .eq('event_code', eventCode)
-        .order('total_leads', { ascending: false }),
-      supabase
-        .from('event_state_distribution_view')
-        .select('state, lead_count')
-        .eq('event_code', eventCode)
-        .order('lead_count', { ascending: false }),
-      supabase
-        .from('event_daily_trend_view')
-        .select('lead_date, lead_count')
-        .eq('event_code', eventCode)
-        .order('lead_date', { ascending: true }),
-    ]);
-
-    if (metricsRes.data) {
-      const r = metricsRes.data;
-      setMetrics({
-        total: Number(r.total_leads),
-        contacted: Number(r.contacted_leads),
-        converted: Number(r.converted_leads),
-        lost: Number(r.lost_leads),
-        invalid: Number(r.invalid_leads),
-        hot: Number(r.hot_leads),
-        warm: Number(r.warm_leads),
-        cold: Number(r.cold_leads),
-        unassigned: unassignedRes.count ?? 0,
-      });
-    }
-
-    setRepRows(
-      (repRes.data ?? []).map(r => ({
-        rep_code: r.sales_rep_code,
-        rep_name: r.sales_rep_name ?? r.sales_rep_code,
-        total: Number(r.total_leads),
-        contacted: Number(r.contacted),
-        converted: Number(r.converted),
-        lost: Number(r.lost),
-      }))
-    );
-
-    setStateRows(() => {
-      const map = new Map<string, number>();
-      for (const r of (stateRes.data ?? [])) {
-        const key = (r.state ?? '').trim() || 'UNASSIGNED';
-        map.set(key, (map.get(key) ?? 0) + Number(r.lead_count));
-      }
-      return [...map.entries()]
-        .map(([state, count]) => ({ state, count }))
-        .sort((a, b) => b.count - a.count);
-    });
-
-    setDayRows(
-      (dayRes.data ?? []).map(r => ({ day: r.lead_date as string, count: Number(r.lead_count) }))
-    );
-
-    setLoadingMetrics(false);
-  }
-
   // ── Effects ────────────────────────────────────────────────────────────────
 
-  useEffect(() => { fetchEvents(activeTab); }, []);
-
   useEffect(() => {
+    detailGate.current.invalidate();
+    selectedRef.current = null;
+    setDetailLoading(false);
+    setDetailError(false);
+    setDetailKey(null);
     fetchEvents(activeTab);
     setSelectedId(null);
     setIsNew(false);
     setForm(EMPTY_FORM);
     setSavedForm(EMPTY_FORM);
     setErrors({});
-    setMetrics(null);
-    setRepRows([]);
-    setStateRows([]);
-    setDayRows([]);
     setMobileShowDetail(false);
-  }, [activeTab]);
+    return () => { listGate.current.invalidate(); detailGate.current.invalidate(); };
+  }, [activeTab, fetchEvents]);
 
   const editMode: EditMode = getEditMode(form.status);
   const isDirty = formChanged(form, savedForm);
@@ -502,45 +414,50 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
   // ── Selection helpers ─────────────────────────────────────────────────────
 
   async function loadEvent(ev: EventListItem | Event) {
+    if (!allowed) return;
+    const ticket = detailGate.current.begin();
+    selectedRef.current = ev.id;
     setSelectedId(ev.id);
+    setDetailKey(null);
+    setDetailLoading(true);
+    setDetailError(false);
     setIsNew(false);
+    setForm(EMPTY_FORM);
+    setSavedForm(EMPTY_FORM);
     setErrors({});
     setMobileShowDetail(true);
-    // Fetch full event record (list view omits description)
-    const { data: full } = await supabase
-      .from('events')
-      .select('id, event_code, name, location, description, start_date, end_date, whatsapp_template_id, whatsapp_template_name, whatsapp_image_url, status, updated_at')
-      .eq('id', ev.id)
-      .maybeSingle();
-    const f = eventToForm((full ?? ev) as Event);
-    setForm(f);
-    setSavedForm(f);
-    fetchAnalytics(ev.event_code);
+    const current = () => detailGate.current.current(ticket) && selectedRef.current === ev.id && liveIdentity.current === identity && isAuthorized();
+    try {
+      const { data: full, error } = await supabase.from('events')
+        .select('id, event_code, name, location, description, start_date, end_date, whatsapp_template_id, whatsapp_template_name, whatsapp_image_url, status, updated_at')
+        .eq('id', ev.id).maybeSingle();
+      if (!current()) return;
+      if (error || !full || full.id !== ev.id) { setDetailError(true); return; }
+      const f = eventToForm(full as Event);
+      setForm(f);
+      setSavedForm(f);
+      setDetailKey(`${identity}|${ev.id}`);
+    } catch { if (current()) setDetailError(true); }
+    finally { if (current()) setDetailLoading(false); }
   }
 
   function startNew() {
+    detailGate.current.invalidate();
+    selectedRef.current = null;
+    setDetailKey(null);
+    setDetailError(false);
+    setDetailLoading(false);
     setSelectedId(null);
     setForm({ ...EMPTY_FORM, status: activeTab === 'DRAFT' ? 'DRAFT' : 'DRAFT' });
     setSavedForm(EMPTY_FORM);
     setIsNew(true);
     setErrors({});
-    setMetrics(null);
-    setRepRows([]);
-    setStateRows([]);
-    setDayRows([]);
     setMobileShowDetail(true);
   }
 
   function guardUnsaved(proceed: () => void, target: 'new' | string) {
     if (isDirty) { setUnsavedTarget(target); return; }
     proceed();
-  }
-
-  function handleUnsavedDiscard() {
-    const target = unsavedTarget;
-    setUnsavedTarget(null);
-    if (target === 'new') { startNew(); return; }
-    if (target) { const ev = events.find(e => e.id === target); if (ev) loadEvent(ev); }
   }
 
   function handleTabChange(tab: EventStatus) {
@@ -657,11 +574,7 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
       setForm(EMPTY_FORM);
       setSavedForm(EMPTY_FORM);
       setIsNew(false);
-      setMetrics(null);
-      setRepRows([]);
-      setStateRows([]);
-      setDayRows([]);
-      await fetchEvents(activeTab);
+              await fetchEvents(activeTab);
     }
     setDeleting(false);
   }
@@ -672,9 +585,6 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
 
   const hasEditor = isNew || selectedId !== null;
   const canDelete = !isNew && (form.status === 'DRAFT' || form.status === 'UPCOMING');
-
-  const maxDay = dayRows.length > 0 ? Math.max(...dayRows.map(d => d.count)) : 1;
-  const maxState = stateRows.length > 0 ? Math.max(...stateRows.map(s => s.count)) : 1;
 
   const modeBanner = editMode === 'readonly'
     ? { icon: Lock, cls: 'bg-stone-50 border-stone-200 text-stone-500', text: `This event is ${form.status.toLowerCase()} — read only.` }
@@ -710,6 +620,7 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
         </div>
         <div className="flex items-center flex-shrink-0 pl-2">
           <button
+            disabled={!allowed}
             onClick={() => guardUnsaved(startNew, 'new')}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-stone-800 hover:bg-stone-700 rounded-lg transition"
           >
@@ -735,10 +646,12 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
             </p>
           </div>
           <div className="flex-1 overflow-y-auto">
-            {loadingList ? (
+            {!allowed ? <p className="p-4 text-xs text-stone-500">Events require an online admin session.</p> : loadingList ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="w-5 h-5 text-stone-300 animate-spin" />
               </div>
+            ) : listError ? (
+              <div role="alert" className="p-4 text-sm text-red-700">Events could not be loaded. <button type="button" onClick={() => fetchEvents(activeTab)} className="underline">Retry</button></div>
             ) : events.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
                 <CalendarDays className="w-8 h-8 text-stone-200 mb-2" />
@@ -806,14 +719,18 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
             </div>
           )}
 
-          {!hasEditor ? (
+          {!allowed ? <p className="p-6 text-sm text-stone-500">Connect and sign in online to view or edit events.</p> : !hasEditor ? (
             <div className="flex flex-col items-center justify-center h-full text-center px-8">
               <CalendarDays className="w-12 h-12 text-stone-200 mb-3" />
               <p className="text-sm font-medium text-stone-400 mb-1">No event selected</p>
               <p className="text-xs text-stone-300">Select an event from the list or create a new one.</p>
             </div>
+          ) : !isNew && detailError ? (
+            <div role="alert" className="p-6 text-sm text-red-700">Event details could not be loaded. <button type="button" className="underline" onClick={() => { const ev = events.find(event => event.id === selectedId); if (ev) loadEvent(ev); }}>Retry</button></div>
+          ) : !isNew && (detailLoading || detailKey !== `${identity}|${selectedId}`) ? (
+            <div role="status" className="p-6 text-sm text-stone-500 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Loading event details…</div>
           ) : (
-            <div className="p-6 max-w-3xl mx-auto flex flex-col gap-5">
+            <div className="p-6 max-w-5xl mx-auto flex flex-col gap-5">
 
               {/* Header */}
               <div className="flex items-center justify-between">
@@ -1071,220 +988,8 @@ export default function EventsPage({ onViewLeads }: EventsPageProps) {
                 </div>
               </SectionCard>
 
-              {/* ── SECTIONS 2-5: ANALYTICS (only when event selected, not new) ── */}
               {!isNew && selectedId && (
-                <>
-                  {loadingMetrics ? (
-                    <div className="flex items-center justify-center py-10">
-                      <Loader2 className="w-5 h-5 text-stone-300 animate-spin" />
-                    </div>
-                  ) : metrics ? (
-                    <>
-                      {/* ── SECTION 2: METRICS ── */}
-                      <SectionCard title="Event Metrics" icon={<BarChart2 className="w-4 h-4" />}>
-                        <div className="grid grid-cols-3 gap-3 mb-5">
-                          {[
-                            { label: 'Total Leads', value: metrics.total, cls: 'bg-stone-50 border-stone-200 text-stone-800' },
-                            { label: 'Contacted', value: metrics.contacted, cls: 'bg-blue-50 border-blue-200 text-blue-800' },
-                            { label: 'Converted', value: metrics.converted, cls: 'bg-green-50 border-green-200 text-green-800' },
-                            { label: 'Lost', value: metrics.lost, cls: 'bg-red-50 border-red-200 text-red-700' },
-                            { label: 'Invalid', value: metrics.invalid, cls: 'bg-orange-50 border-orange-200 text-orange-700' },
-                            { label: 'Contact Rate', value: pct(metrics.contacted, metrics.total), cls: 'bg-sky-50 border-sky-200 text-sky-800' },
-                          ].map(item => (
-                            <div key={item.label} className={`rounded-xl border px-4 py-3 ${item.cls}`}>
-                              <p className="text-[11px] font-medium opacity-70 mb-0.5">{item.label}</p>
-                              <p className="text-2xl font-bold">{item.value}</p>
-                            </div>
-                          ))}
-                        </div>
-
-                        {/* Temperature */}
-                        <div className="border-t border-stone-100 pt-4">
-                          <div className="flex items-center gap-2 mb-3">
-                            <ThermometerSun className="w-3.5 h-3.5 text-stone-400" />
-                            <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Lead Temperature</p>
-                          </div>
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                            {[
-                              { label: 'Hot', value: metrics.hot, bar: 'bg-red-400', text: 'text-red-700', bg: 'bg-red-50 border-red-200' },
-                              { label: 'Warm', value: metrics.warm, bar: 'bg-orange-400', text: 'text-orange-700', bg: 'bg-orange-50 border-orange-200' },
-                              { label: 'Cold', value: metrics.cold, bar: 'bg-sky-400', text: 'text-sky-700', bg: 'bg-sky-50 border-sky-200' },
-                              { label: 'UNASSIGNED', value: metrics.unassigned, bar: 'bg-stone-400', text: 'text-stone-700', bg: 'bg-stone-50 border-stone-200' },
-                            ].map(t => (
-                              <div key={t.label} className={`rounded-xl border px-4 py-3 ${t.bg}`}>
-                                <p className={`text-[11px] font-medium mb-0.5 ${t.text} opacity-80`}>{t.label}</p>
-                                <p className={`text-2xl font-bold ${t.text}`}>{t.value}</p>
-                                <div className="mt-2 h-1.5 bg-white/60 rounded-full overflow-hidden">
-                                  <div
-                                    className={`h-full rounded-full ${t.bar}`}
-                                    style={{ width: pct(t.value, metrics.total) }}
-                                  />
-                                </div>
-                                <p className={`text-[10px] mt-1 ${t.text} opacity-60`}>{pct(t.value, metrics.total)}</p>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </SectionCard>
-
-                      {/* ── SECTION 3: SALES PERFORMANCE ── */}
-                      {repRows.length > 0 && (
-                        <SectionCard title="Sales Performance" icon={<TrendingUp className="w-4 h-4" />}>
-                          <div className="overflow-x-auto -mx-1">
-                            <table className="w-full text-sm">
-                              <thead>
-                                <tr className="border-b border-stone-100">
-                                  <th className="text-left px-2 py-2 text-xs font-semibold text-stone-500">Sales Rep</th>
-                                  <th className="text-right px-2 py-2 text-xs font-semibold text-stone-500">Total</th>
-                                  <th className="text-right px-2 py-2 text-xs font-semibold text-stone-500">Contacted</th>
-                                  <th className="text-right px-2 py-2 text-xs font-semibold text-stone-500">Converted</th>
-                                  <th className="text-right px-2 py-2 text-xs font-semibold text-stone-500">Lost</th>
-                                  <th className="text-right px-2 py-2 text-xs font-semibold text-stone-500">Rate</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-stone-50">
-                                {repRows.map(r => (
-                                  <tr key={r.rep_code} className="hover:bg-stone-50 transition-colors">
-                                    <td className="px-2 py-2.5">
-                                      <p className="font-medium text-stone-800">{r.rep_name}</p>
-                                      <p className="text-[11px] text-stone-400 font-mono">{r.rep_code}</p>
-                                    </td>
-                                    <td className="px-2 py-2.5 text-right font-semibold text-stone-700">{r.total}</td>
-                                    <td className="px-2 py-2.5 text-right text-blue-700">{r.contacted}</td>
-                                    <td className="px-2 py-2.5 text-right text-green-700">{r.converted}</td>
-                                    <td className="px-2 py-2.5 text-right text-red-600">{r.lost}</td>
-                                    <td className="px-2 py-2.5 text-right text-stone-500">{pct(r.contacted, r.total)}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </SectionCard>
-                      )}
-
-                      {/* ── SECTION 4: GEOGRAPHIC INSIGHTS ── */}
-                      {stateRows.length > 0 && (
-                        <SectionCard title="Geographic Insights" icon={<Globe className="w-4 h-4" />}>
-                          <div className="space-y-2">
-                            {stateRows.map(s => (
-                              <div key={s.state} className="flex items-center gap-3">
-                                <p className="text-sm text-stone-700 w-36 flex-shrink-0 truncate">{s.state}</p>
-                                <div className="flex-1 h-2 bg-stone-100 rounded-full overflow-hidden">
-                                  <div
-                                    className="h-full bg-stone-600 rounded-full transition-all"
-                                    style={{ width: `${(s.count / maxState) * 100}%` }}
-                                  />
-                                </div>
-                                <p className="text-sm font-semibold text-stone-700 w-8 text-right">{s.count}</p>
-                              </div>
-                            ))}
-                          </div>
-                        </SectionCard>
-                      )}
-
-                      {/* ── SECTION 5: DAILY TREND ── */}
-                      {dayRows.length > 0 && (
-                        <SectionCard title="Daily Lead Trend" icon={<TrendingUp className="w-4 h-4" />}>
-                          {dayRows.length <= 14 ? (
-                            // Bar chart for short ranges
-                            <div className="pt-2">
-                              {/* Y-axis labels + bars */}
-                              <div className="flex gap-3">
-                                {/* Y-axis */}
-                                <div className="flex flex-col justify-between text-right pb-6" style={{ minWidth: '24px' }}>
-                                  {[maxDay, Math.round(maxDay / 2), 0].map(v => (
-                                    <span key={v} className="text-[10px] text-stone-400 leading-none">{v}</span>
-                                  ))}
-                                </div>
-                                {/* Chart area */}
-                                <div className="flex-1 flex flex-col">
-                                  {/* Gridlines + bars */}
-                                  <div className="relative flex items-end gap-1.5 h-36 border-b border-stone-200">
-                                    {/* Horizontal gridlines */}
-                                    <div className="absolute inset-0 flex flex-col justify-between pointer-events-none pb-0">
-                                      {[0, 1, 2].map(i => (
-                                        <div key={i} className={`w-full border-t ${i === 2 ? 'border-stone-200' : 'border-stone-100 border-dashed'}`} />
-                                      ))}
-                                    </div>
-                                    {/* Bars */}
-                                    {dayRows.map(d => {
-                                      const heightPct = Math.max(3, (d.count / maxDay) * 100);
-                                      return (
-                                        <div key={d.day} className="flex-1 flex items-end group relative h-full">
-                                          {/* Tooltip */}
-                                          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
-                                            <div className="bg-stone-800 text-white text-[10px] font-semibold px-2 py-1 rounded-md whitespace-nowrap shadow-lg">
-                                              {d.count} lead{d.count !== 1 ? 's' : ''}
-                                            </div>
-                                            <div className="w-1.5 h-1.5 bg-stone-800 rotate-45 mx-auto -mt-1" />
-                                          </div>
-                                          <div
-                                            className="w-full rounded-t-md transition-all duration-200 cursor-default"
-                                            style={{
-                                              height: `${heightPct}%`,
-                                              background: `linear-gradient(to top, #292524, #57534e)`,
-                                            }}
-                                          />
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                  {/* X-axis labels */}
-                                  <div className="flex gap-1.5 mt-2">
-                                    {dayRows.map(d => (
-                                      <div key={d.day} className="flex-1 text-center">
-                                        <span className="text-[10px] text-stone-400 leading-none">{d.day.slice(5)}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              </div>
-                              {/* Summary row */}
-                              <div className="mt-4 pt-3 border-t border-stone-100 flex items-center justify-between text-xs text-stone-400">
-                                <span>{dayRows.length} day{dayRows.length !== 1 ? 's' : ''}</span>
-                                <span className="font-medium text-stone-600">{dayRows.reduce((s, d) => s + d.count, 0)} total leads</span>
-                              </div>
-                            </div>
-                          ) : (
-                            // Table for long ranges
-                            <div className="max-h-56 overflow-y-auto">
-                              <table className="w-full text-sm">
-                                <thead className="sticky top-0 bg-white">
-                                  <tr className="border-b border-stone-100">
-                                    <th className="text-left px-2 py-1.5 text-xs font-semibold text-stone-500">Date</th>
-                                    <th className="text-right px-2 py-1.5 text-xs font-semibold text-stone-500">Leads</th>
-                                    <th className="px-2 py-1.5 w-32"></th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-stone-50">
-                                  {dayRows.map(d => (
-                                    <tr key={d.day} className="hover:bg-stone-50">
-                                      <td className="px-2 py-2 text-stone-600">{fmt(d.day)}</td>
-                                      <td className="px-2 py-2 text-right font-semibold text-stone-800">{d.count}</td>
-                                      <td className="px-2 py-2">
-                                        <div className="h-1.5 bg-stone-100 rounded-full overflow-hidden">
-                                          <div
-                                            className="h-full bg-stone-600 rounded-full"
-                                            style={{ width: `${(d.count / maxDay) * 100}%` }}
-                                          />
-                                        </div>
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </SectionCard>
-                      )}
-                    </>
-                  ) : (
-                    <div className="bg-white rounded-xl border border-stone-100 px-5 py-8 text-center">
-                      <Users className="w-8 h-8 text-stone-200 mx-auto mb-2" />
-                      <p className="text-sm text-stone-400">No leads captured for this event yet.</p>
-                    </div>
-                  )}
-                </>
+                <EventOverview eventId={selectedId} revision={JSON.stringify([savedForm.whatsapp_template_id, savedForm.whatsapp_template_name])} onViewLeads={onViewLeads} />
               )}
 
               {/* ── SECTION 6: ACTIONS ── */}
