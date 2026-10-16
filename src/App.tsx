@@ -1,4 +1,6 @@
 import { connectivityStore } from './connectivity/connectivityStore';
+import { useOnlineStatus } from './capture/useOnlineStatus';
+import OnlinePageUnavailable from './OnlinePageUnavailable';
 import { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './AuthContext';
 import { useAlpeScheduler } from './alpe/useAlpeScheduler';
@@ -10,7 +12,6 @@ import LeadDetailPage from './LeadDetailPage';
 import DashboardPage from './DashboardPage';
 import type { DashboardFilter } from './DashboardPage';
 import EventsPage from './EventsPage';
-import SystemNotificationsPage from './SystemNotificationsPage';
 import FollowUpCompleteModal from './FollowUpCompleteModal';
 import CaptureLeadPage from './CaptureLeadPage';
 import LeadQueuePage from './LeadQueuePage';
@@ -29,7 +30,7 @@ import {
   MoreHorizontal, X, User, ChevronDown, Layers, Users, MessageCircle, Package,
 } from 'lucide-react';
 
-type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'notifications' | 'salesreps' | 'whatsapp_assets' | 'followups' | 'account';
+type Tab = 'dashboard' | 'leads' | 'capture' | 'queue' | 'conversations' | 'events' | 'salesreps' | 'whatsapp_assets' | 'followups' | 'account';
 
 // ─── Mobile bottom nav tabs ───────────────────────────────────────────────────
 
@@ -140,7 +141,7 @@ interface MobileNavProps {
 
 function MobileBottomNav({ tab, isAdmin, onTabChange, onMorePress }: MobileNavProps) {
   const visibleTabs = MOBILE_TABS.filter(t => !t.adminOnly || isAdmin);
-  const moreActive  = tab === 'notifications' || tab === 'salesreps' || tab === 'whatsapp_assets' || tab === 'followups' || tab === 'account';
+  const moreActive  = tab === 'salesreps' || tab === 'whatsapp_assets' || tab === 'followups' || tab === 'account';
 
   return (
     <nav
@@ -244,7 +245,6 @@ function MobileMoreDrawer({
     { id: 'account', label: 'My Account', icon: <User className="w-5 h-5" /> },
     ...(isAdmin
       ? [
-          { id: 'notifications' as Tab, label: 'Notifications', icon: <Bell className="w-5 h-5" /> },
           { id: 'salesreps' as Tab,      label: 'Sales Reps',     icon: <Users className="w-5 h-5" /> },
           { id: 'whatsapp_assets' as Tab, label: 'WhatsApp Assets', icon: <Package className="w-5 h-5" /> },
         ]
@@ -313,6 +313,8 @@ function MobileMoreDrawer({
 
 function Layout() {
   const { user, logout, authMode } = useAuth();
+  const online = useOnlineStatus();
+  const onlinePagesAvailable = online && authMode === 'online';
   useAlpeScheduler(user?.authUserId, authMode);
 
   // Flush the offline pending_ops queue once when authoritative auth succeeds.
@@ -335,7 +337,7 @@ function Layout() {
   const initialFollowUp = params.get('followup');
 
   const [tab,                setTab]                = useState<Tab>(() => {
-    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'notifications', 'salesreps', 'whatsapp_assets', 'followups', 'account'];
+    const adminTabs: Tab[] = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'events', 'salesreps', 'whatsapp_assets', 'followups', 'account'];
     const repTabs: Tab[]   = ['dashboard', 'leads', 'capture', 'queue', 'conversations', 'followups', 'account'];
     const allowed = isAdmin ? adminTabs : repTabs;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('activeTab') as Tab | null : null;
@@ -407,6 +409,7 @@ function Layout() {
     setTab(t);
     setSelectedLeadId(null);
     setSelectedConversationId(null);
+    setFollowUpModalId(null);
     setMoreDrawerOpen(false);
     if (t !== 'capture') setResumeDraftId(null);
     localStorage.setItem('activeTab', t);
@@ -434,14 +437,15 @@ function Layout() {
     window.history.replaceState({}, '', url.toString());
   }
 
-  function handleViewLeads(eventCode: string) {
+  function handleViewLeads(eventCode: string, filters?: LeadsInitialFilters) {
     setLeadsEventFilter(eventCode);
-    setLeadsInitialFilters(undefined);
+    setLeadsInitialFilters(filters);
     setTab('leads');
     localStorage.setItem('activeTab', 'leads');
     setSelectedLeadId(null);
     const url = new URL(window.location.href);
-    url.searchParams.delete('lead');
+    url.search = '';
+    setSelectedConversationId(null);
     window.history.pushState({}, '', url.toString());
   }
 
@@ -599,15 +603,6 @@ function Layout() {
             )}
             {isAdmin && (
               <button
-                onClick={() => handleTabChange('notifications')}
-                className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
-                  ${tab === 'notifications' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
-              >
-                <Bell className="w-4 h-4" /> Notifications
-              </button>
-            )}
-            {isAdmin && (
-              <button
                 onClick={() => handleTabChange('salesreps')}
                 className={`flex items-center gap-1.5 px-3 text-sm font-medium border-b-2 transition-colors
                   ${tab === 'salesreps' ? 'border-stone-800 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-700'}`}
@@ -662,7 +657,9 @@ function Layout() {
 
       {/* ── Page content ── */}
       <main className="pb-mobile-nav lg:pb-0">
-        {tab === 'account' ? (
+        {!onlinePagesAvailable && (selectedLeadId || (tab !== 'capture' && tab !== 'queue')) ? (
+          <OnlinePageUnavailable online={online} onCapture={() => handleTabChange('capture')} onQueue={() => handleTabChange('queue')} />
+        ) : tab === 'account' ? (
           <MyAccountPage onBack={() => handleTabChange(isAdmin ? 'dashboard' : 'capture')} />
         ) : (
           <>
@@ -672,7 +669,6 @@ function Layout() {
             {tab === 'events' && isAdmin && !selectedLeadId && (
               <EventsPage onViewLeads={handleViewLeads} />
             )}
-            {tab === 'notifications' && isAdmin && !selectedLeadId && <SystemNotificationsPage />}
             {tab === 'salesreps' && isAdmin && !selectedLeadId && <SalesRepsPage />}
             {tab === 'whatsapp_assets' && isAdmin && !selectedLeadId && <WhatsAppAssetsPage />}
             {tab === 'capture' && !selectedLeadId && <CaptureLeadPage key={resumeDraftId ?? 'capture'} resumeDraftId={resumeDraftId} />}
@@ -743,11 +739,17 @@ function Layout() {
         />
       )}
 
-      {followUpModalId && (
+      {followUpModalId && onlinePagesAvailable && (
         <FollowUpCompleteModal
           followUpId={followUpModalId}
           onClose={handleCloseFollowUpModal}
         />
+      )}
+      {followUpModalId && !onlinePagesAvailable && (
+        <div role="dialog" aria-modal="true" aria-label="Follow-up unavailable" className="fixed inset-0 z-50 overflow-y-auto bg-stone-50">
+          <button type="button" onClick={handleCloseFollowUpModal} className="m-4 rounded-lg border border-stone-300 bg-white px-4 py-2 text-sm text-stone-700">Close</button>
+          <OnlinePageUnavailable online={online} onCapture={() => handleTabChange('capture')} onQueue={() => handleTabChange('queue')} />
+        </div>
       )}
     </div>
   );

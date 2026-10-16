@@ -245,6 +245,9 @@ function pushParams(params: URLSearchParams) {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export interface LeadsInitialFilters {
+  state?: string;
+  country?: string;
+  repCode?: string;
   dateFrom?: string;
   dateTo?: string;
   whatsappStatuses?: string[];
@@ -283,12 +286,14 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   const [dateFilter, setDateFilter] = useState<DateFilter>(initialFilters?.dateFilter ?? init.dateFilter);
   // initialEventCode (from parent Dashboard click) wins over URL param only on first load
   const [eventFilter, setEventFilter] = useState(initialEventCode ?? init.eventFilter);
-  const [repFilter, setRepFilter] = useState(init.repFilter);
+  const [repFilter, setRepFilter] = useState(initialFilters?.repCode ?? init.repFilter);
   const [statusFilter, setStatusFilter] = useState(initialFilters?.leadStatus ?? init.adv.leadStatus);
 
   // Advanced filters — system_status and temperature come in via initialFilters
   const initAdv: AdvancedFilters = {
     ...init.adv,
+    state: initialFilters?.state ?? init.adv.state,
+    country: initialFilters?.country ?? init.adv.country,
     dateFrom: initialFilters?.dateFrom ?? init.adv.dateFrom,
     dateTo: initialFilters?.dateTo ?? init.adv.dateTo,
     whatsappStatuses: normalizeWhatsAppStatuses(initialFilters?.whatsappStatuses ?? init.adv.whatsappStatuses),
@@ -405,7 +410,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
 
     if (user.role === 'sales_rep') {
       query = query.eq('sales_rep_code', user.rep_code);
-    } else if (repFilt) {
+    } else if (repFilt && repFilt !== '__unassigned__') {
       query = query.eq('sales_rep_code', repFilt);
     }
     if (term.trim()) {
@@ -438,7 +443,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (adv.country && adv.country !== '__unassigned__') query = query.eq('country', adv.country);
     if (adv.application) query = query.ilike('application', `%${adv.application}%`);
     if (adv.systemStatus) query = query.eq('system_status', adv.systemStatus);
-    const combinedOr = buildLeadFilterOr(adv);
+    const combinedOr = buildLeadFilterOr({ ...adv, repFilter: user.role === 'admin' ? repFilt : '' });
     if (combinedOr) query = query.or(combinedOr);
     const effectiveStatus = statusFilt || adv.leadStatus;
     if (effectiveStatus) query = query.eq('lead_status', effectiveStatus);
@@ -497,6 +502,9 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
       .order('created_at', { ascending: false });
 
     if (user.role === 'sales_rep') query = query.eq('sales_rep_code', user.rep_code);
+    else if (repFilter && repFilter !== '__unassigned__') query = query.eq('sales_rep_code', repFilter);
+    const effectiveStatus = statusFilter || applied.leadStatus;
+    if (effectiveStatus) query = query.eq('lead_status', effectiveStatus);
     if (searchTerm.trim()) query = (query as any).ilike('search_text', `%${searchTerm.trim()}%`);
 
     const quickDateStart = getDateFilterStart(dateFilter);
@@ -508,7 +516,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (applied.country && applied.country !== '__unassigned__') query = query.eq('country', applied.country);
     if (applied.application) query = query.ilike('application', `%${applied.application}%`);
     if (applied.systemStatus) query = query.eq('system_status', applied.systemStatus);
-    const combinedOr = buildLeadFilterOr(applied);
+    const combinedOr = buildLeadFilterOr({ ...applied, repFilter: user.role === 'admin' ? repFilter : '' });
     if (combinedOr) query = query.or(combinedOr);
     const dateStart = localDateBoundary(applied.dateFrom);
     const before = localDateBoundary(applied.dateTo, true);
@@ -535,6 +543,8 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (applied.dateFrom) filterLines.push(`Date From: ${applied.dateFrom}`);
     if (applied.dateTo) filterLines.push(`Date To: ${applied.dateTo}`);
     if (user.role === 'sales_rep') filterLines.push(`Sales Rep: ${user.rep_code}`);
+    else if (repFilter) filterLines.push(`Sales Rep: ${repFilter === '__unassigned__' ? 'Unassigned' : repFilter}`);
+    if (effectiveStatus) filterLines.push(`Lead Status: ${effectiveStatus}`);
 
     const now = nowFormatted();
     const commentLines = [
@@ -687,7 +697,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
   const selectedEvent = events.find(e => e.event_code === eventFilter);
   const eventButtonLabel = eventFilter ? (selectedEvent?.name ?? eventFilter) : 'Event';
   const selectedRep = salesReps.find(r => r.rep_code === repFilter);
-  const repButtonLabel = repFilter ? (selectedRep?.name ?? repFilter) : 'Sales Rep';
+  const repButtonLabel = repFilter === '__unassigned__' ? 'Unassigned rep' : repFilter ? (selectedRep?.name ?? repFilter) : 'Sales Rep';
 
   function getPageNumbers(): (number | '...')[] {
     if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i);
