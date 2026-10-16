@@ -127,13 +127,12 @@ export type LeadTemperature = 'Hot' | 'Warm' | 'Cold';
 export type LeadType        = 'NEW' | 'EXISTING';
 
 export const APPLICATION_OPTIONS = [
-  'Fine Fragrances',
-  'Air Care',
-  'Incense Sticks',
-  'Cosmetics',
-  'Fabric Care',
-  'Home Care',
-  'Candle',
+  'Leads Inn',
+  'Founders Suite',
+  'Custom Workflow',
+  'Custom Agent',
+  'Website + Backend',
+  'Website (Frontend only)',
 ] as const;
 
 export type ApplicationOption = typeof APPLICATION_OPTIONS[number];

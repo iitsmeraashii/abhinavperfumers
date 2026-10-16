@@ -552,7 +552,6 @@ function ApplicationChips({
   // "Other" open state is purely UI — never persisted in the application array.
   // On mount, Other is open only if an existing custom value is present.
   const [otherOpen, setOtherOpen] = useState(customValues.length > 0);
-  const customText = customValues[0] ?? '';
 
   function emit(nextPredefined: string[], nextCustom: string[]) {
     onChange([...nextPredefined, ...nextCustom]);
@@ -567,25 +566,20 @@ function ApplicationChips({
   }
 
   function toggleOther() {
-    if (otherOpen) {
-      setOtherOpen(false);
-      emit(predefined, []);
-    } else {
-      setOtherOpen(true);
-    }
+    // Closing the editor must not erase legacy/custom selections.
+    setOtherOpen(!otherOpen);
   }
 
-  function handleCustomText(text: string) {
-    if (text.trim()) {
-      emit(predefined, [text.trim()]);
-    } else {
-      emit(predefined, []);
-    }
+  function handleCustomText(index: number, text: string) {
+    const next = [...customValues];
+    if (text.trim()) next[index] = text.trim();
+    else next.splice(index, 1);
+    emit(predefined, next);
   }
 
   return (
     <div>
-      <FieldLabel label="Application" optional />
+      <FieldLabel label="Product / Service Interest" optional />
       <div className="flex flex-wrap gap-2">
         {APPLICATION_OPTIONS.map(opt => {
           const active = predefined.includes(opt);
@@ -613,18 +607,23 @@ function ApplicationChips({
               ? 'bg-stone-200 text-stone-700 border-stone-400 shadow-sm'
               : 'bg-transparent text-stone-500 border-stone-300 hover:bg-stone-50'}`}
         >
-          Other
+          Others
         </button>
       </div>
-      {otherOpen && (
-        <input
+      {(customValues.length ? customValues : otherOpen ? [''] : []).map((value, index) => (
+        <div key={index} className="flex items-center gap-2 mt-2">
+          <input
           type="text"
           inputMode="text"
-          value={customText}
-          onChange={e => handleCustomText(e.target.value)}
-          className={`${inputCls()} mt-2`}
-        />
-      )}
+          aria-label={`Custom interest ${index + 1}`}
+          value={value}
+          onChange={e => handleCustomText(index, e.target.value)}
+          className={inputCls()}
+          />
+          <button type="button" aria-label={`Remove ${value}`} onClick={() => handleCustomText(index, '')} className="p-2 text-stone-500 hover:text-red-600"><X className="w-4 h-4" /></button>
+        </div>
+      ))}
+
     </div>
   );
 }
@@ -661,12 +660,12 @@ function PriceRangeInput({
 
   return (
     <div>
-      <FieldLabel label="Price Range" optional />
+      <FieldLabel label="Budget / Price Range" optional />
       <input
         ref={inputRef}
         type="text"
         inputMode="text"
-        placeholder="e.g. 500 - 1200 per kg"
+        placeholder="e.g. USD 500 - 1200"
         value={value}
         onChange={e => onChange(e.target.value)}
         className={inputCls()}
@@ -1421,24 +1420,24 @@ export function ManualEntryForm({ priceRangeQuickValues, previousReps, session, 
           />
 
           <TagArrayInput
-            label="Target Market"
+            label="Target Segment"
             values={targetMarket}
             onChange={v => handlePatchDraft({ targetMarket: v })}
-            placeholder="e.g. Luxury, Mass Market…"
+            placeholder="e.g. Startups, Small Businesses, Enterprise…"
           />
 
           <TagArrayInput
             label="Certification"
             values={certification}
             onChange={v => handlePatchDraft({ certification: v })}
-            placeholder="e.g. IFRA, ISO 9001…"
+            placeholder="e.g. ISO 9001, SOC 2…"
           />
 
           <TagArrayInput
-            label="Benchmark"
+            label="Reference / Competitor"
             values={benchmark}
             onChange={v => handlePatchDraft({ benchmark: v })}
-            placeholder="e.g. Competitor product name…"
+            placeholder="e.g. Reference website or competing product…"
           />
 
           {/* Event override — defaults to My Account event */}

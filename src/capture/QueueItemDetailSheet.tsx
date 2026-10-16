@@ -556,10 +556,10 @@ export function QueueItemDetailSheet({ item, ownerId, onClose }: Props) {
             <h3 className="text-xs font-bold text-stone-500 uppercase tracking-wide mb-2">Lead Details</h3>
             <FieldRow icon={<Tag className="w-4 h-4" />} label="Lead Type" value={dd.leadType === 'NEW' ? 'New Lead' : dd.leadType === 'EXISTING' ? 'Existing Lead' : null} />
             <FieldRow icon={<User className="w-4 h-4" />} label="Previous Rep Code" value={dd.previousRepCode} />
-            <ArrayFieldRow icon={<Target className="w-4 h-4" />} label="Application" values={dd.application as string[] | undefined} />
-            <FieldRow icon={<DollarSign className="w-4 h-4" />} label="Price Range" value={dd.priceRange} />
-            <ArrayFieldRow icon={<Award className="w-4 h-4" />} label="Benchmark" values={dd.benchmark} />
-            <ArrayFieldRow icon={<Globe className="w-4 h-4" />} label="Target Market" values={dd.targetMarket} />
+            <ArrayFieldRow icon={<Target className="w-4 h-4" />} label="Product / Service Interest" values={dd.application as string[] | undefined} />
+            <FieldRow icon={<DollarSign className="w-4 h-4" />} label="Budget / Price Range" value={dd.priceRange} />
+            <ArrayFieldRow icon={<Award className="w-4 h-4" />} label="Reference / Competitor" values={dd.benchmark} />
+            <ArrayFieldRow icon={<Globe className="w-4 h-4" />} label="Target Segment" values={dd.targetMarket} />
             <ArrayFieldRow icon={<Award className="w-4 h-4" />} label="Certification" values={dd.certification} />
             <ArrayFieldRow icon={<Tag className="w-4 h-4" />} label="Quick Keywords" values={dd.quickKeywords} />
           </div>

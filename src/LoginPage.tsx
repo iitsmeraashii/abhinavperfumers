@@ -1,3 +1,4 @@
+import BrandLogo from './BrandLogo';
 import { useState, FormEvent } from 'react';
 import { useAuth } from './AuthContext';
 import { KeyRound, User, Eye, EyeOff, Loader2 } from 'lucide-react';
@@ -24,13 +25,10 @@ export default function LoginPage() {
       <div className="w-full max-w-md">
         {/* Logo / Brand */}
         <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-amber-700 shadow-lg mb-4">
-            <KeyRound className="w-8 h-8 text-amber-50" />
-          </div>
           <h1 className="text-2xl font-semibold text-stone-800 tracking-tight">
-            {import.meta.env.VITE_APP_NAME || 'Abhinav Perfumers'}
+            <BrandLogo large />
           </h1>
-          <p className="text-stone-500 text-sm mt-1">Sales Representative Portal</p>
+          <p className="text-stone-500 text-sm mt-1">Lead & Relationship Portal</p>
         </div>
 
         {/* Card */}

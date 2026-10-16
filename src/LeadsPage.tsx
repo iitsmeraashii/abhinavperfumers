@@ -539,7 +539,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     if (applied.temperature) filterLines.push(`Temperature: ${applied.temperature === '__unassigned__' ? 'UNASSIGNED' : applied.temperature}`);
     if (applied.state) filterLines.push(`State: ${applied.state === '__unassigned__' ? 'UNASSIGNED' : applied.state}`);
     if (applied.country) filterLines.push(`Country: ${applied.country === '__unassigned__' ? 'UNASSIGNED' : applied.country}`);
-    if (applied.application) filterLines.push(`Application: ${applied.application}`);
+    if (applied.application) filterLines.push(`Product / Service Interest: ${applied.application}`);
     if (applied.dateFrom) filterLines.push(`Date From: ${applied.dateFrom}`);
     if (applied.dateTo) filterLines.push(`Date To: ${applied.dateTo}`);
     if (user.role === 'sales_rep') filterLines.push(`Sales Rep: ${user.rep_code}`);
@@ -663,7 +663,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
     applied.temperature ? { label: `Temp: ${applied.temperature === '__unassigned__' ? 'UNASSIGNED' : applied.temperature}`, key: 'temperature' } : null,
     applied.state ? { label: `State: ${applied.state === '__unassigned__' ? 'UNASSIGNED' : applied.state}`, key: 'state' } : null,
     applied.country ? { label: `Country: ${applied.country === '__unassigned__' ? 'UNASSIGNED' : applied.country}`, key: 'country' } : null,
-    applied.application ? { label: `App: ${applied.application}`, key: 'application' } : null,
+    applied.application ? { label: `Interest: ${applied.application}`, key: 'application' } : null,
     applied.whatsappStatuses.length ? { label: `WhatsApp: ${WHATSAPP_STATUS_OPTIONS.filter(option => applied.whatsappStatuses.includes(option.value)).map(option => option.label).join(', ')}`, key: 'whatsappStatuses' } : null,
     applied.systemStatus ? { label: 'Invalid leads only', key: 'systemStatus' } : null,
     applied.dateFrom ? { label: `From: ${applied.dateFrom}`, key: 'dateFrom' } : null,
@@ -1248,7 +1248,7 @@ export default function LeadsPage({ onSelectLead, initialEventCode, initialFilte
               />
 
               <SelectField
-                label="Application"
+                label="Product / Service Interest"
                 value={draft.application}
                 onChange={v => patchDraft('application', v)}
                 options={applicationOptions.map(a => ({ label: a, value: a }))}

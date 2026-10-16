@@ -1673,27 +1673,27 @@ export default function LeadDetailPage({ leadId, onBack, onOpenConversation }: P
           <Card title="Business Details" icon={<Briefcase className="w-4 h-4" />}>
             {editMode && draft ? (
               <>
-                <EditRow icon={<Tag className="w-3.5 h-3.5" />} label="Application" value={draft.application}
+                <EditRow icon={<Tag className="w-3.5 h-3.5" />} label="Product / Service Interest" value={draft.application}
                   onChange={v => patchDraft('application', v)} />
-                <EditRow icon={<BarChart2 className="w-3.5 h-3.5" />} label="Price Range" value={draft.price_range}
+                <EditRow icon={<BarChart2 className="w-3.5 h-3.5" />} label="Budget / Price Range" value={draft.price_range}
                   onChange={v => patchDraft('price_range', v)} />
-                <TagEditRow icon={<Building2 className="w-3.5 h-3.5" />} label="Target Market"
+                <TagEditRow icon={<Building2 className="w-3.5 h-3.5" />} label="Target Segment"
                   value={draft.target_market} onChange={v => patchDraft('target_market', v)}
-                  placeholder="e.g. Luxury, Mass Market…" />
+                  placeholder="e.g. Startups, Small Businesses, Enterprise…" />
                 <TagEditRow icon={<Award className="w-3.5 h-3.5" />} label="Certification"
                   value={draft.certification} onChange={v => patchDraft('certification', v)}
-                  placeholder="e.g. IFRA, ISO 9001…" />
-                <TagEditRow icon={<BarChart2 className="w-3.5 h-3.5" />} label="Benchmark"
+                  placeholder="e.g. ISO 9001, SOC 2…" />
+                <TagEditRow icon={<BarChart2 className="w-3.5 h-3.5" />} label="Reference / Competitor"
                   value={draft.benchmark} onChange={v => patchDraft('benchmark', v)}
-                  placeholder="e.g. Competitor product name…" />
+                  placeholder="e.g. Reference website or competing product…" />
               </>
             ) : (
               <>
-                <Row icon={<Tag className="w-3.5 h-3.5" />} label="Application" value={val(lead.application)} />
-                <Row icon={<BarChart2 className="w-3.5 h-3.5" />} label="Price Range" value={val(lead.price_range)} />
-                <TagRow icon={<Building2 className="w-3.5 h-3.5" />} label="Target Market" values={parseTagString(lead.target_market)} />
+                <Row icon={<Tag className="w-3.5 h-3.5" />} label="Product / Service Interest" value={val(lead.application)} />
+                <Row icon={<BarChart2 className="w-3.5 h-3.5" />} label="Budget / Price Range" value={val(lead.price_range)} />
+                <TagRow icon={<Building2 className="w-3.5 h-3.5" />} label="Target Segment" values={parseTagString(lead.target_market)} />
                 <TagRow icon={<Award className="w-3.5 h-3.5" />} label="Certification" values={parseTagString(lead.certification)} />
-                <TagRow icon={<BarChart2 className="w-3.5 h-3.5" />} label="Benchmark" values={parseTagString(lead.benchmark)} />
+                <TagRow icon={<BarChart2 className="w-3.5 h-3.5" />} label="Reference / Competitor" values={parseTagString(lead.benchmark)} />
               </>
             )}
           </Card>

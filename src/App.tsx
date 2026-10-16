@@ -1,3 +1,4 @@
+import BrandLogo from './BrandLogo';
 import { connectivityStore } from './connectivity/connectivityStore';
 import { useOnlineStatus } from './capture/useOnlineStatus';
 import OnlinePageUnavailable from './OnlinePageUnavailable';
@@ -545,9 +546,9 @@ function Layout() {
         <div className="flex items-stretch gap-6">
           <div className="flex flex-col justify-center py-3 pr-4 border-r border-stone-100">
             <h1 className="text-lg font-semibold text-stone-800 leading-tight">
-              {import.meta.env.VITE_APP_NAME || 'Abhinav Perfumers'}
+              <BrandLogo />
             </h1>
-            <p className="text-xs text-stone-500">Sales Portal</p>
+            <p className="text-xs text-stone-500">Lead & Relationship Portal</p>
           </div>
           <nav className="flex items-stretch gap-1">
             <button
@@ -641,9 +642,9 @@ function Layout() {
       >
         <div>
           <h1 className="text-base font-semibold text-stone-800 leading-tight">
-            {import.meta.env.VITE_APP_NAME || 'Abhinav Perfumers'}
+            <BrandLogo />
           </h1>
-          <p className="text-[11px] text-stone-400 leading-tight">Sales Portal</p>
+          <p className="text-[11px] text-stone-400 leading-tight">Lead & Relationship Portal</p>
         </div>
         {/* Avatar taps open the More drawer */}
         <button
